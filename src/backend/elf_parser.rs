@@ -1,0 +1,653 @@
+//! ELF/AXF Symbol Parser with DWARF Debug Info and C++ Demangling
+//!
+//! This module provides functionality to parse ELF and AXF (ARM Executable Format)
+//! files to extract variable symbols with their addresses, types, and structure information.
+//! It supports:
+//! - Symbol extraction from symbol tables
+//! - DWARF debug info parsing for type information
+//! - C++ and Rust symbol demangling
+//! - Struct/class member parsing
+//! - Enum parsing
+//! - Full type reference resolution (pointers, arrays, typedefs, etc.)
+
+use super::dwarf_parser::DwarfParser;
+use super::type_table::{MemberDef, SharedTypeTable, TypeHandle, TypeId, TypeTable};
+use crate::error::{DataVisError, Result};
+use crate::types::{Variable, VariableType};
+use cpp_demangle::Symbol as CppSymbol;
+use object::{Object, ObjectSection, ObjectSymbol, SymbolKind};
+use rustc_demangle::demangle as rust_demangle;
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use std::sync::Arc;
+
+/// Information about a symbol extracted from an ELF file
+#[derive(Debug, Clone)]
+pub struct SymbolInfo {
+    /// Original (mangled) symbol name
+    pub mangled_name: String,
+    /// Demangled symbol name (if applicable)
+    pub demangled_name: String,
+    /// Short display name (without full namespace for C++)
+    pub display_name: String,
+    /// Memory address
+    pub address: u64,
+    /// Size in bytes
+    pub size: u64,
+    /// Symbol type
+    pub symbol_type: SymbolType,
+    /// Section name where the symbol resides
+    pub section: String,
+    /// Whether this is a global symbol
+    pub is_global: bool,
+    /// Type ID referencing the type table (if available)
+    pub type_id: Option<TypeId>,
+}
+
+impl SymbolInfo {
+    /// Convert to a Variable with inferred type based on size and DWARF info
+    pub fn to_variable(&self) -> Variable {
+        let var_type = self.infer_variable_type();
+        Variable::new(&self.display_name, self.address, var_type)
+    }
+
+    /// Infer variable type from symbol size (type table version available via ElfInfo)
+    pub fn infer_variable_type(&self) -> VariableType {
+        // Fall back to size-based inference
+        // For type-aware inference, use ElfInfo::infer_variable_type_for_symbol
+        match self.size {
+            1 => VariableType::U8,
+            2 => VariableType::U16,
+            4 => VariableType::U32,
+            8 => VariableType::U64,
+            _ => VariableType::Raw(self.size as usize),
+        }
+    }
+
+    /// Get the best name to display
+    pub fn name(&self) -> &str {
+        &self.display_name
+    }
+
+    /// Check if this symbol matches a search query
+    pub fn matches(&self, query: &str) -> bool {
+        let query_lower = query.to_lowercase();
+        self.display_name.to_lowercase().contains(&query_lower)
+            || self.demangled_name.to_lowercase().contains(&query_lower)
+            || self.mangled_name.to_lowercase().contains(&query_lower)
+    }
+
+    /// Check if this symbol is a complex type (requires type table)
+    /// Use ElfInfo::is_symbol_complex for type-aware check
+    pub fn is_complex(&self) -> bool {
+        // Without type table access, use size heuristic
+        self.size > 8
+    }
+
+    /// Get a TypeHandle for this symbol's type (requires shared type table)
+    pub fn type_handle(&self, table: &SharedTypeTable) -> Option<TypeHandle> {
+        self.type_id.map(|id| TypeHandle::new(table.clone(), id))
+    }
+}
+
+/// Type of symbol
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolType {
+    /// Data object (variable)
+    Variable,
+    /// Function
+    Function,
+    /// Section
+    Section,
+    /// File
+    File,
+    /// Unknown or other
+    Other,
+}
+
+impl std::fmt::Display for SymbolType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SymbolType::Variable => write!(f, "Variable"),
+            SymbolType::Function => write!(f, "Function"),
+            SymbolType::Section => write!(f, "Section"),
+            SymbolType::File => write!(f, "File"),
+            SymbolType::Other => write!(f, "Other"),
+        }
+    }
+}
+
+/// Parsed ELF file information
+#[derive(Debug, Clone)]
+pub struct ElfInfo {
+    /// Path to the ELF file
+    pub path: String,
+    /// Entry point address
+    pub entry_point: u64,
+    /// Whether this is a 64-bit ELF
+    pub is_64bit: bool,
+    /// Whether this is little-endian
+    pub is_little_endian: bool,
+    /// Machine type (e.g., ARM, x86)
+    pub machine: String,
+    /// All symbols found
+    pub symbols: Vec<SymbolInfo>,
+    /// Symbols indexed by name
+    symbols_by_name: HashMap<String, usize>,
+    /// Symbols indexed by address
+    symbols_by_address: HashMap<u64, Vec<usize>>,
+    /// Global type table from DWARF (wrapped in Arc for sharing)
+    type_table: SharedTypeTable,
+}
+
+impl ElfInfo {
+    /// Create a new empty ElfInfo
+    fn new(path: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            entry_point: 0,
+            is_64bit: false,
+            is_little_endian: true,
+            machine: String::new(),
+            symbols: Vec::new(),
+            symbols_by_name: HashMap::new(),
+            symbols_by_address: HashMap::new(),
+            type_table: Arc::new(TypeTable::new()),
+        }
+    }
+
+    /// Set the type table (used during parsing)
+    fn set_type_table(&mut self, table: TypeTable) {
+        self.type_table = Arc::new(table);
+    }
+
+    /// Get a reference to the shared type table
+    pub fn type_table(&self) -> &SharedTypeTable {
+        &self.type_table
+    }
+
+    /// Add a symbol to the index
+    fn add_symbol(&mut self, symbol: SymbolInfo) {
+        let index = self.symbols.len();
+
+        // Index by display name
+        self.symbols_by_name
+            .insert(symbol.display_name.clone(), index);
+
+        // Also index by mangled name if different
+        if symbol.mangled_name != symbol.display_name {
+            self.symbols_by_name
+                .insert(symbol.mangled_name.clone(), index);
+        }
+
+        // Index by address
+        self.symbols_by_address
+            .entry(symbol.address)
+            .or_default()
+            .push(index);
+
+        self.symbols.push(symbol);
+    }
+
+    /// Find a symbol by name
+    pub fn find_symbol(&self, name: &str) -> Option<&SymbolInfo> {
+        self.symbols_by_name
+            .get(name)
+            .map(|&idx| &self.symbols[idx])
+    }
+
+    /// Find symbols at a specific address
+    pub fn find_symbols_at_address(&self, address: u64) -> Vec<&SymbolInfo> {
+        self.symbols_by_address
+            .get(&address)
+            .map(|indices| indices.iter().map(|&idx| &self.symbols[idx]).collect())
+            .unwrap_or_default()
+    }
+
+    /// Get all variable symbols
+    pub fn get_variables(&self) -> Vec<&SymbolInfo> {
+        self.symbols
+            .iter()
+            .filter(|s| s.symbol_type == SymbolType::Variable)
+            .collect()
+    }
+
+    /// Get all function symbols
+    pub fn get_functions(&self) -> Vec<&SymbolInfo> {
+        self.symbols
+            .iter()
+            .filter(|s| s.symbol_type == SymbolType::Function)
+            .collect()
+    }
+
+    /// Search for symbols matching a query
+    pub fn search_symbols(&self, query: &str) -> Vec<&SymbolInfo> {
+        self.symbols.iter().filter(|s| s.matches(query)).collect()
+    }
+
+    /// Search for variables matching a query
+    pub fn search_variables(&self, query: &str) -> Vec<&SymbolInfo> {
+        self.symbols
+            .iter()
+            .filter(|s| s.symbol_type == SymbolType::Variable)
+            .filter(|s| query.is_empty() || s.matches(query))
+            .collect()
+    }
+
+    /// Convert all variable symbols to Variables
+    pub fn symbols_to_variables(&self) -> Vec<Variable> {
+        self.get_variables()
+            .into_iter()
+            .map(|s| s.to_variable())
+            .collect()
+    }
+
+    /// Get the number of variable symbols
+    pub fn variable_count(&self) -> usize {
+        self.symbols
+            .iter()
+            .filter(|s| s.symbol_type == SymbolType::Variable)
+            .count()
+    }
+
+    /// Get the number of function symbols
+    pub fn function_count(&self) -> usize {
+        self.symbols
+            .iter()
+            .filter(|s| s.symbol_type == SymbolType::Function)
+            .count()
+    }
+
+    /// Get a TypeHandle for a symbol
+    pub fn symbol_type_handle(&self, symbol: &SymbolInfo) -> Option<TypeHandle> {
+        symbol.type_handle(&self.type_table)
+    }
+
+    /// Infer variable type for a symbol using type table
+    pub fn infer_variable_type_for_symbol(&self, symbol: &SymbolInfo) -> VariableType {
+        if let Some(handle) = self.symbol_type_handle(symbol) {
+            handle.to_variable_type()
+        } else {
+            symbol.infer_variable_type()
+        }
+    }
+
+    /// Check if a symbol is expandable (has members)
+    pub fn is_symbol_expandable(&self, symbol: &SymbolInfo) -> bool {
+        self.symbol_type_handle(symbol)
+            .map_or(false, |h| h.is_expandable())
+    }
+
+    /// Check if a symbol is complex (struct, union, array)
+    pub fn is_symbol_complex(&self, symbol: &SymbolInfo) -> bool {
+        self.symbol_type_handle(symbol)
+            .map_or(false, |h| h.is_struct_or_union())
+    }
+
+    /// Check if a symbol can be added as a watchable variable
+    pub fn is_symbol_addable(&self, symbol: &SymbolInfo) -> bool {
+        self.symbol_type_handle(symbol)
+            .map_or(true, |h| h.is_addable())
+    }
+
+    /// Get the type name for a symbol
+    pub fn get_symbol_type_name(&self, symbol: &SymbolInfo) -> String {
+        self.symbol_type_handle(symbol)
+            .map(|h| h.type_name())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// Get the members of a symbol's type
+    pub fn get_symbol_members(&self, symbol: &SymbolInfo) -> Option<&[MemberDef]> {
+        symbol
+            .type_id
+            .and_then(|id| self.type_table.get_members(id))
+    }
+
+    /// Get the underlying TypeHandle for a symbol (strips typedefs, qualifiers)
+    pub fn get_symbol_underlying_type(&self, symbol: &SymbolInfo) -> Option<TypeHandle> {
+        self.symbol_type_handle(symbol).map(|h| h.underlying())
+    }
+
+    /// Expand a symbol's struct members to variables
+    pub fn expand_symbol_to_variables(&self, symbol: &SymbolInfo) -> Vec<Variable> {
+        let mut variables = Vec::new();
+        if let Some(handle) = self.symbol_type_handle(symbol) {
+            if let Some(members) = handle.members() {
+                for member in members {
+                    let member_addr = symbol.address + member.offset;
+                    let full_name = format!("{}.{}", symbol.display_name, member.name);
+                    let member_type = handle.member_type(member);
+                    let var_type = member_type.to_variable_type();
+                    variables.push(Variable::new(&full_name, member_addr, var_type));
+                }
+            }
+        }
+        variables
+    }
+}
+
+/// Demangle a symbol name (supports C++ and Rust mangling)
+pub fn demangle_symbol(mangled: &str) -> String {
+    // Try C++ demangling first
+    if let Ok(symbol) = CppSymbol::new(mangled) {
+        if let Ok(demangled) = symbol.demangle(&cpp_demangle::DemangleOptions::default()) {
+            return demangled;
+        }
+    }
+
+    // Try Rust demangling
+    let demangled = rust_demangle(mangled).to_string();
+    if demangled != mangled {
+        return demangled;
+    }
+
+    // Return original if no demangling succeeded
+    mangled.to_string()
+}
+
+/// Extract a short name from a demangled symbol (e.g., just the function/variable name)
+fn extract_short_name(demangled: &str) -> String {
+    // For C++ names like "namespace::Class::method(args)", extract "method"
+    // For Rust names like "crate::module::function", extract "function"
+
+    // Remove template parameters and function arguments for cleaner display
+    let cleaned = remove_nested(demangled, '<', '>');
+    let cleaned = remove_nested(&cleaned, '(', ')');
+
+    // Split by :: and take the last part
+    if let Some(last) = cleaned.rsplit("::").next() {
+        // Clean up any remaining spaces or qualifiers
+        let name = last.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+
+    demangled.to_string()
+}
+
+/// Remove nested delimiters from a string
+fn remove_nested(s: &str, open: char, close: char) -> String {
+    let mut result = String::new();
+    let mut depth: i32 = 0;
+    for c in s.chars() {
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth = depth.saturating_sub(1);
+        } else if depth == 0 {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// ELF parser for extracting symbols and type information
+pub struct ElfParser;
+
+impl ElfParser {
+    /// Parse an ELF file from a path
+    pub fn parse<P: AsRef<Path>>(path: P) -> Result<ElfInfo> {
+        let path = path.as_ref();
+        let data = fs::read(path).map_err(|e| {
+            DataVisError::ElfParsing(format!("Failed to read file {}: {}", path.display(), e))
+        })?;
+
+        Self::parse_bytes(&data, path.to_string_lossy().as_ref())
+    }
+
+    /// Parse ELF data from bytes
+    pub fn parse_bytes(data: &[u8], path: &str) -> Result<ElfInfo> {
+        let file = object::File::parse(data)
+            .map_err(|e| DataVisError::ElfParsing(format!("Failed to parse ELF: {}", e)))?;
+
+        let mut info = ElfInfo::new(path);
+
+        // Basic ELF info
+        info.entry_point = file.entry();
+        info.is_64bit = file.is_64();
+        info.is_little_endian = file.is_little_endian();
+        info.machine = format!("{:?}", file.architecture());
+
+        // Parse symbols from symbol table
+        for symbol in file.symbols() {
+            if let Some(sym_info) = Self::parse_symbol(&symbol, &file) {
+                info.add_symbol(sym_info);
+            }
+        }
+
+        // Also check dynamic symbols
+        for symbol in file.dynamic_symbols() {
+            if let Some(sym_info) = Self::parse_symbol(&symbol, &file) {
+                // Only add if not already present
+                if info.find_symbol(&sym_info.mangled_name).is_none() {
+                    info.add_symbol(sym_info);
+                }
+            }
+        }
+
+        // Try to parse DWARF debug info
+        if let Err(e) = Self::parse_dwarf(data, &file, &mut info) {
+            tracing::debug!("DWARF parsing failed or not available: {}", e);
+        }
+
+        Ok(info)
+    }
+
+    /// Parse DWARF debug information and populate the type table
+    fn parse_dwarf(data: &[u8], _file: &object::File, info: &mut ElfInfo) -> Result<()> {
+        // Use the new DwarfParser to parse types and symbols
+        let result = DwarfParser::parse_bytes(data)
+            .map_err(|e| DataVisError::ElfParsing(format!("DWARF parsing failed: {}", e)))?;
+
+        // Set the type table
+        info.set_type_table(result.type_table);
+
+        // Map parsed DWARF symbols to existing symbols by address
+        // Build a lookup from address to parsed symbol for efficient matching
+        let dwarf_symbols_by_addr: HashMap<u64, &super::dwarf_parser::ParsedSymbol> = result
+            .symbols
+            .iter()
+            .filter(|s| s.address != 0)
+            .map(|s| (s.address, s))
+            .collect();
+
+        // Also build a lookup by name for symbols without matching addresses
+        // Include both the name and mangled_name for better matching
+        let mut dwarf_symbols_by_name: HashMap<&str, &super::dwarf_parser::ParsedSymbol> =
+            HashMap::new();
+        for sym in &result.symbols {
+            dwarf_symbols_by_name.insert(sym.name.as_str(), sym);
+            if let Some(ref mangled) = sym.mangled_name {
+                dwarf_symbols_by_name.insert(mangled.as_str(), sym);
+            }
+        }
+
+        let mut matched_by_addr = 0;
+        let mut matched_by_name = 0;
+
+        // Update existing symbols with type information from DWARF
+        for symbol in &mut info.symbols {
+            // First try to match by address
+            if let Some(dwarf_sym) = dwarf_symbols_by_addr.get(&symbol.address) {
+                symbol.type_id = Some(dwarf_sym.type_id);
+                // Update size if DWARF has better info
+                if dwarf_sym.size > 0 && symbol.size == 0 {
+                    symbol.size = dwarf_sym.size;
+                }
+                matched_by_addr += 1;
+                continue;
+            }
+
+            // Fall back to matching by name (try display name, demangled, then mangled)
+            let matched = dwarf_symbols_by_name
+                .get(symbol.display_name.as_str())
+                .or_else(|| dwarf_symbols_by_name.get(symbol.demangled_name.as_str()))
+                .or_else(|| dwarf_symbols_by_name.get(symbol.mangled_name.as_str()));
+
+            if let Some(dwarf_sym) = matched {
+                symbol.type_id = Some(dwarf_sym.type_id);
+                if dwarf_sym.size > 0 && symbol.size == 0 {
+                    symbol.size = dwarf_sym.size;
+                }
+                matched_by_name += 1;
+                continue;
+            }
+
+            // Fall back to the name-to-type mapping (for variables without addresses)
+            let type_id = result
+                .name_to_type
+                .get(&symbol.mangled_name)
+                .or_else(|| result.name_to_type.get(&symbol.demangled_name))
+                .or_else(|| result.name_to_type.get(&symbol.display_name));
+
+            if let Some(&tid) = type_id {
+                symbol.type_id = Some(tid);
+                // Try to get size from the type if not set
+                if symbol.size == 0 {
+                    if let Some(size) = info.type_table.type_size(tid) {
+                        symbol.size = size;
+                    }
+                }
+                matched_by_name += 1;
+            }
+        }
+
+        // Add any DWARF-discovered symbols that aren't in the symbol table
+        let mut _added_from_dwarf = 0;
+        for dwarf_sym in &result.symbols {
+            if dwarf_sym.address == 0 {
+                continue;
+            }
+
+            // Check if we already have this symbol
+            let exists = info.symbols.iter().any(|s| s.address == dwarf_sym.address);
+            if exists {
+                continue;
+            }
+
+            // Create a new symbol from DWARF info
+            let mangled_name = dwarf_sym
+                .mangled_name
+                .clone()
+                .unwrap_or_else(|| dwarf_sym.name.clone());
+            let demangled_name = demangle_symbol(&mangled_name);
+            let display_name = extract_short_name(&demangled_name);
+
+            info.add_symbol(SymbolInfo {
+                mangled_name,
+                demangled_name,
+                display_name,
+                address: dwarf_sym.address,
+                size: dwarf_sym.size,
+                symbol_type: SymbolType::Variable,
+                section: String::new(),
+                is_global: dwarf_sym.is_global,
+                type_id: Some(dwarf_sym.type_id),
+            });
+            _added_from_dwarf += 1;
+        }
+
+        // Count variables with and without type info
+        let vars_with_type = info
+            .symbols
+            .iter()
+            .filter(|s| s.symbol_type == SymbolType::Variable && s.type_id.is_some())
+            .count();
+        let total_vars = info
+            .symbols
+            .iter()
+            .filter(|s| s.symbol_type == SymbolType::Variable)
+            .count();
+
+        let stats = info.type_table.stats();
+        tracing::info!(
+            "DWARF: {} types ({} structs) | Variables: {}/{} have type info (matched {} by addr, {} by name)",
+            stats.total_types,
+            stats.structs,
+            vars_with_type,
+            total_vars,
+            matched_by_addr,
+            matched_by_name,
+        );
+
+        // Log unmatched symbols for debugging
+        let unmatched: Vec<_> = info
+            .symbols
+            .iter()
+            .filter(|s| s.type_id.is_none() && s.symbol_type == SymbolType::Variable)
+            .take(5)
+            .collect();
+        if !unmatched.is_empty() {
+            tracing::debug!(
+                "Sample unmatched variables: {:?}",
+                unmatched
+                    .iter()
+                    .map(|s| (&s.display_name, s.address))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Parse a single symbol from the symbol table
+    fn parse_symbol(symbol: &object::Symbol, file: &object::File) -> Option<SymbolInfo> {
+        let name = symbol.name().ok()?;
+        if name.is_empty() {
+            return None;
+        }
+
+        let address = symbol.address();
+
+        // Skip symbols with no address (undefined symbols)
+        if address == 0 && symbol.kind() != SymbolKind::Unknown {
+            // Allow address 0 for some symbol types
+            if symbol.kind() == SymbolKind::Section || symbol.kind() == SymbolKind::File {
+                return None;
+            }
+        }
+
+        let size = symbol.size();
+        let is_global = symbol.is_global();
+
+        let symbol_type = match symbol.kind() {
+            SymbolKind::Data => SymbolType::Variable,
+            SymbolKind::Text => SymbolType::Function,
+            SymbolKind::Section => SymbolType::Section,
+            SymbolKind::File => SymbolType::File,
+            _ => SymbolType::Other,
+        };
+
+        // Get section name
+        let section = symbol
+            .section_index()
+            .and_then(|idx| file.section_by_index(idx).ok())
+            .and_then(|s| s.name().ok())
+            .unwrap_or("")
+            .to_string();
+
+        // Skip certain sections
+        if section.starts_with(".debug") || section.starts_with(".comment") {
+            return None;
+        }
+
+        let mangled_name = name.to_string();
+        let demangled_name = demangle_symbol(&mangled_name);
+        let display_name = extract_short_name(&demangled_name);
+
+        Some(SymbolInfo {
+            mangled_name,
+            demangled_name,
+            display_name,
+            address,
+            size,
+            symbol_type,
+            section,
+            is_global,
+            type_id: None,
+        })
+    }
+}

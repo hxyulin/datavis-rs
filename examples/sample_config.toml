@@ -1,0 +1,193 @@
+# Sample DataVis-RS Configuration File
+# Copy this to ~/.config/datavis-rs/datavis-rs.toml
+
+[general]
+# Project name for display
+project_name = "STM32 Motor Control"
+
+# Path to ELF file for symbol resolution (optional)
+# elf_path = "/path/to/firmware.elf"
+
+# Automatically connect to probe on startup
+auto_connect = false
+
+# Automatically start data collection after connecting
+auto_start = false
+
+# Use dark mode theme
+dark_mode = true
+
+[probe]
+# Optional probe selector (VID:PID or VID:PID:SERIAL)
+# probe_selector = "0483:374b"
+
+# Target chip name (as recognized by probe-rs)
+target_chip = "STM32F407VGTx"
+
+# Communication speed in kHz
+speed_khz = 4000
+
+# Protocol: "Swd" or "Jtag"
+protocol = "Swd"
+
+# Reset target when connecting
+reset_on_connect = false
+
+# Halt target when connecting
+halt_on_connect = false
+
+[collection]
+# Global polling rate in Hz
+poll_rate_hz = 100
+
+# Timeout for SWD operations in milliseconds
+timeout_ms = 100
+
+# Maximum number of data points to keep per variable
+max_data_points = 10000
+
+# Enable logging to file
+log_to_file = false
+
+# Log file path (if logging is enabled)
+# log_file_path = "/tmp/datavis_log.csv"
+
+# Log format: "Csv", "Json", or "Binary"
+log_format = "Csv"
+
+# Buffer size for channel communication
+channel_buffer_size = 1024
+
+[ui]
+# Default time window for plots in seconds
+time_window_seconds = 10.0
+
+# Show grid lines on plots
+show_grid = true
+
+# Show legend on plots
+show_legend = true
+
+# Plot line width in pixels
+line_width = 1.5
+
+# Enable anti-aliasing on plots
+anti_aliasing = true
+
+# Font scale factor
+font_scale = 1.0
+
+# Auto-scale Y axis
+auto_scale_y = true
+
+# Show raw values alongside converted values
+show_raw_values = false
+
+# Side panel width in pixels
+side_panel_width = 250.0
+
+# Bottom panel height in pixels
+bottom_panel_height = 150.0
+
+# Example Variables
+# -----------------
+
+# Simple counter variable
+[[variables]]
+id = 1
+name = "counter"
+address = 536870912  # 0x20000000
+var_type = "U32"
+unit = "count"
+enabled = true
+color = [255, 100, 100, 255]  # Red
+poll_rate_hz = 0  # Use global rate
+
+# ADC value with voltage conversion
+[[variables]]
+id = 2
+name = "adc_voltage"
+address = 536870916  # 0x20000004
+var_type = "U16"
+unit = "V"
+enabled = true
+color = [100, 255, 100, 255]  # Green
+poll_rate_hz = 0
+# Convert 12-bit ADC value to voltage (3.3V reference)
+converter_script = """
+fn convert(raw) {
+    raw * 3.3 / 4095.0
+}
+"""
+
+# Temperature sensor (float)
+[[variables]]
+id = 3
+name = "temperature"
+address = 536870920  # 0x20000008
+var_type = "F32"
+unit = "°C"
+enabled = true
+color = [100, 100, 255, 255]  # Blue
+poll_rate_hz = 50  # Sample at 50 Hz
+
+# Motor current with signed value
+[[variables]]
+id = 4
+name = "motor_current"
+address = 536870924  # 0x2000000C
+var_type = "I16"
+unit = "mA"
+enabled = true
+color = [255, 200, 100, 255]  # Orange
+poll_rate_hz = 200  # Fast sampling for motor control
+converter_script = """
+fn convert(raw) {
+    raw * 0.1  # Scale factor: 0.1 mA per count
+}
+"""
+
+# PWM duty cycle
+[[variables]]
+id = 5
+name = "pwm_duty"
+address = 536870928  # 0x20000010
+var_type = "U8"
+unit = "%"
+enabled = false  # Disabled by default
+color = [200, 100, 255, 255]  # Purple
+converter_script = """
+fn convert(raw) {
+    raw * 100.0 / 255.0
+}
+"""
+
+# Error flags (boolean)
+[[variables]]
+id = 6
+name = "error_flag"
+address = 536870929  # 0x20000011
+var_type = "Bool"
+unit = ""
+enabled = true
+color = [255, 50, 50, 255]  # Bright red
+
+# Q15 fixed-point value
+[[variables]]
+id = 7
+name = "q15_value"
+address = 536870930  # 0x20000012
+var_type = "I16"
+unit = ""
+enabled = false
+color = [150, 150, 255, 255]  # Light blue
+converter_script = """
+fn convert(raw) {
+    // Q15 to float conversion
+    if raw > 32767.0 {
+        (raw - 65536.0) / 32768.0
+    } else {
+        raw / 32768.0
+    }
+}
+"""
