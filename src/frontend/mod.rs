@@ -967,10 +967,29 @@ impl DataVisApp {
 
                     ui.separator();
 
+                    // Rate display with throttle indicator
+                    let target_rate = self.config.collection.poll_rate_hz as f64;
+                    let actual_rate = self.stats.effective_sample_rate;
+                    let is_throttled = actual_rate > 0.0 && actual_rate < target_rate * 0.9;
+                    let rate_color = if is_throttled {
+                        Color32::from_rgb(255, 100, 100) // Red when throttled
+                    } else if actual_rate > 0.0 {
+                        Color32::from_rgb(100, 255, 100) // Green when at target
+                    } else {
+                        Color32::GRAY
+                    };
+
                     ui.label(format!(
-                        "Avg Read Time: {:.1} μs | Rate: {:.1} Hz",
-                        self.stats.avg_read_time_us, self.stats.effective_sample_rate
+                        "Avg Read Time: {:.1} μs |",
+                        self.stats.avg_read_time_us
                     ));
+                    ui.colored_label(rate_color, format!("{:.1} Hz", actual_rate));
+                    if is_throttled {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 200, 100),
+                            format!("(target: {})", self.config.collection.poll_rate_hz),
+                        );
+                    }
 
                     ui.separator();
 
@@ -2794,12 +2813,30 @@ impl DataVisApp {
 
                 ui.separator();
 
-                // Stats
-                ui.label(format!(
-                    "Rate: {:.0} Hz | Success: {:.1}%",
-                    self.stats.effective_sample_rate,
-                    self.stats.success_rate()
-                ));
+                // Stats - show rate with color indicating if throttled
+                let target_rate = self.config.collection.poll_rate_hz as f64;
+                let actual_rate = self.stats.effective_sample_rate;
+                // Consider throttled if actual rate is less than 90% of target
+                let is_throttled = actual_rate > 0.0 && actual_rate < target_rate * 0.9;
+                let rate_color = if is_throttled {
+                    Color32::from_rgb(255, 100, 100) // Red when throttled
+                } else if actual_rate > 0.0 {
+                    Color32::from_rgb(100, 255, 100) // Green when at target
+                } else {
+                    Color32::GRAY // Gray when not collecting
+                };
+
+                ui.horizontal(|ui| {
+                    ui.label("Rate:");
+                    ui.colored_label(rate_color, format!("{:.0} Hz", actual_rate));
+                    if is_throttled {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 200, 100),
+                            format!("(target: {} Hz)", self.config.collection.poll_rate_hz),
+                        );
+                    }
+                    ui.label(format!("| Success: {:.1}%", self.stats.success_rate()));
+                });
             });
 
             // Second row for axis controls
@@ -3112,6 +3149,60 @@ impl DataVisApp {
                 });
 
                 ui.checkbox(&mut self.config.probe.halt_on_connect, "Halt on connect");
+
+                ui.horizontal(|ui| {
+                    ui.label("Memory Access:");
+                    let current_mode = self.config.probe.memory_access_mode;
+                    egui::ComboBox::from_id_salt("memory_access_mode")
+                        .selected_text(current_mode.to_string())
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_value(
+                                    &mut self.config.probe.memory_access_mode,
+                                    crate::config::MemoryAccessMode::Background,
+                                    "Background (Running)",
+                                )
+                                .changed()
+                            {
+                                self.frontend
+                                    .send_command(BackendCommand::SetMemoryAccessMode(
+                                        self.config.probe.memory_access_mode,
+                                    ));
+                            }
+                            if ui
+                                .selectable_value(
+                                    &mut self.config.probe.memory_access_mode,
+                                    crate::config::MemoryAccessMode::Halted,
+                                    "Halted (Per-batch)",
+                                )
+                                .changed()
+                            {
+                                self.frontend
+                                    .send_command(BackendCommand::SetMemoryAccessMode(
+                                        self.config.probe.memory_access_mode,
+                                    ));
+                            }
+                            if ui
+                                .selectable_value(
+                                    &mut self.config.probe.memory_access_mode,
+                                    crate::config::MemoryAccessMode::HaltedPersistent,
+                                    "Halted (Persistent)",
+                                )
+                                .changed()
+                            {
+                                self.frontend
+                                    .send_command(BackendCommand::SetMemoryAccessMode(
+                                        self.config.probe.memory_access_mode,
+                                    ));
+                            }
+                        });
+                })
+                .response
+                .on_hover_text(
+                    "Background: Read while target runs (slower)\n\
+                     Halted: Briefly halt for each read batch (faster)\n\
+                     Persistent: Keep target halted (fastest)",
+                );
 
                 ui.horizontal(|ui| {
                     ui.label("Probe:");

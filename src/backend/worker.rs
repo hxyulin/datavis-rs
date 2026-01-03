@@ -246,6 +246,9 @@ impl BackendWorker {
             BackendCommand::SetPollRate(hz) => {
                 self.poll_rate_hz = hz.max(1);
             }
+            BackendCommand::SetMemoryAccessMode(mode) => {
+                self.probe.set_memory_access_mode(mode);
+            }
             BackendCommand::RequestStats => {
                 self.send_stats();
             }
@@ -519,7 +522,7 @@ impl BackendWorker {
         self.prev_values.clear();
     }
 
-    /// Poll all enabled variables
+    /// Poll all enabled variables using batched reads for better performance
     fn poll_variables(&mut self) {
         let timestamp = self.start_time.elapsed();
         let time_secs = timestamp.as_secs_f64();
@@ -533,22 +536,32 @@ impl BackendWorker {
             .cloned()
             .collect();
 
-        for var in enabled_vars {
-            let read_result = {
-                #[cfg(feature = "mock-probe")]
-                {
-                    if self.use_mock_probe {
-                        self.mock_probe.read_variable(&var)
-                    } else {
-                        self.probe.read_variable(&var)
-                    }
-                }
-                #[cfg(not(feature = "mock-probe"))]
-                {
-                    self.probe.read_variable(&var)
-                }
-            };
+        if enabled_vars.is_empty() {
+            return;
+        }
 
+        // Use batched read for better performance (single core acquisition)
+        let read_results = {
+            #[cfg(feature = "mock-probe")]
+            {
+                if self.use_mock_probe {
+                    // Mock probe doesn't have batched read, use individual reads
+                    enabled_vars
+                        .iter()
+                        .map(|v| self.mock_probe.read_variable(v))
+                        .collect::<Vec<_>>()
+                } else {
+                    self.probe.read_variables(&enabled_vars)
+                }
+            }
+            #[cfg(not(feature = "mock-probe"))]
+            {
+                self.probe.read_variables(&enabled_vars)
+            }
+        };
+
+        // Process results
+        for (var, read_result) in enabled_vars.iter().zip(read_results.into_iter()) {
             match read_result {
                 Ok(raw_value) => {
                     self.stats.successful_reads += 1;
@@ -603,12 +616,14 @@ impl BackendWorker {
             let _ = self.message_tx.send(BackendMessage::DataBatch(batch));
         }
 
-        // Update effective sample rate
+        // Update effective sample rate based on batch timing
         let probe_stats = self.probe.stats();
         self.stats.avg_read_time_us = probe_stats.avg_read_time_us();
-        if self.stats.avg_read_time_us > 0.0 {
-            self.stats.effective_sample_rate =
-                1_000_000.0 / (self.stats.avg_read_time_us * self.variables.len() as f64);
+        // Calculate rate based on total batch time, not per-variable time
+        if self.stats.avg_read_time_us > 0.0 && !enabled_vars.is_empty() {
+            // The avg_read_time_us now represents the entire batch read time
+            // So effective rate is simply 1M / batch_time
+            self.stats.effective_sample_rate = 1_000_000.0 / self.stats.avg_read_time_us;
         }
     }
 

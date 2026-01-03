@@ -113,6 +113,8 @@ pub enum BackendCommand {
     ClearData,
     /// Set the polling rate in Hz
     SetPollRate(u32),
+    /// Set memory access mode (Background, Halted, HaltedPersistent)
+    SetMemoryAccessMode(crate::config::MemoryAccessMode),
     /// Request current statistics
     RequestStats,
     /// Shutdown the backend

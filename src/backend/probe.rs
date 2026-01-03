@@ -41,7 +41,7 @@
 //! let value = probe.read_variable(&my_variable)?;
 //! ```
 
-use crate::config::{AppConfig, ConnectUnderReset, ProbeConfig, ProbeProtocol};
+use crate::config::{AppConfig, ConnectUnderReset, MemoryAccessMode, ProbeConfig, ProbeProtocol};
 use crate::error::{DataVisError, Result};
 use crate::types::{Variable, VariableType};
 use probe_rs::{probe::list::Lister, MemoryInterface, Permissions, Session};
@@ -433,8 +433,133 @@ impl ProbeBackend {
     }
 
     /// Read multiple variables efficiently (batched read)
+    /// This acquires the core once and reads all variables, which is much faster
+    /// than calling read_variable individually for each variable.
+    ///
+    /// The memory_access_mode controls how reads are performed:
+    /// - Background: Read while target is running (non-intrusive but slower)
+    /// - Halted: Halt target before reading, resume after (faster but intrusive)
+    /// - HaltedPersistent: Keep target halted (fastest, use when target doesn't need to run)
     pub fn read_variables(&mut self, variables: &[Variable]) -> Vec<Result<f64>> {
-        variables.iter().map(|v| self.read_variable(v)).collect()
+        if variables.is_empty() {
+            return Vec::new();
+        }
+
+        let session = match self.session.as_mut() {
+            Some(s) => s,
+            None => {
+                return variables
+                    .iter()
+                    .map(|_| Err(DataVisError::Config("Not connected to probe".to_string())))
+                    .collect();
+            }
+        };
+
+        let access_mode = self.config.memory_access_mode;
+        let start = Instant::now();
+
+        // Get core once for all reads
+        let mut core = match session.core(0) {
+            Ok(c) => c,
+            Err(e) => {
+                let error_msg = format!("Failed to access core: {}", e);
+                return variables
+                    .iter()
+                    .map(|_| Err(DataVisError::Config(error_msg.clone())))
+                    .collect();
+            }
+        };
+
+        // For Halted mode, halt the core before reading
+        let was_running = match access_mode {
+            MemoryAccessMode::Halted => {
+                // Check if core is currently running
+                let is_running = core.status().map(|s| !s.is_halted()).unwrap_or(false);
+                if is_running {
+                    if let Err(e) = core.halt(Duration::from_millis(100)) {
+                        tracing::warn!("Failed to halt core for read: {}", e);
+                    }
+                }
+                is_running
+            }
+            MemoryAccessMode::HaltedPersistent => {
+                // For persistent halt, halt if not already halted but don't resume
+                let is_running = core.status().map(|s| !s.is_halted()).unwrap_or(false);
+                if is_running {
+                    if let Err(e) = core.halt(Duration::from_millis(100)) {
+                        tracing::warn!("Failed to halt core for read: {}", e);
+                    }
+                }
+                false // Never resume in persistent mode
+            }
+            MemoryAccessMode::Background => false, // No halt needed
+        };
+
+        let mut results = Vec::with_capacity(variables.len());
+        let mut total_bytes = 0usize;
+
+        for variable in variables {
+            let size = variable.var_type.size_bytes();
+            if self.read_buffer.len() < size {
+                self.read_buffer.resize(size, 0);
+            }
+
+            match core.read(variable.address, &mut self.read_buffer[..size]) {
+                Ok(()) => {
+                    self.stats.successful_reads += 1;
+                    total_bytes += size;
+
+                    let value = variable
+                        .var_type
+                        .parse_to_f64(&self.read_buffer[..size])
+                        .ok_or_else(|| DataVisError::Variable("Failed to parse value".to_string()));
+                    results.push(value);
+                }
+                Err(e) => {
+                    self.stats.failed_reads += 1;
+                    results.push(Err(DataVisError::MemoryAccess {
+                        address: variable.address,
+                        message: e.to_string(),
+                    }));
+                }
+            }
+        }
+
+        // For Halted mode (non-persistent), resume the core after reading
+        if was_running {
+            if let Err(e) = core.run() {
+                tracing::warn!("Failed to resume core after read: {}", e);
+            }
+        }
+
+        let read_time = start.elapsed();
+        self.stats.last_read_time_us = read_time.as_micros() as u64;
+        self.stats.total_read_time_us += self.stats.last_read_time_us;
+        self.stats.total_bytes_read += total_bytes as u64;
+
+        results
+    }
+
+    /// Get the current memory access mode
+    pub fn memory_access_mode(&self) -> MemoryAccessMode {
+        self.config.memory_access_mode
+    }
+
+    /// Set the memory access mode
+    pub fn set_memory_access_mode(&mut self, mode: MemoryAccessMode) {
+        self.config.memory_access_mode = mode;
+        tracing::info!("Memory access mode set to: {}", mode);
+    }
+
+    /// Check if the target core is currently halted
+    pub fn is_halted(&mut self) -> Result<bool> {
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| DataVisError::Config("Not connected to probe".to_string()))?;
+
+        let mut core = session.core(0)?;
+        Ok(core.status()?.is_halted())
     }
 
     /// Read raw bytes from a memory address

@@ -59,7 +59,7 @@ pub const PROJECT_FILE_EXTENSION: &str = "datavisproj";
 pub const MAX_RECENT_PROJECTS: usize = 10;
 
 /// Default polling rate in Hz
-pub const DEFAULT_POLL_RATE_HZ: u32 = 100;
+pub const DEFAULT_POLL_RATE_HZ: u32 = 200;
 
 /// Default timeout for SWD operations in milliseconds
 pub const DEFAULT_TIMEOUT_MS: u64 = 100;
@@ -641,6 +641,12 @@ pub struct ProbeConfig {
 
     /// Whether to halt the target on connect
     pub halt_on_connect: bool,
+
+    /// Memory access mode for reading variables
+    /// - Background: Read while target is running (non-intrusive but slower)
+    /// - Halted: Halt target during reads (faster but stops execution)
+    #[serde(default)]
+    pub memory_access_mode: MemoryAccessMode,
 }
 
 impl Default for ProbeConfig {
@@ -652,6 +658,40 @@ impl Default for ProbeConfig {
             protocol: ProbeProtocol::Swd,
             connect_under_reset: ConnectUnderReset::default(),
             halt_on_connect: false,
+            memory_access_mode: MemoryAccessMode::default(),
+        }
+    }
+}
+
+/// Memory access mode for reading variables
+///
+/// Different modes trade off between intrusiveness and speed:
+/// - Background reads happen while the target is running, which is less intrusive
+///   but typically slower due to potential bus contention
+/// - Halted reads stop the target during memory access, which is faster and more
+///   reliable but interrupts program execution
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MemoryAccessMode {
+    /// Read memory while target is running (non-intrusive, slower)
+    /// This is the default mode - target continues execution during reads
+    #[default]
+    Background,
+
+    /// Halt target before reading, resume after (faster, but intrusive)
+    /// The target is briefly stopped during each read batch
+    Halted,
+
+    /// Halt target and keep it halted (fastest, fully intrusive)
+    /// Use this for maximum read speed when you don't need the target running
+    HaltedPersistent,
+}
+
+impl std::fmt::Display for MemoryAccessMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryAccessMode::Background => write!(f, "Background (Running)"),
+            MemoryAccessMode::Halted => write!(f, "Halted (Per-batch)"),
+            MemoryAccessMode::HaltedPersistent => write!(f, "Halted (Persistent)"),
         }
     }
 }
