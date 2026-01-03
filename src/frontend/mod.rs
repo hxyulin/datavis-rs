@@ -188,6 +188,16 @@ pub struct DataVisApp {
     value_editor_input: String,
     /// Error message for value editor (e.g., parse error)
     value_editor_error: Option<String>,
+    /// Show variable detail dialog (comprehensive variable editor)
+    show_variable_detail: bool,
+    /// Variable ID being viewed/edited in detail dialog
+    variable_detail_id: Option<u32>,
+    /// Temporary color for the variable detail editor
+    variable_detail_color: [u8; 4],
+    /// Temporary name for the variable detail editor
+    variable_detail_name: String,
+    /// Temporary unit for the variable detail editor
+    variable_detail_unit: String,
 }
 
 /// State for variable autocomplete/selector
@@ -418,6 +428,11 @@ impl DataVisApp {
             value_editor_var_id: None,
             value_editor_input: String::new(),
             value_editor_error: None,
+            show_variable_detail: false,
+            variable_detail_id: None,
+            variable_detail_color: [0, 0, 0, 255],
+            variable_detail_name: String::new(),
+            variable_detail_unit: String::new(),
         }
     }
 
@@ -1069,7 +1084,7 @@ impl DataVisApp {
                 let mut y_max = f64::MIN;
 
                 for data in self.variable_data.values() {
-                    if !data.variable.enabled {
+                    if !data.variable.enabled || !data.variable.show_in_graph {
                         continue;
                     }
                     for dp in &data.data_points {
@@ -1099,7 +1114,7 @@ impl DataVisApp {
 
             // Draw data lines
             for (_id, data) in &self.variable_data {
-                if !data.variable.enabled {
+                if !data.variable.enabled || !data.variable.show_in_graph {
                     continue;
                 }
 
@@ -2076,6 +2091,13 @@ impl DataVisApp {
                 }
             });
 
+        // Track actions to perform after the loop (to avoid borrow issues)
+        let mut var_to_remove: Option<u32> = None;
+        let mut var_to_edit_converter: Option<(u32, String)> = None;
+        let mut var_to_open_detail: Option<u32> = None;
+        let mut var_toggle_enabled: Option<(u32, bool)> = None;
+        let mut var_toggle_graph: Option<(u32, bool)> = None;
+
         // Main panel: Selected variables table
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Selected Variables");
@@ -2091,11 +2113,12 @@ impl DataVisApp {
                 // Variable table with controls
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     egui::Grid::new("variables_table")
-                        .num_columns(8)
+                        .num_columns(9)
                         .striped(true)
-                        .min_col_width(60.0)
+                        .min_col_width(50.0)
                         .show(ui, |ui| {
                             // Header row
+                            ui.strong("");  // Color swatch
                             ui.strong("Name");
                             ui.strong("Address");
                             ui.strong("Type");
@@ -2107,47 +2130,67 @@ impl DataVisApp {
                             ui.end_row();
 
                             // Data rows
-                            let mut var_to_remove: Option<u32> = None;
-                            let mut var_to_edit_converter: Option<(u32, String)> = None;
-                            for var in &mut self.config.variables {
-                                ui.label(&var.name);
-                                ui.label(format!("0x{:08X}", var.address));
+                            for var in &self.config.variables {
+                                let var_color = Color32::from_rgba_unmultiplied(
+                                    var.color[0],
+                                    var.color[1],
+                                    var.color[2],
+                                    var.color[3],
+                                );
+
+                                // Color swatch (small colored rectangle)
+                                let (rect, _response) = ui.allocate_exact_size(
+                                    egui::vec2(16.0, 16.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(rect, 2.0, var_color);
+
+                                // Variable name (double-click to open detail dialog)
+                                let name_response = ui.add(
+                                    egui::Label::new(&var.name)
+                                        .sense(egui::Sense::click()),
+                                );
+                                if name_response.double_clicked() {
+                                    var_to_open_detail = Some(var.id);
+                                }
+                                name_response.on_hover_text("Double-click to edit variable");
+
+                                // Address (double-click to open detail dialog)
+                                let addr_response = ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(format!("0x{:08X}", var.address))
+                                            .monospace(),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                );
+                                if addr_response.double_clicked() {
+                                    var_to_open_detail = Some(var.id);
+                                }
+                                addr_response.on_hover_text("Double-click to edit variable");
+
+                                // Type
                                 ui.label(var.var_type.to_string());
 
-                                // Sample checkbox
+                                // Sample checkbox (enables/disables data collection)
                                 let mut enabled = var.enabled;
-                                if ui.checkbox(&mut enabled, "").changed() {
-                                    var.enabled = enabled;
-                                    // Notify backend
-                                    if enabled {
-                                        self.frontend
-                                            .send_command(BackendCommand::AddVariable(var.clone()));
-                                    } else {
-                                        self.frontend
-                                            .send_command(BackendCommand::RemoveVariable(var.id));
-                                    }
+                                if ui.checkbox(&mut enabled, "").on_hover_text("Enable sampling").changed() {
+                                    var_toggle_enabled = Some((var.id, enabled));
                                 }
 
-                                // Graph checkbox (using a simple field - we'll track this in variable_data)
-                                let graphing = self
-                                    .variable_data
-                                    .get(&var.id)
-                                    .map(|d| d.variable.enabled)
-                                    .unwrap_or(var.enabled);
-                                let mut graph = graphing;
-                                ui.checkbox(&mut graph, "");
+                                // Graph checkbox (shows/hides in plot)
+                                let mut show_graph = var.show_in_graph;
+                                if ui.checkbox(&mut show_graph, "").on_hover_text("Show in graph").changed() {
+                                    var_toggle_graph = Some((var.id, show_graph));
+                                }
 
                                 // Converter script (clickable to edit)
                                 let converter = var.converter_script.as_deref().unwrap_or("");
                                 let converter_text = if converter.is_empty() {
                                     "✏ Add..."
+                                } else if converter.len() > 20 {
+                                    "✏ Edit..."
                                 } else {
-                                    // Truncate long scripts for display
-                                    if converter.len() > 20 {
-                                        "✏ Edit..."
-                                    } else {
-                                        converter
-                                    }
+                                    converter
                                 };
                                 let converter_response = ui.add(
                                     egui::Label::new(
@@ -2168,7 +2211,7 @@ impl DataVisApp {
                                     converter_response.on_hover_text(converter);
                                 }
 
-                                // Current value (double-click to edit if writable)
+                                // Current value with color indicator
                                 let is_writable = var.is_writable();
                                 let is_connected =
                                     self.connection_status == ConnectionStatus::Connected;
@@ -2176,37 +2219,48 @@ impl DataVisApp {
 
                                 if let Some(data) = self.variable_data.get(&var.id) {
                                     if let Some(point) = data.last() {
-                                        let value_text = format!("{:.3}", point.converted_value);
-                                        let response = ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(&value_text).color(
-                                                    if can_edit {
-                                                        egui::Color32::WHITE
-                                                    } else {
-                                                        egui::Color32::GRAY
-                                                    },
-                                                ),
-                                            )
-                                            .sense(egui::Sense::click()),
-                                        );
-
-                                        if can_edit {
-                                            let response = response
-                                                .on_hover_text("Double-click to edit value");
-                                            if response.double_clicked() {
-                                                self.value_editor_var_id = Some(var.id);
-                                                self.value_editor_input =
-                                                    format!("{}", point.raw_value);
-                                                self.value_editor_error = None;
-                                                self.show_value_editor = true;
-                                            }
-                                        } else if !is_writable {
-                                            response.on_hover_text(
-                                                "Cannot edit: has converter or non-primitive type",
-                                            );
+                                        let value_text = if var.unit.is_empty() {
+                                            format!("{:.3}", point.converted_value)
                                         } else {
-                                            response.on_hover_text("Cannot edit: not connected");
-                                        }
+                                            format!("{:.3} {}", point.converted_value, var.unit)
+                                        };
+
+                                        // Show value with variable's color
+                                        ui.horizontal(|ui| {
+                                            ui.colored_label(var_color, "●");
+                                            let response = ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(&value_text)
+                                                        .monospace()
+                                                        .color(if can_edit {
+                                                            ui.visuals().text_color()
+                                                        } else {
+                                                            egui::Color32::GRAY
+                                                        }),
+                                                )
+                                                .sense(egui::Sense::click()),
+                                            );
+
+                                            // Capture double_clicked before consuming response
+                                            let was_double_clicked = response.double_clicked();
+
+                                            if can_edit {
+                                                response.on_hover_text("Double-click to edit value");
+                                                if was_double_clicked {
+                                                    self.value_editor_var_id = Some(var.id);
+                                                    self.value_editor_input =
+                                                        format!("{}", point.raw_value);
+                                                    self.value_editor_error = None;
+                                                    self.show_value_editor = true;
+                                                }
+                                            } else if !is_writable {
+                                                response.on_hover_text(
+                                                    "Cannot edit: has converter or non-primitive type",
+                                                );
+                                            } else {
+                                                response.on_hover_text("Cannot edit: not connected");
+                                            }
+                                        });
                                     } else {
                                         ui.label("-");
                                     }
@@ -2221,32 +2275,71 @@ impl DataVisApp {
 
                                 ui.end_row();
                             }
-
-                            // Handle converter editor opening
-                            if let Some((id, script)) = var_to_edit_converter {
-                                self.converter_editor_var_id = Some(id);
-                                self.converter_editor_script = script;
-                                self.converter_editor_state = ScriptEditorState::default();
-                                self.show_converter_editor = true;
-                            }
-
-                            // Handle removal
-                            if let Some(id) = var_to_remove {
-                                self.config.remove_variable(id);
-                                self.variable_data.remove(&id);
-                                self.frontend
-                                    .send_command(BackendCommand::RemoveVariable(id));
-                            }
                         });
                 });
             }
         });
+
+        // Handle toggle enabled
+        if let Some((id, enabled)) = var_toggle_enabled {
+            if let Some(var) = self.config.find_variable_mut(id) {
+                var.enabled = enabled;
+                if enabled {
+                    self.frontend
+                        .send_command(BackendCommand::AddVariable(var.clone()));
+                } else {
+                    self.frontend
+                        .send_command(BackendCommand::RemoveVariable(id));
+                }
+            }
+        }
+
+        // Handle toggle graph visibility
+        if let Some((id, show)) = var_toggle_graph {
+            if let Some(var) = self.config.find_variable_mut(id) {
+                var.show_in_graph = show;
+            }
+            // Also update variable_data if it exists
+            if let Some(data) = self.variable_data.get_mut(&id) {
+                data.variable.show_in_graph = show;
+            }
+        }
+
+        // Handle converter editor opening
+        if let Some((id, script)) = var_to_edit_converter {
+            self.converter_editor_var_id = Some(id);
+            self.converter_editor_script = script;
+            self.converter_editor_state = ScriptEditorState::default();
+            self.show_converter_editor = true;
+        }
+
+        // Handle opening variable detail dialog
+        if let Some(id) = var_to_open_detail {
+            if let Some(var) = self.config.find_variable(id) {
+                self.variable_detail_id = Some(id);
+                self.variable_detail_color = var.color;
+                self.variable_detail_name = var.name.clone();
+                self.variable_detail_unit = var.unit.clone();
+                self.show_variable_detail = true;
+            }
+        }
+
+        // Handle removal
+        if let Some(id) = var_to_remove {
+            self.config.remove_variable(id);
+            self.variable_data.remove(&id);
+            self.frontend
+                .send_command(BackendCommand::RemoveVariable(id));
+        }
 
         // Render converter editor dialog
         self.render_converter_editor_dialog(ctx);
 
         // Render value editor dialog
         self.render_value_editor_dialog(ctx);
+
+        // Render variable detail dialog
+        self.render_variable_detail_dialog(ctx);
     }
 
     /// Render the converter script editor dialog
@@ -2470,6 +2563,200 @@ impl DataVisApp {
             self.value_editor_var_id = None;
             self.value_editor_input.clear();
             self.value_editor_error = None;
+        }
+    }
+
+    /// Render the variable detail dialog (comprehensive variable editor with color picker)
+    fn render_variable_detail_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_variable_detail {
+            return;
+        }
+
+        let var_id = match self.variable_detail_id {
+            Some(id) => id,
+            None => {
+                self.show_variable_detail = false;
+                return;
+            }
+        };
+
+        // Get current variable info for display
+        let (_var_name, var_address, var_type_str, var_enabled, var_show_graph, current_value) = {
+            if let Some(var) = self.config.find_variable(var_id) {
+                let value = self
+                    .variable_data
+                    .get(&var_id)
+                    .and_then(|d| d.last())
+                    .map(|p| p.converted_value);
+                (
+                    var.name.clone(),
+                    var.address,
+                    var.var_type.to_string(),
+                    var.enabled,
+                    var.show_in_graph,
+                    value,
+                )
+            } else {
+                self.show_variable_detail = false;
+                return;
+            }
+        };
+
+        let mut should_close = false;
+        let mut should_save = false;
+
+        egui::Window::new("Variable Details")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(400.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                egui::Grid::new("variable_detail_grid")
+                    .num_columns(2)
+                    .spacing([10.0, 8.0])
+                    .show(ui, |ui| {
+                        // Name (editable)
+                        ui.label("Name:");
+                        ui.text_edit_singleline(&mut self.variable_detail_name);
+                        ui.end_row();
+
+                        // Address (read-only)
+                        ui.label("Address:");
+                        ui.label(egui::RichText::new(format!("0x{:08X}", var_address)).monospace());
+                        ui.end_row();
+
+                        // Type (read-only)
+                        ui.label("Type:");
+                        ui.label(&var_type_str);
+                        ui.end_row();
+
+                        // Unit (editable)
+                        ui.label("Unit:");
+                        ui.text_edit_singleline(&mut self.variable_detail_unit);
+                        ui.end_row();
+
+                        // Current value (read-only)
+                        ui.label("Current Value:");
+                        if let Some(val) = current_value {
+                            let value_text = if self.variable_detail_unit.is_empty() {
+                                format!("{:.6}", val)
+                            } else {
+                                format!("{:.6} {}", val, self.variable_detail_unit)
+                            };
+                            ui.label(egui::RichText::new(value_text).monospace());
+                        } else {
+                            ui.colored_label(Color32::GRAY, "No data");
+                        }
+                        ui.end_row();
+
+                        // Sampling enabled
+                        ui.label("Sampling:");
+                        ui.label(if var_enabled {
+                            "✓ Enabled"
+                        } else {
+                            "✗ Disabled"
+                        });
+                        ui.end_row();
+
+                        // Show in graph
+                        ui.label("Show in Graph:");
+                        ui.label(if var_show_graph { "✓ Yes" } else { "✗ No" });
+                        ui.end_row();
+                    });
+
+                ui.separator();
+
+                // Color picker section
+                ui.horizontal(|ui| {
+                    ui.label("Plot Color:");
+
+                    // Color preview swatch
+                    let color = Color32::from_rgba_unmultiplied(
+                        self.variable_detail_color[0],
+                        self.variable_detail_color[1],
+                        self.variable_detail_color[2],
+                        self.variable_detail_color[3],
+                    );
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 4.0, color);
+
+                    // Color picker button
+                    let mut srgba = egui::Color32::from_rgba_unmultiplied(
+                        self.variable_detail_color[0],
+                        self.variable_detail_color[1],
+                        self.variable_detail_color[2],
+                        self.variable_detail_color[3],
+                    );
+                    if ui.color_edit_button_srgba(&mut srgba).changed() {
+                        self.variable_detail_color = srgba.to_array();
+                    }
+                });
+
+                // Quick color presets
+                ui.horizontal(|ui| {
+                    ui.label("Presets:");
+                    let presets = [
+                        ("Red", [255, 0, 0, 255]),
+                        ("Green", [0, 200, 0, 255]),
+                        ("Blue", [0, 100, 255, 255]),
+                        ("Yellow", [255, 200, 0, 255]),
+                        ("Cyan", [0, 200, 200, 255]),
+                        ("Magenta", [255, 0, 255, 255]),
+                        ("Orange", [255, 128, 0, 255]),
+                        ("White", [255, 255, 255, 255]),
+                        ("Black", [0, 0, 0, 255]),
+                    ];
+
+                    for (name, color) in presets {
+                        let c =
+                            Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]);
+                        if ui
+                            .add(
+                                egui::Button::new("")
+                                    .fill(c)
+                                    .min_size(egui::vec2(20.0, 20.0)),
+                            )
+                            .on_hover_text(name)
+                            .clicked()
+                        {
+                            self.variable_detail_color = color;
+                        }
+                    }
+                });
+
+                ui.separator();
+
+                // Action buttons
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        should_save = true;
+                        should_close = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        should_close = true;
+                    }
+                });
+            });
+
+        // Apply changes
+        if should_save {
+            if let Some(var) = self.config.find_variable_mut(var_id) {
+                var.name = self.variable_detail_name.clone();
+                var.unit = self.variable_detail_unit.clone();
+                var.color = self.variable_detail_color;
+            }
+            // Also update variable_data if it exists
+            if let Some(data) = self.variable_data.get_mut(&var_id) {
+                data.variable.name = self.variable_detail_name.clone();
+                data.variable.unit = self.variable_detail_unit.clone();
+                data.variable.color = self.variable_detail_color;
+            }
+        }
+
+        if should_close {
+            self.show_variable_detail = false;
+            self.variable_detail_id = None;
         }
     }
 

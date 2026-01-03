@@ -194,8 +194,10 @@ pub struct Variable {
     pub converter_script: Option<String>,
     /// Color for plotting (RGBA)
     pub color: [u8; 4],
-    /// Whether this variable is currently being observed
+    /// Whether this variable is currently being observed (sampled)
     pub enabled: bool,
+    /// Whether this variable is shown in the graph
+    pub show_in_graph: bool,
     /// Unit label for display (e.g., "V", "mA", "°C")
     pub unit: String,
     /// Polling rate for this variable in Hz (0 = use global rate)
@@ -210,8 +212,9 @@ impl Default for Variable {
             address: 0,
             var_type: VariableType::U32,
             converter_script: None,
-            color: [255, 255, 255, 255],
+            color: [0, 0, 0, 255], // Default to black (visible on light themes)
             enabled: true,
+            show_in_graph: true,
             unit: String::new(),
             poll_rate_hz: 0,
         }
@@ -220,13 +223,16 @@ impl Default for Variable {
 
 impl Variable {
     /// Create a new variable with the given parameters
+    /// Automatically assigns a distinct color based on the variable ID
     pub fn new(name: impl Into<String>, address: u64, var_type: VariableType) -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Self {
-            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            id,
             name: name.into(),
             address,
             var_type,
+            color: Self::generate_color(id),
             ..Default::default()
         }
     }
@@ -253,6 +259,55 @@ impl Variable {
     pub fn with_poll_rate(mut self, hz: u32) -> Self {
         self.poll_rate_hz = hz;
         self
+    }
+
+    /// Set whether to show in graph
+    pub fn with_show_in_graph(mut self, show: bool) -> Self {
+        self.show_in_graph = show;
+        self
+    }
+
+    /// Set an auto-generated color based on the variable ID
+    /// This generates distinct, visually pleasing colors that work on both
+    /// light and dark themes by using medium-saturation, medium-brightness colors
+    pub fn with_auto_color(mut self) -> Self {
+        self.color = Self::generate_color(self.id);
+        self
+    }
+
+    /// Generate a distinct color based on an index/ID
+    /// Uses the golden ratio to spread hues evenly across the color wheel
+    pub fn generate_color(index: u32) -> [u8; 4] {
+        // Use golden ratio conjugate for optimal hue distribution
+        const GOLDEN_RATIO: f32 = 0.618033988749895;
+
+        // Start with a nice initial hue and spread using golden ratio
+        let hue = ((index as f32 * GOLDEN_RATIO) % 1.0) * 360.0;
+
+        // Use medium saturation and value for visibility on both light and dark themes
+        let saturation = 0.7;
+        let value = 0.85;
+
+        // HSV to RGB conversion
+        let c = value * saturation;
+        let x = c * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
+        let m = value - c;
+
+        let (r, g, b) = match (hue / 60.0) as u32 {
+            0 => (c, x, 0.0),
+            1 => (x, c, 0.0),
+            2 => (0.0, c, x),
+            3 => (0.0, x, c),
+            4 => (x, 0.0, c),
+            _ => (c, 0.0, x),
+        };
+
+        [
+            ((r + m) * 255.0) as u8,
+            ((g + m) * 255.0) as u8,
+            ((b + m) * 255.0) as u8,
+            255,
+        ]
     }
 
     /// Check if this variable can be written to
