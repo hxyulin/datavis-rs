@@ -50,6 +50,44 @@ impl DwarfTypeKey {
     }
 }
 
+/// A unified key that can represent either a unit-local or global DWARF type reference.
+/// ARM compilers often use DW_FORM_ref_addr (global offsets) instead of DW_FORM_ref* (unit-local).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GlobalTypeKey {
+    /// Unit-local reference (unit_index + local offset within the unit)
+    UnitLocal(DwarfTypeKey),
+    /// Global reference (absolute offset in .debug_info section)
+    /// We use usize::MAX as a sentinel unit_index for global refs
+    Global(usize),
+}
+
+impl GlobalTypeKey {
+    /// Create a unit-local key
+    pub fn unit_local(unit_index: usize, offset: usize) -> Self {
+        GlobalTypeKey::UnitLocal(DwarfTypeKey::new(unit_index, offset))
+    }
+
+    /// Create a global key from an absolute .debug_info offset
+    pub fn global(offset: usize) -> Self {
+        GlobalTypeKey::Global(offset)
+    }
+
+    /// Convert to DwarfTypeKey for backwards compatibility
+    /// Global keys use a sentinel unit_index of usize::MAX
+    pub fn to_dwarf_key(&self) -> DwarfTypeKey {
+        match self {
+            GlobalTypeKey::UnitLocal(key) => *key,
+            GlobalTypeKey::Global(offset) => DwarfTypeKey::new(usize::MAX, *offset),
+        }
+    }
+}
+
+impl From<DwarfTypeKey> for GlobalTypeKey {
+    fn from(key: DwarfTypeKey) -> Self {
+        GlobalTypeKey::UnitLocal(key)
+    }
+}
+
 /// A type definition in the type table
 #[derive(Debug, Clone)]
 pub enum TypeDef {
@@ -450,6 +488,11 @@ impl TypeTable {
         self.types.is_empty()
     }
 
+    /// Get the number of DWARF key mappings (including global offset aliases)
+    pub fn dwarf_key_count(&self) -> usize {
+        self.dwarf_to_id.len()
+    }
+
     /// Allocate a new type ID without setting its definition
     pub fn allocate(&mut self) -> TypeId {
         let id = TypeId(self.types.len() as u32);
@@ -470,6 +513,13 @@ impl TypeTable {
     /// Get the TypeId for a DWARF key if it exists
     pub fn get_by_dwarf_key(&self, key: DwarfTypeKey) -> Option<TypeId> {
         self.dwarf_to_id.get(&key).copied()
+    }
+
+    /// Register an existing TypeId under an additional key.
+    /// This is used to register the same type under both its unit-local key
+    /// and its global .debug_info offset, so that DebugInfoRef lookups work.
+    pub fn register_alias(&mut self, key: DwarfTypeKey, id: TypeId) {
+        self.dwarf_to_id.entry(key).or_insert(id);
     }
 
     /// Define a type at the given TypeId
@@ -715,6 +765,8 @@ impl TypeTable {
             None => false,
             Some(def) => match def {
                 TypeDef::Struct(s) | TypeDef::Union(s) => !s.members.is_empty(),
+                // Arrays are expandable if they have a known count > 0
+                TypeDef::Array { count, .. } => count.map(|c| c > 0).unwrap_or(false),
                 TypeDef::Typedef { underlying, .. } => {
                     self.is_expandable_with_depth(*underlying, depth + 1)
                 }
@@ -1032,6 +1084,19 @@ impl TypeHandle {
     pub fn array_count(&self) -> Option<u64> {
         match self.resolved_def() {
             Some(TypeDef::Array { count, .. }) => *count,
+            _ => None,
+        }
+    }
+
+    /// Check if this type is an array
+    pub fn is_array(&self) -> bool {
+        matches!(self.resolved_def(), Some(TypeDef::Array { .. }))
+    }
+
+    /// Get the element size if this is an array
+    pub fn element_size(&self) -> Option<u64> {
+        match self.resolved_def() {
+            Some(TypeDef::Array { element, .. }) => self.table.type_size(*element),
             _ => None,
         }
     }

@@ -13,8 +13,8 @@
 //! and DW_TAG_template_value_parameter DIEs.
 
 use super::type_table::{
-    BaseClassDef, DwarfTypeKey, EnumDef, EnumVariant, ForwardDeclKind, MemberDef, PrimitiveDef,
-    StructDef, TemplateParam, TypeDef, TypeId, TypeTable,
+    BaseClassDef, DwarfTypeKey, EnumDef, EnumVariant, ForwardDeclKind, GlobalTypeKey, MemberDef,
+    PrimitiveDef, StructDef, TemplateParam, TypeDef, TypeId, TypeTable,
 };
 use gimli::{
     AttributeValue, DebuggingInformationEntry, Dwarf, EndianSlice, ReaderOffset, RunTimeEndian,
@@ -147,47 +147,67 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         let offset: usize = entry.offset().0.into_u64() as usize;
         let key = DwarfTypeKey::new(unit_index, offset);
 
+        // Also compute the global offset for this DIE so we can register it as an alias.
+        // ARM compilers often use DebugInfoRef (global offsets) instead of UnitRef (local offsets).
+        let global_offset = entry
+            .offset()
+            .to_debug_info_offset(&unit.header)
+            .map(|o| o.0.into_u64() as usize);
+
         match entry.tag() {
             // Type DIEs
             gimli::DW_TAG_base_type => {
                 self.parse_base_type(unit, key, entry);
+                self.register_global_alias(key, global_offset);
             }
             gimli::DW_TAG_pointer_type => {
                 self.parse_pointer_type(unit_index, key, entry);
+                self.register_global_alias(key, global_offset);
             }
             gimli::DW_TAG_reference_type | gimli::DW_TAG_rvalue_reference_type => {
                 self.parse_reference_type(unit_index, key, entry);
+                self.register_global_alias(key, global_offset);
             }
             gimli::DW_TAG_const_type => {
                 self.parse_const_type(unit_index, key, entry);
+                self.register_global_alias(key, global_offset);
             }
             gimli::DW_TAG_volatile_type => {
                 self.parse_volatile_type(unit_index, key, entry);
+                self.register_global_alias(key, global_offset);
             }
             gimli::DW_TAG_restrict_type => {
                 self.parse_restrict_type(unit_index, key, entry);
+                self.register_global_alias(key, global_offset);
             }
             gimli::DW_TAG_typedef => {
                 self.parse_typedef(unit, unit_index, key, entry);
+                self.register_global_alias(key, global_offset);
             }
             gimli::DW_TAG_array_type => {
                 self.parse_array_type(unit, unit_index, key, entry);
+                self.register_global_alias(key, global_offset);
             }
             gimli::DW_TAG_structure_type | gimli::DW_TAG_class_type => {
                 self.parse_struct_type(unit, unit_index, key, entry, false);
+                self.register_global_alias(key, global_offset);
             }
             gimli::DW_TAG_union_type => {
                 self.parse_struct_type(unit, unit_index, key, entry, true);
+                self.register_global_alias(key, global_offset);
             }
             gimli::DW_TAG_enumeration_type => {
                 self.parse_enum_type(unit, unit_index, key, entry);
+                self.register_global_alias(key, global_offset);
             }
             gimli::DW_TAG_subroutine_type => {
                 self.parse_subroutine_type(unit_index, key, entry);
+                self.register_global_alias(key, global_offset);
             }
             gimli::DW_TAG_unspecified_type => {
                 // Usually represents void
                 self.type_table.insert_for_key(key, TypeDef::Void);
+                self.register_global_alias(key, global_offset);
             }
 
             // Variable/symbol DIEs
@@ -278,9 +298,8 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         key: DwarfTypeKey,
         entry: &DebuggingInformationEntry<Reader<'a>>,
     ) {
-        let inner_id = if let Some(type_offset) = self.get_type_ref(entry) {
-            let ref_key = DwarfTypeKey::new(unit_index, type_offset.0.into_u64() as usize);
-            self.type_table.get_or_allocate(ref_key)
+        let inner_id = if let Some(ref_key) = self.get_type_ref_key(unit_index, entry) {
+            self.type_table.get_or_allocate(ref_key.to_dwarf_key())
         } else {
             // Void pointer
             self.ensure_void_type()
@@ -297,9 +316,8 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         key: DwarfTypeKey,
         entry: &DebuggingInformationEntry<Reader<'a>>,
     ) {
-        let inner_id = if let Some(type_offset) = self.get_type_ref(entry) {
-            let ref_key = DwarfTypeKey::new(unit_index, type_offset.0.into_u64() as usize);
-            self.type_table.get_or_allocate(ref_key)
+        let inner_id = if let Some(ref_key) = self.get_type_ref_key(unit_index, entry) {
+            self.type_table.get_or_allocate(ref_key.to_dwarf_key())
         } else {
             self.ensure_void_type()
         };
@@ -315,9 +333,8 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         key: DwarfTypeKey,
         entry: &DebuggingInformationEntry<Reader<'a>>,
     ) {
-        let inner_id = if let Some(type_offset) = self.get_type_ref(entry) {
-            let ref_key = DwarfTypeKey::new(unit_index, type_offset.0.into_u64() as usize);
-            self.type_table.get_or_allocate(ref_key)
+        let inner_id = if let Some(ref_key) = self.get_type_ref_key(unit_index, entry) {
+            self.type_table.get_or_allocate(ref_key.to_dwarf_key())
         } else {
             self.ensure_void_type()
         };
@@ -333,9 +350,8 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         key: DwarfTypeKey,
         entry: &DebuggingInformationEntry<Reader<'a>>,
     ) {
-        let inner_id = if let Some(type_offset) = self.get_type_ref(entry) {
-            let ref_key = DwarfTypeKey::new(unit_index, type_offset.0.into_u64() as usize);
-            self.type_table.get_or_allocate(ref_key)
+        let inner_id = if let Some(ref_key) = self.get_type_ref_key(unit_index, entry) {
+            self.type_table.get_or_allocate(ref_key.to_dwarf_key())
         } else {
             self.ensure_void_type()
         };
@@ -351,9 +367,8 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         key: DwarfTypeKey,
         entry: &DebuggingInformationEntry<Reader<'a>>,
     ) {
-        let inner_id = if let Some(type_offset) = self.get_type_ref(entry) {
-            let ref_key = DwarfTypeKey::new(unit_index, type_offset.0.into_u64() as usize);
-            self.type_table.get_or_allocate(ref_key)
+        let inner_id = if let Some(ref_key) = self.get_type_ref_key(unit_index, entry) {
+            self.type_table.get_or_allocate(ref_key.to_dwarf_key())
         } else {
             self.ensure_void_type()
         };
@@ -372,20 +387,14 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
     ) {
         let name = self.get_name(unit, entry).unwrap_or_default();
 
-        let underlying_id = if let Some(type_offset) = self.get_type_ref(entry) {
-            let ref_key = DwarfTypeKey::new(unit_index, type_offset.0.into_u64() as usize);
-            self.type_table.get_or_allocate(ref_key)
+        let underlying = if let Some(ref_key) = self.get_type_ref_key(unit_index, entry) {
+            self.type_table.get_or_allocate(ref_key.to_dwarf_key())
         } else {
             self.ensure_void_type()
         };
 
-        self.type_table.insert_for_key(
-            key,
-            TypeDef::Typedef {
-                name,
-                underlying: underlying_id,
-            },
-        );
+        self.type_table
+            .insert_for_key(key, TypeDef::Typedef { name, underlying });
     }
 
     /// Parse DW_TAG_array_type
@@ -396,9 +405,8 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         key: DwarfTypeKey,
         entry: &DebuggingInformationEntry<Reader<'a>>,
     ) {
-        let element_id = if let Some(type_offset) = self.get_type_ref(entry) {
-            let ref_key = DwarfTypeKey::new(unit_index, type_offset.0.into_u64() as usize);
-            self.type_table.get_or_allocate(ref_key)
+        let element_id = if let Some(ref_key) = self.get_type_ref_key(unit_index, entry) {
+            self.type_table.get_or_allocate(ref_key.to_dwarf_key())
         } else {
             self.ensure_void_type()
         };
@@ -468,7 +476,9 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
                             }
                         }
                         gimli::DW_TAG_inheritance => {
-                            if let Some(base) = self.parse_inheritance(unit_index, child_entry) {
+                            if let Some(base) =
+                                self.parse_inheritance(unit, unit_index, child_entry)
+                            {
                                 struct_def.base_classes.push(base);
                             }
                         }
@@ -500,7 +510,7 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         self.type_table.define(struct_id, def);
     }
 
-    /// Parse a DW_TAG_member
+    /// Parse DW_TAG_member
     fn parse_member(
         &mut self,
         unit: &Unit<Reader<'a>>,
@@ -508,13 +518,12 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         entry: &DebuggingInformationEntry<Reader<'a>>,
     ) -> Option<MemberDef> {
         let name = self.get_name(unit, entry).unwrap_or_default();
-        let offset = self.get_member_offset(entry).unwrap_or(0);
+        let offset = self.get_member_offset(unit, entry).unwrap_or(0);
 
-        let type_id = if let Some(type_offset) = self.get_type_ref(entry) {
-            let ref_key = DwarfTypeKey::new(unit_index, type_offset.0.into_u64() as usize);
-            self.type_table.get_or_allocate(ref_key)
+        let type_id = if let Some(ref_key) = self.get_type_ref_key(unit_index, entry) {
+            self.type_table.get_or_allocate(ref_key.to_dwarf_key())
         } else {
-            return None; // Member must have a type
+            TypeId::INVALID
         };
 
         let mut member = MemberDef::new(name, offset, type_id);
@@ -527,21 +536,21 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
     /// Parse DW_TAG_inheritance
     fn parse_inheritance(
         &mut self,
+        unit: &Unit<Reader<'a>>,
         unit_index: usize,
         entry: &DebuggingInformationEntry<Reader<'a>>,
     ) -> Option<BaseClassDef> {
-        let type_id = if let Some(type_offset) = self.get_type_ref(entry) {
-            let ref_key = DwarfTypeKey::new(unit_index, type_offset.0.into_u64() as usize);
-            self.type_table.get_or_allocate(ref_key)
+        let base_type_id = if let Some(ref_key) = self.get_type_ref_key(unit_index, entry) {
+            self.type_table.get_or_allocate(ref_key.to_dwarf_key())
         } else {
             return None;
         };
 
-        let offset = self.get_member_offset(entry).unwrap_or(0);
+        let offset = self.get_member_offset(unit, entry).unwrap_or(0);
         let is_virtual = self.get_virtuality(entry).is_some();
 
         Some(BaseClassDef {
-            type_id,
+            type_id: base_type_id,
             offset,
             is_virtual,
         })
@@ -656,9 +665,8 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         key: DwarfTypeKey,
         entry: &DebuggingInformationEntry<Reader<'a>>,
     ) {
-        let return_type = if let Some(type_offset) = self.get_type_ref(entry) {
-            let ref_key = DwarfTypeKey::new(unit_index, type_offset.0.into_u64() as usize);
-            Some(self.type_table.get_or_allocate(ref_key))
+        let return_type = if let Some(ref_key) = self.get_type_ref_key(unit_index, entry) {
+            Some(self.type_table.get_or_allocate(ref_key.to_dwarf_key()))
         } else {
             None // void return
         };
@@ -693,16 +701,11 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         };
 
         // Get address if available (variables without addresses are still useful for type mapping)
-        let address = self.get_variable_location(entry);
+        let address = self.get_variable_location(unit, entry);
 
-        let type_key = if let Some(type_offset) = self.get_type_ref(entry) {
-            Some(DwarfTypeKey::new(
-                unit_index,
-                type_offset.0.into_u64() as usize,
-            ))
-        } else {
-            None
-        };
+        let type_key = self
+            .get_type_ref_key(unit_index, entry)
+            .map(|k| k.to_dwarf_key());
 
         // Skip variables without type information
         if type_key.is_none() {
@@ -777,13 +780,30 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         }
 
         let stats = self.type_table.stats();
+
+        // Count how many pending symbols had valid vs invalid type resolution
+        let _total_pending = symbols.len() + name_to_type.len();
+        let with_address = symbols.len();
+
         tracing::debug!(
-            "DWARF parsing complete: {} types, {} structs, {} forward decls ({} unresolved), {} name mappings",
+            "DWARF parsing complete: {} types, {} structs, {} forward decls ({} unresolved)",
             stats.total_types,
             stats.structs,
             stats.forward_decls,
             stats.unresolved_forward_decls,
-            name_to_type.len()
+        );
+
+        tracing::debug!(
+            "DWARF variables: {} with addresses, {} without (name-to-type mappings for fallback matching)",
+            with_address,
+            name_to_type.len().saturating_sub(with_address)
+        );
+
+        // Log info about global vs local key usage for debugging ARM/AXF issues
+        let dwarf_key_count = self.type_table.dwarf_key_count();
+        tracing::debug!(
+            "DWARF key mappings: {} total (includes global offset aliases for DebugInfoRef support)",
+            dwarf_key_count
         );
 
         DwarfParseResult {
@@ -940,6 +960,43 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         }
     }
 
+    /// Register a type under its global .debug_info offset as an alias.
+    /// This allows lookups via DebugInfoRef to find types that were parsed
+    /// with unit-local keys.
+    fn register_global_alias(&mut self, local_key: DwarfTypeKey, global_offset: Option<usize>) {
+        if let Some(global_off) = global_offset {
+            // Get the TypeId that was registered for the local key
+            if let Some(type_id) = self.type_table.get_by_dwarf_key(local_key) {
+                // Register the same TypeId under the global key (using usize::MAX as sentinel)
+                let global_key = GlobalTypeKey::global(global_off).to_dwarf_key();
+                self.type_table.register_alias(global_key, type_id);
+            }
+        }
+    }
+
+    /// Get a type reference from DW_AT_type attribute.
+    /// Returns a GlobalTypeKey that can handle both unit-local refs (UnitRef) and
+    /// global refs (DebugInfoRef) which ARM compilers commonly use.
+    fn get_type_ref_key(
+        &self,
+        unit_index: usize,
+        entry: &DebuggingInformationEntry<Reader<'a>>,
+    ) -> Option<GlobalTypeKey> {
+        match entry.attr_value(gimli::DW_AT_type).ok()?? {
+            // Unit-local reference (common in GCC)
+            AttributeValue::UnitRef(offset) => Some(GlobalTypeKey::unit_local(
+                unit_index,
+                offset.0.into_u64() as usize,
+            )),
+            // Global reference in .debug_info (common in ARM compilers)
+            AttributeValue::DebugInfoRef(offset) => {
+                Some(GlobalTypeKey::global(offset.0.into_u64() as usize))
+            }
+            _ => None,
+        }
+    }
+
+    /// Legacy helper - get type ref as UnitOffset (for backwards compatibility where needed)
     fn get_type_ref(&self, entry: &DebuggingInformationEntry<Reader<'a>>) -> Option<UnitOffset> {
         match entry.attr_value(gimli::DW_AT_type).ok()?? {
             AttributeValue::UnitRef(offset) => Some(offset),
@@ -947,18 +1004,68 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         }
     }
 
-    fn get_member_offset(&self, entry: &DebuggingInformationEntry<Reader<'a>>) -> Option<u64> {
+    fn get_member_offset(
+        &self,
+        unit: &Unit<Reader<'a>>,
+        entry: &DebuggingInformationEntry<Reader<'a>>,
+    ) -> Option<u64> {
         match entry.attr_value(gimli::DW_AT_data_member_location).ok()?? {
+            // Direct offset values (common in DWARF 4+, GCC)
             AttributeValue::Udata(offset) => Some(offset),
             AttributeValue::Data1(offset) => Some(offset as u64),
             AttributeValue::Data2(offset) => Some(offset as u64),
             AttributeValue::Data4(offset) => Some(offset as u64),
             AttributeValue::Data8(offset) => Some(offset),
             AttributeValue::Sdata(offset) => Some(offset as u64),
-            // For more complex expressions, we'd need to evaluate them
-            // For now, treat them as offset 0
+            // Expression-based offset (common in DWARF 3, ARM Compiler 5)
+            // ARM Compiler uses DW_OP_plus_uconst expressions like "23 N" meaning offset N
+            AttributeValue::Exprloc(expr) => self.evaluate_member_offset_expr(unit, &expr),
+            // Block form (older DWARF)
+            AttributeValue::Block(block) => {
+                let expr = gimli::Expression(block);
+                self.evaluate_member_offset_expr(unit, &expr)
+            }
             _ => Some(0),
         }
+    }
+
+    /// Evaluate a member offset expression (typically DW_OP_plus_uconst)
+    fn evaluate_member_offset_expr(
+        &self,
+        unit: &Unit<Reader<'a>>,
+        expr: &gimli::Expression<Reader<'a>>,
+    ) -> Option<u64> {
+        let mut ops = expr.clone().operations(unit.encoding());
+
+        // Look for DW_OP_plus_uconst which is the common case for member offsets
+        // The expression is evaluated with an implicit "base address" on the stack,
+        // and DW_OP_plus_uconst adds the offset to it.
+        while let Ok(Some(op)) = ops.next() {
+            match op {
+                // DW_OP_plus_uconst: adds a constant to top of stack
+                // For member offsets, this IS the offset value
+                gimli::Operation::PlusConstant { value } => {
+                    return Some(value);
+                }
+                // DW_OP_constu followed by DW_OP_plus
+                gimli::Operation::UnsignedConstant { value } => {
+                    // Check if next op is Plus
+                    if let Ok(Some(gimli::Operation::Plus)) = ops.next() {
+                        return Some(value);
+                    }
+                    // Otherwise this might be the offset directly
+                    return Some(value);
+                }
+                // Direct address/literal (less common but possible)
+                gimli::Operation::Address { address } => {
+                    return Some(address);
+                }
+                _ => continue,
+            }
+        }
+
+        // Default to 0 if we can't parse the expression
+        Some(0)
     }
 
     fn get_bit_offset(&self, entry: &DebuggingInformationEntry<Reader<'a>>) -> Option<u64> {
@@ -1008,33 +1115,167 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         }
     }
 
-    fn get_variable_location(&self, entry: &DebuggingInformationEntry<Reader<'a>>) -> Option<u64> {
-        match entry.attr_value(gimli::DW_AT_location).ok()?? {
-            AttributeValue::Exprloc(expr) => {
-                // Try to evaluate simple address expressions
-                self.evaluate_simple_location_expr(&expr)
+    fn get_variable_location(
+        &self,
+        unit: &Unit<Reader<'a>>,
+        entry: &DebuggingInformationEntry<Reader<'a>>,
+    ) -> Option<u64> {
+        let attr = entry.attr_value(gimli::DW_AT_location).ok()??;
+
+        match attr {
+            // Expression-based location (most common for global variables)
+            AttributeValue::Exprloc(expr) => self.evaluate_simple_location_expr(unit, &expr),
+
+            // Direct address value (some older DWARF or simple cases)
+            AttributeValue::Addr(addr) => Some(addr),
+
+            // Indexed address (DWARF 5)
+            AttributeValue::DebugAddrIndex(index) => self.dwarf.address(unit, index).ok(),
+
+            // Location list reference - need to evaluate the first entry
+            // that covers address 0 (for static variables)
+            AttributeValue::LocationListsRef(offset) => self.evaluate_location_list(unit, offset),
+
+            // Offset into location lists (DWARF 5)
+            AttributeValue::DebugLocListsIndex(index) => {
+                if let Ok(offset) = self.dwarf.locations_offset(unit, index) {
+                    self.evaluate_location_list(unit, offset)
+                } else {
+                    None
+                }
             }
+
+            // Block containing location expression (older DWARF)
+            AttributeValue::Block(block) => {
+                let expr = gimli::Expression(block);
+                self.evaluate_simple_location_expr(unit, &expr)
+            }
+
+            // Data forms that might contain addresses directly
+            AttributeValue::Udata(addr) => Some(addr),
+            AttributeValue::Data1(addr) => Some(addr as u64),
+            AttributeValue::Data2(addr) => Some(addr as u64),
+            AttributeValue::Data4(addr) => Some(addr as u64),
+            AttributeValue::Data8(addr) => Some(addr),
+            AttributeValue::Sdata(addr) => Some(addr as u64),
+
             _ => None,
         }
     }
 
-    fn evaluate_simple_location_expr(&self, expr: &gimli::Expression<Reader<'a>>) -> Option<u64> {
-        let mut ops = expr.clone().operations(gimli::Encoding {
-            address_size: 4,
-            format: gimli::Format::Dwarf32,
-            version: 4,
-        });
+    /// Evaluate a location list to find the address for a global/static variable.
+    /// For global variables, we look for an entry that covers "any" address or
+    /// the first valid location expression.
+    fn evaluate_location_list(
+        &self,
+        unit: &Unit<Reader<'a>>,
+        offset: gimli::LocationListsOffset<<Reader<'a> as gimli::Reader>::Offset>,
+    ) -> Option<u64> {
+        let mut locations = self.dwarf.locations(unit, offset).ok()?;
 
-        // Look for DW_OP_addr or DW_OP_addrx
-        while let Ok(Some(op)) = ops.next() {
-            match op {
-                gimli::Operation::Address { address } => {
-                    return Some(address);
-                }
-                _ => continue,
+        // Iterate through location list entries
+        while let Ok(Some(entry)) = locations.next() {
+            // Try to evaluate this location expression
+            if let Some(addr) = self.evaluate_simple_location_expr(unit, &entry.data) {
+                return Some(addr);
             }
         }
         None
+    }
+
+    /// Evaluate a DWARF location expression to extract a static address.
+    ///
+    /// This handles various forms that different compilers use:
+    /// - DW_OP_addr: Direct address (GCC, Clang)
+    /// - DW_OP_addrx: Indexed address in .debug_addr (DWARF 5, GCC 11+, Clang 14+)
+    /// - DW_OP_GNU_addr_index: GNU extension for indexed addresses
+    /// - DW_OP_constN + DW_OP_plus_uconst: Computed addresses (some ARM compilers)
+    /// - Stack-based expressions with constants
+    ///
+    /// Note: We only handle static/global addresses. Register-relative or
+    /// frame-relative locations (local variables) are not supported.
+    fn evaluate_simple_location_expr(
+        &self,
+        unit: &Unit<Reader<'a>>,
+        expr: &gimli::Expression<Reader<'a>>,
+    ) -> Option<u64> {
+        let mut ops = expr.clone().operations(unit.encoding());
+
+        // Simple stack-based evaluation for common patterns
+        let mut stack: Vec<u64> = Vec::new();
+
+        while let Ok(Some(op)) = ops.next() {
+            match op {
+                // Direct address (DW_OP_addr) - most common for global variables
+                gimli::Operation::Address { address } => {
+                    // If this is the only operation or the final result, return it
+                    stack.push(address);
+                }
+
+                // Indexed address (DW_OP_addrx, DW_OP_GNU_addr_index) - DWARF 5
+                gimli::Operation::AddressIndex { index } => {
+                    if let Ok(address) = self.dwarf.address(unit, index) {
+                        stack.push(address);
+                    }
+                }
+
+                // Unsigned constant (DW_OP_const1u, DW_OP_const2u, DW_OP_const4u, DW_OP_const8u, DW_OP_constu, DW_OP_lit*)
+                gimli::Operation::UnsignedConstant { value } => {
+                    stack.push(value);
+                }
+
+                // Signed constant (DW_OP_const1s, DW_OP_const2s, DW_OP_const4s, DW_OP_const8s, DW_OP_consts)
+                gimli::Operation::SignedConstant { value } => {
+                    stack.push(value as u64);
+                }
+
+                // Add constant to top of stack (DW_OP_plus_uconst)
+                gimli::Operation::PlusConstant { value } => {
+                    if let Some(top) = stack.pop() {
+                        stack.push(top.wrapping_add(value));
+                    }
+                }
+
+                // Add top two values (DW_OP_plus)
+                gimli::Operation::Plus => {
+                    if stack.len() >= 2 {
+                        let a = stack.pop().unwrap();
+                        let b = stack.pop().unwrap();
+                        stack.push(a.wrapping_add(b));
+                    }
+                }
+
+                // Implicit pointer or value - these indicate the value is not in memory
+                // at a simple address, so we can't handle them
+                gimli::Operation::ImplicitValue { .. }
+                | gimli::Operation::ImplicitPointer { .. }
+                | gimli::Operation::StackValue => {
+                    // These mean the value is computed/optimized, not at a memory address
+                    return None;
+                }
+
+                // Register-based locations - local variables, can't handle statically
+                gimli::Operation::Register { .. }
+                | gimli::Operation::RegisterOffset { .. }
+                | gimli::Operation::FrameOffset { .. }
+                | gimli::Operation::CallFrameCFA => {
+                    // These are for local variables on stack/registers
+                    return None;
+                }
+
+                // Piece operations - composite locations
+                gimli::Operation::Piece { .. } => {
+                    // Composite location - take what we have so far if valid
+                    break;
+                }
+
+                // Other operations we don't handle - continue to see if there's an address later
+                _ => continue,
+            }
+        }
+
+        // Return the top of stack if we have something
+        stack.pop()
     }
 
     fn get_virtuality(

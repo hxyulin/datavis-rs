@@ -32,6 +32,10 @@
 //! - [`script_editor`] - Rhai script editor with syntax highlighting
 //! - `widgets` - Custom UI widgets (status indicators, sparklines, etc.)
 
+/// Maximum number of array elements to display when expanding an array.
+/// This prevents UI slowdown for very large arrays.
+const MAX_ARRAY_ELEMENTS: u64 = 1024;
+
 mod panels;
 mod plot;
 pub mod script_editor;
@@ -213,8 +217,8 @@ impl VariableSelectorState {
         self.filtered_symbols.clear();
         if let Some(info) = elf_info {
             let results = info.search_variables(&self.query);
-            // Limit to 50 results for performance
-            self.filtered_symbols = results.into_iter().take(50).cloned().collect();
+            // Show all results - ScrollArea handles virtualization for performance
+            self.filtered_symbols = results.into_iter().cloned().collect();
         }
         // Reset selection if list changed
         if self.filtered_symbols.is_empty() {
@@ -1632,14 +1636,23 @@ impl DataVisApp {
                     }
                 }
             }
-            // Check if it's an array with struct elements
-            if let Some(elem) = h.element_type() {
-                let elem_underlying = elem.underlying();
-                if let Some(members) = elem_underlying.members() {
-                    return Some((members.to_vec(), elem_underlying));
-                }
-            }
             None
+        });
+
+        // Check if this is an array type
+        let array_info = underlying.as_ref().and_then(|h| {
+            if h.is_array() {
+                let count = h.array_count().unwrap_or(0);
+                let elem_size = h.element_size().unwrap_or(0);
+                let elem_type = h.element_type();
+                if count > 0 && elem_size > 0 {
+                    Some((count.min(MAX_ARRAY_ELEMENTS), elem_size, elem_type))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         });
 
         ui.horizontal(|ui| {
@@ -1701,9 +1714,72 @@ impl DataVisApp {
             }
         });
 
-        // Render expanded members
+        // Render expanded members or array elements
         if is_expanded {
-            if let Some((member_list, parent_handle)) = members {
+            // First check if this is an array
+            if let Some((count, elem_size, elem_type)) = array_info.clone() {
+                let display_count = count.min(MAX_ARRAY_ELEMENTS);
+                let truncated = count > MAX_ARRAY_ELEMENTS;
+
+                // Show array info
+                ui.horizontal(|ui| {
+                    ui.add_space(((indent_level + 1) * 20) as f32);
+                    if truncated {
+                        ui.colored_label(
+                            Color32::YELLOW,
+                            format!(
+                                "Showing {} of {} elements (max {})",
+                                display_count, count, MAX_ARRAY_ELEMENTS
+                            ),
+                        );
+                    } else {
+                        ui.colored_label(Color32::GRAY, format!("{} elements", count));
+                    }
+                });
+
+                // Add all elements button
+                ui.horizontal(|ui| {
+                    ui.add_space(((indent_level + 1) * 20) as f32);
+                    if ui
+                        .small_button(format!("➕ Add all {} elements", display_count))
+                        .clicked()
+                    {
+                        for i in 0..display_count {
+                            let elem_addr = address + (i * elem_size);
+                            let elem_name = format!("{}[{}]", name, i);
+                            let var_type = elem_type
+                                .as_ref()
+                                .map(|h| h.to_variable_type())
+                                .unwrap_or(crate::types::VariableType::U32);
+                            let var = crate::types::Variable::new(&elem_name, elem_addr, var_type);
+                            variables_to_add.push(var);
+                        }
+                    }
+                });
+
+                // Render each array element
+                for i in 0..display_count {
+                    let elem_addr = address + (i * elem_size);
+                    let elem_name = format!("{}[{}]", name, i);
+                    let elem_path = format!("{}[{}]", path, i);
+
+                    Self::render_type_tree(
+                        ui,
+                        &elem_name,
+                        elem_addr,
+                        elem_type.clone(),
+                        &elem_path,
+                        indent_level + 1,
+                        expanded_paths,
+                        false,
+                        toggle_expand_path,
+                        variables_to_add,
+                        symbol_to_use,
+                        root_symbol,
+                    );
+                }
+            } else if let Some((member_list, parent_handle)) = members {
+                // Handle struct/union members
                 if member_list.is_empty() {
                     ui.horizontal(|ui| {
                         ui.add_space(((indent_level + 1) * 20) as f32);
@@ -1748,7 +1824,7 @@ impl DataVisApp {
                     }
                 }
             } else {
-                // Type is expandable but we couldn't get struct info - show message
+                // Type is expandable but we couldn't get struct/array info - show message
                 ui.horizontal(|ui| {
                     ui.add_space(((indent_level + 1) * 20) as f32);
                     ui.colored_label(Color32::GRAY, "(Type info not fully resolved)");

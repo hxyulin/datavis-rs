@@ -62,8 +62,8 @@ pub use dwarf_parser::{DwarfParseResult, DwarfParser, ParsedSymbol};
 pub use elf_parser::{demangle_symbol, ElfInfo, ElfParser, SymbolInfo, SymbolType};
 pub use type_table::{
     BaseClassDef, DwarfTypeKey, EnumDef, EnumVariant as TypeTableEnumVariant, ForwardDeclKind,
-    MemberDef, PrimitiveDef, SharedTypeTable, StructDef, TemplateParam, TypeDef, TypeHandle,
-    TypeId, TypeTable, TypeTableStats,
+    GlobalTypeKey, MemberDef, PrimitiveDef, SharedTypeTable, StructDef, TemplateParam, TypeDef,
+    TypeHandle, TypeId, TypeTable, TypeTableStats,
 };
 
 #[cfg(feature = "mock-probe")]
