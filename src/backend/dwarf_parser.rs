@@ -48,11 +48,54 @@ pub struct DwarfParseResult {
 pub struct DwarfParser<'a, R: gimli::Reader> {
     dwarf: &'a Dwarf<R>,
     type_table: TypeTable,
-    /// Maps from variable DIE key to its parsed info for later type resolution
-    pending_symbols: Vec<(DwarfTypeKey, PendingSymbol)>,
+    /// Parsed variables pending final resolution
+    pending_symbols: Vec<PendingSymbol>,
+    /// Cache of variable info by global DIE offset for abstract_origin/specification resolution
+    variable_cache: std::collections::HashMap<usize, VariableInfo>,
+    /// Variables needing deferred resolution (spec/origin DIE appeared before target)
+    deferred_variables: Vec<DeferredVariable>,
 }
 
-/// A symbol that's pending type resolution
+/// Cached information about a variable (for abstract_origin/specification resolution)
+#[derive(Debug, Clone)]
+struct VariableInfo {
+    name: Option<String>,
+    linkage_name: Option<String>,
+    type_key: Option<DwarfTypeKey>,
+    size: u64,
+    is_global: bool,
+}
+
+impl VariableInfo {
+    /// Inherit missing fields from another VariableInfo (e.g., from abstract_origin target)
+    fn inherit_from(&mut self, other: &VariableInfo) {
+        if self.name.is_none() {
+            self.name = other.name.clone();
+        }
+        if self.linkage_name.is_none() {
+            self.linkage_name = other.linkage_name.clone();
+        }
+        if self.type_key.is_none() {
+            self.type_key = other.type_key;
+        }
+        if self.size == 0 {
+            self.size = other.size;
+        }
+        if !self.is_global {
+            self.is_global = other.is_global;
+        }
+    }
+}
+
+/// A variable needing deferred resolution (target DIE appeared before this DIE)
+#[derive(Debug)]
+struct DeferredVariable {
+    info: VariableInfo,
+    address: Option<u64>,
+    target_offset: usize,
+}
+
+/// A symbol pending type resolution
 #[derive(Debug)]
 struct PendingSymbol {
     name: String,
@@ -95,6 +138,8 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
             dwarf: &dwarf,
             type_table: TypeTable::new(),
             pending_symbols: Vec::new(),
+            variable_cache: std::collections::HashMap::new(),
+            deferred_variables: Vec::new(),
         };
 
         parser.parse_all_units()?;
@@ -686,64 +731,143 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         &mut self,
         unit: &Unit<Reader<'a>>,
         unit_index: usize,
-        key: DwarfTypeKey,
+        _key: DwarfTypeKey,
         entry: &DebuggingInformationEntry<Reader<'a>>,
     ) {
-        // Get name (try linkage name first, then regular name)
-        let linkage_name = self.get_linkage_name(unit, entry);
-        let display_name = self.get_name(unit, entry);
+        let global_offset = self.get_global_offset(unit, entry);
 
-        let name = linkage_name.clone().or_else(|| display_name.clone());
+        // Extract variable info from this DIE
+        let mut info = VariableInfo {
+            name: self.get_name(unit, entry),
+            linkage_name: self.get_linkage_name(unit, entry),
+            type_key: self
+                .get_type_ref_key(unit_index, entry)
+                .map(|k| k.to_dwarf_key()),
+            size: self.get_byte_size(entry).unwrap_or(0),
+            is_global: self.has_external_attr(entry),
+        };
 
+        // Cache variables with type info for abstract_origin/specification resolution
+        if info.type_key.is_some() {
+            if let Some(off) = global_offset {
+                self.variable_cache.insert(off, info.clone());
+            }
+        }
+
+        // Pure declarations shouldn't become symbols - they're referenced via specification
+        if self.has_declaration_attr(entry) {
+            return;
+        }
+
+        // Check for DW_AT_specification or DW_AT_abstract_origin and inherit info
+        let target_offset = self.get_reference_offset(unit, entry);
+        if let Some(target_off) = target_offset {
+            if let Some(target_info) = self.variable_cache.get(&target_off) {
+                info.inherit_from(target_info);
+            } else {
+                // Target not yet parsed - defer to second pass
+                let address = self.get_variable_location(unit, entry);
+                self.deferred_variables.push(DeferredVariable {
+                    info,
+                    address,
+                    target_offset: target_off,
+                });
+                return;
+            }
+        }
+
+        // Create pending symbol if we have enough info
+        let address = self.get_variable_location(unit, entry);
+        self.try_add_pending_symbol(info, address);
+    }
+
+    /// Get the global .debug_info offset for a DIE
+    fn get_global_offset(
+        &self,
+        unit: &Unit<Reader<'a>>,
+        entry: &DebuggingInformationEntry<Reader<'a>>,
+    ) -> Option<usize> {
+        entry
+            .offset()
+            .to_debug_info_offset(&unit.header)
+            .map(|o| o.0.into_u64() as usize)
+    }
+
+    /// Get the target offset from DW_AT_specification or DW_AT_abstract_origin
+    fn get_reference_offset(
+        &self,
+        unit: &Unit<Reader<'a>>,
+        entry: &DebuggingInformationEntry<Reader<'a>>,
+    ) -> Option<usize> {
+        // Try DW_AT_specification first, then DW_AT_abstract_origin
+        for attr_name in [gimli::DW_AT_specification, gimli::DW_AT_abstract_origin] {
+            if let Ok(Some(attr)) = entry.attr_value(attr_name) {
+                let offset = match attr {
+                    AttributeValue::UnitRef(offset) => offset
+                        .to_debug_info_offset(&unit.header)
+                        .map(|o| o.0.into_u64() as usize),
+                    AttributeValue::DebugInfoRef(offset) => Some(offset.0.into_u64() as usize),
+                    _ => None,
+                };
+                if offset.is_some() {
+                    return offset;
+                }
+            }
+        }
+        None
+    }
+
+    /// Try to create a pending symbol from variable info
+    fn try_add_pending_symbol(&mut self, info: VariableInfo, address: Option<u64>) {
+        let name = info.linkage_name.clone().or(info.name.clone());
         let name = match name {
             Some(n) if !n.is_empty() => n,
             _ => return, // Skip anonymous variables
         };
 
-        // Get address if available (variables without addresses are still useful for type mapping)
-        let address = self.get_variable_location(unit, entry);
-
-        let type_key = self
-            .get_type_ref_key(unit_index, entry)
-            .map(|k| k.to_dwarf_key());
-
-        // Skip variables without type information
-        if type_key.is_none() {
-            return;
+        if info.type_key.is_none() {
+            return; // Skip variables without type info
         }
 
-        let is_external = self.has_external_attr(entry);
-
-        let pending = PendingSymbol {
-            name: display_name.unwrap_or_else(|| name.clone()),
-            mangled_name: if linkage_name.as_ref() != Some(&name) {
-                linkage_name
+        self.pending_symbols.push(PendingSymbol {
+            name: info.name.unwrap_or_else(|| name.clone()),
+            mangled_name: if info.linkage_name.as_ref() != Some(&name) {
+                info.linkage_name
             } else {
                 None
             },
             address,
-            size: self.get_byte_size(entry).unwrap_or(0),
-            type_key,
-            is_global: is_external,
-        };
-
-        self.pending_symbols.push((key, pending));
+            size: info.size,
+            type_key: info.type_key,
+            is_global: info.is_global,
+        });
     }
 
     /// Finish parsing and return the result
     fn finish(mut self) -> DwarfParseResult {
+        // Resolve pending specifications (second pass)
+        // These are specifications that referenced declarations that appeared later in DWARF
+        self.resolve_pending_specifications();
+
         // Resolve forward declarations
         self.type_table.resolve_forward_declarations();
 
         // Resolve inherited members
         self.resolve_inherited_members();
 
+        // Count variables without addresses before consuming pending_symbols
+        let without_address = self
+            .pending_symbols
+            .iter()
+            .filter(|p| p.address.is_none())
+            .count();
+
         // Build name-to-type mapping for ALL variables (including those without addresses)
         // and separate out symbols with addresses
         let mut name_to_type = std::collections::HashMap::new();
         let mut symbols = Vec::new();
 
-        for (_, pending) in self.pending_symbols {
+        for pending in self.pending_symbols {
             let type_id = pending
                 .type_key
                 .and_then(|k| self.type_table.get_by_dwarf_key(k))
@@ -796,20 +920,36 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         tracing::debug!(
             "DWARF variables: {} with addresses, {} without (name-to-type mappings for fallback matching)",
             with_address,
-            name_to_type.len().saturating_sub(with_address)
+            without_address
         );
 
-        // Log info about global vs local key usage for debugging ARM/AXF issues
-        let dwarf_key_count = self.type_table.dwarf_key_count();
+        // Log info about variable cache and deferred resolution
         tracing::debug!(
-            "DWARF key mappings: {} total (includes global offset aliases for DebugInfoRef support)",
-            dwarf_key_count
+            "DWARF variable cache: {} entries, {} deferred resolutions",
+            self.variable_cache.len(),
+            self.deferred_variables.len()
         );
 
         DwarfParseResult {
             type_table: self.type_table,
             symbols,
             name_to_type,
+        }
+    }
+
+    /// Resolve deferred variables that couldn't be resolved on first pass
+    fn resolve_pending_specifications(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_variables);
+
+        for var in deferred {
+            let mut info = var.info;
+
+            // Try to find the target now
+            if let Some(target_info) = self.variable_cache.get(&var.target_offset) {
+                info.inherit_from(target_info);
+            }
+
+            self.try_add_pending_symbol(info, var.address);
         }
     }
 
@@ -1185,97 +1325,84 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
 
     /// Evaluate a DWARF location expression to extract a static address.
     ///
-    /// This handles various forms that different compilers use:
+    /// Uses gimli's Evaluation API for proper DWARF expression handling.
+    /// This correctly handles all DWARF operations including:
     /// - DW_OP_addr: Direct address (GCC, Clang)
     /// - DW_OP_addrx: Indexed address in .debug_addr (DWARF 5, GCC 11+, Clang 14+)
     /// - DW_OP_GNU_addr_index: GNU extension for indexed addresses
     /// - DW_OP_constN + DW_OP_plus_uconst: Computed addresses (some ARM compilers)
-    /// - Stack-based expressions with constants
+    /// - All stack-based arithmetic and logical operations
     ///
-    /// Note: We only handle static/global addresses. Register-relative or
-    /// frame-relative locations (local variables) are not supported.
+    /// Note: We only handle static/global addresses. When the evaluator requests
+    /// runtime information (registers, memory, frame base, etc.), we return None
+    /// as these are for local variables that can't be resolved statically.
     fn evaluate_simple_location_expr(
         &self,
         unit: &Unit<Reader<'a>>,
         expr: &gimli::Expression<Reader<'a>>,
     ) -> Option<u64> {
-        let mut ops = expr.clone().operations(unit.encoding());
+        let mut evaluation = expr.clone().evaluation(unit.encoding());
 
-        // Simple stack-based evaluation for common patterns
-        let mut stack: Vec<u64> = Vec::new();
+        // Run the evaluation loop
+        let mut result = evaluation.evaluate().ok()?;
 
-        while let Ok(Some(op)) = ops.next() {
-            match op {
-                // Direct address (DW_OP_addr) - most common for global variables
-                gimli::Operation::Address { address } => {
-                    // If this is the only operation or the final result, return it
-                    stack.push(address);
-                }
-
-                // Indexed address (DW_OP_addrx, DW_OP_GNU_addr_index) - DWARF 5
-                gimli::Operation::AddressIndex { index } => {
-                    if let Ok(address) = self.dwarf.address(unit, index) {
-                        stack.push(address);
+        loop {
+            match result {
+                // Evaluation complete - extract the address from the result
+                gimli::EvaluationResult::Complete => {
+                    let pieces = evaluation.result();
+                    // We expect a single piece with an address for global variables
+                    if pieces.len() == 1 {
+                        match pieces[0].location {
+                            gimli::Location::Address { address } => return Some(address),
+                            // Value on stack without Location means the address is the value itself
+                            _ => {}
+                        }
                     }
-                }
-
-                // Unsigned constant (DW_OP_const1u, DW_OP_const2u, DW_OP_const4u, DW_OP_const8u, DW_OP_constu, DW_OP_lit*)
-                gimli::Operation::UnsignedConstant { value } => {
-                    stack.push(value);
-                }
-
-                // Signed constant (DW_OP_const1s, DW_OP_const2s, DW_OP_const4s, DW_OP_const8s, DW_OP_consts)
-                gimli::Operation::SignedConstant { value } => {
-                    stack.push(value as u64);
-                }
-
-                // Add constant to top of stack (DW_OP_plus_uconst)
-                gimli::Operation::PlusConstant { value } => {
-                    if let Some(top) = stack.pop() {
-                        stack.push(top.wrapping_add(value));
+                    // For multi-piece or non-address locations, try to get address from first piece
+                    for piece in pieces {
+                        if let gimli::Location::Address { address } = piece.location {
+                            return Some(address);
+                        }
                     }
-                }
-
-                // Add top two values (DW_OP_plus)
-                gimli::Operation::Plus => {
-                    if stack.len() >= 2 {
-                        let a = stack.pop().unwrap();
-                        let b = stack.pop().unwrap();
-                        stack.push(a.wrapping_add(b));
-                    }
-                }
-
-                // Implicit pointer or value - these indicate the value is not in memory
-                // at a simple address, so we can't handle them
-                gimli::Operation::ImplicitValue { .. }
-                | gimli::Operation::ImplicitPointer { .. }
-                | gimli::Operation::StackValue => {
-                    // These mean the value is computed/optimized, not at a memory address
                     return None;
                 }
 
-                // Register-based locations - local variables, can't handle statically
-                gimli::Operation::Register { .. }
-                | gimli::Operation::RegisterOffset { .. }
-                | gimli::Operation::FrameOffset { .. }
-                | gimli::Operation::CallFrameCFA => {
-                    // These are for local variables on stack/registers
+                // Needs an address from .debug_addr section (DW_OP_addrx, DW_OP_GNU_addr_index)
+                gimli::EvaluationResult::RequiresIndexedAddress { index, relocate: _ } => {
+                    let address = self.dwarf.address(unit, index).ok()?;
+                    result = evaluation.resume_with_indexed_address(address).ok()?;
+                }
+
+                // Needs address relocation (for position-independent code)
+                gimli::EvaluationResult::RequiresRelocatedAddress(address) => {
+                    // For our purposes, we don't need to relocate - the address is already correct
+                    result = evaluation.resume_with_relocated_address(address).ok()?;
+                }
+
+                // Needs base type information for typed operations
+                gimli::EvaluationResult::RequiresBaseType(offset) => {
+                    // For address computation, we can use a generic 64-bit unsigned type
+                    let value_type = gimli::ValueType::Generic;
+                    result = evaluation.resume_with_base_type(value_type).ok()?;
+                    let _ = offset; // Silence unused warning
+                }
+
+                // Runtime requirements - these indicate local variables, not static addresses
+                // We can't evaluate these without runtime context
+                gimli::EvaluationResult::RequiresMemory { .. }
+                | gimli::EvaluationResult::RequiresRegister { .. }
+                | gimli::EvaluationResult::RequiresFrameBase
+                | gimli::EvaluationResult::RequiresTls(_)
+                | gimli::EvaluationResult::RequiresCallFrameCfa
+                | gimli::EvaluationResult::RequiresAtLocation(_)
+                | gimli::EvaluationResult::RequiresEntryValue(_)
+                | gimli::EvaluationResult::RequiresParameterRef(_) => {
+                    // These are for local variables - we can't resolve them statically
                     return None;
                 }
-
-                // Piece operations - composite locations
-                gimli::Operation::Piece { .. } => {
-                    // Composite location - take what we have so far if valid
-                    break;
-                }
-
-                // Other operations we don't handle - continue to see if there's an address later
-                _ => continue,
             }
         }
-
-        // Return the top of stack if we have something
-        stack.pop()
     }
 
     fn get_virtuality(
