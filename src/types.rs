@@ -593,6 +593,8 @@ pub struct CollectionStats {
     pub effective_sample_rate: f64,
     /// Total bytes read
     pub total_bytes_read: u64,
+    /// Current memory access mode name (for display)
+    pub memory_access_mode: String,
 }
 
 impl CollectionStats {

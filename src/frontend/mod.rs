@@ -1649,33 +1649,80 @@ impl DataVisApp {
             .map(|h| h.is_expandable())
             .unwrap_or(false);
 
+        // Check if this is a pointer that can be expanded to show its pointee type
+        let is_pointer_expandable = type_handle
+            .as_ref()
+            .map(|h| h.is_pointer_expandable())
+            .unwrap_or(false);
+
         // Check if this type can be added as a variable (primitives, enums, pointers, typedefs to these)
         let is_addable = type_handle.as_ref().map(|h| h.is_addable()).unwrap_or(true);
 
         // Get the underlying type handle for member access
         let underlying = type_handle.as_ref().map(|h| h.underlying());
 
-        // Get members if this is a struct/union (or pointer/reference to one)
+        // Check if the underlying type is a pointer/reference
+        let is_pointer = underlying
+            .as_ref()
+            .map(|h| h.is_pointer_or_reference())
+            .unwrap_or(false);
+
+        // Get members if this is a struct/union (NOT through pointer - we'll handle that separately)
         let members = underlying.as_ref().and_then(|h| {
-            // First check if this is directly a struct/union
-            if let Some(members) = h.members() {
-                return Some((members.to_vec(), h.clone()));
-            }
-            // Check if it's a pointer/reference to a struct
-            if h.is_pointer_or_reference() {
-                if let Some(pointee) = h.pointee() {
-                    let pointee_underlying = pointee.underlying();
-                    if let Some(members) = pointee_underlying.members() {
-                        return Some((members.to_vec(), pointee_underlying));
-                    }
+            // Only get members if this is directly a struct/union (not a pointer)
+            if !h.is_pointer_or_reference() {
+                if let Some(members) = h.members() {
+                    return Some((members.to_vec(), h.clone(), false)); // false = not through pointer
                 }
             }
             None
         });
 
-        // Check if this is an array type
+        // Get pointee info for pointer expansion
+        let pointer_pointee = if is_pointer && is_pointer_expandable {
+            underlying.as_ref().and_then(|h| {
+                if let Some(pointee) = h.pointee() {
+                    let pointee_underlying = pointee.underlying();
+                    let pointee_type_name = pointee_underlying.type_name();
+                    let pointee_size = pointee_underlying.size();
+                    // Get members or array info from pointee
+                    if let Some(members) = pointee_underlying.members() {
+                        Some((
+                            pointee_type_name,
+                            pointee_size,
+                            Some(members.to_vec()),
+                            None, // No array info
+                            pointee_underlying.clone(),
+                        ))
+                    } else if pointee_underlying.is_array() {
+                        let count = pointee_underlying.array_count().unwrap_or(0);
+                        let elem_size = pointee_underlying.element_size().unwrap_or(0);
+                        let elem_type = pointee_underlying.element_type();
+                        if count > 0 && elem_size > 0 {
+                            Some((
+                                pointee_type_name,
+                                pointee_size,
+                                None, // No struct members
+                                Some((count, elem_size, elem_type)),
+                                pointee_underlying.clone(),
+                            ))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
+        // Check if this is an array type (not through pointer)
         let array_info = underlying.as_ref().and_then(|h| {
-            if h.is_array() {
+            if !h.is_pointer_or_reference() && h.is_array() {
                 let count = h.array_count().unwrap_or(0);
                 let elem_size = h.element_size().unwrap_or(0);
                 let elem_type = h.element_type();
@@ -1695,14 +1742,26 @@ impl DataVisApp {
 
             // Expand/collapse button
             if can_expand {
-                let expand_icon = if is_expanded { "▼" } else { "▶" };
+                // Use different icon for pointers
+                let expand_icon = if is_expanded {
+                    "▼"
+                } else if is_pointer_expandable {
+                    "⊳" // Special icon for pointer expansion
+                } else {
+                    "▶"
+                };
+
+                let hover_text = if is_expanded {
+                    "Collapse"
+                } else if is_pointer_expandable {
+                    "Expand pointer (view pointee type)"
+                } else {
+                    "Expand members"
+                };
+
                 if ui
                     .small_button(expand_icon)
-                    .on_hover_text(if is_expanded {
-                        "Collapse"
-                    } else {
-                        "Expand members"
-                    })
+                    .on_hover_text(hover_text)
                     .clicked()
                 {
                     *toggle_expand_path = Some(path.to_string());
@@ -1711,16 +1770,27 @@ impl DataVisApp {
                 ui.add_space(18.0);
             }
 
-            // Format the display based on indent level
+            // Format the display based on indent level and type
             let display_text = if indent_level == 0 {
-                format!(
-                    "{} @ 0x{:08X} ({} bytes) - {}",
-                    name, address, size, type_name
-                )
+                if is_pointer_expandable {
+                    format!(
+                        "📍 {} @ 0x{:08X} ({} bytes) - {}",
+                        name, address, size, type_name
+                    )
+                } else {
+                    format!(
+                        "{} @ 0x{:08X} ({} bytes) - {}",
+                        name, address, size, type_name
+                    )
+                }
             } else {
                 // For nested members, show just the member name without the full path
                 let short_name = name.rsplit('.').next().unwrap_or(name);
-                format!(".{}: {} @ 0x{:08X}", short_name, type_name, address)
+                if is_pointer_expandable {
+                    format!("📍 .{}: {} @ 0x{:08X}", short_name, type_name, address)
+                } else {
+                    format!(".{}: {} @ 0x{:08X}", short_name, type_name, address)
+                }
             };
 
             let response = ui.selectable_label(is_selected && indent_level == 0, &display_text);
@@ -1733,11 +1803,12 @@ impl DataVisApp {
 
             // Add button for all addable types (including top-level)
             if is_addable {
-                if ui
-                    .small_button("➕")
-                    .on_hover_text("Add as variable")
-                    .clicked()
-                {
+                let hover_text = if is_pointer {
+                    "Add pointer value as variable"
+                } else {
+                    "Add as variable"
+                };
+                if ui.small_button("➕").on_hover_text(hover_text).clicked() {
                     let var_type = type_handle
                         .as_ref()
                         .map(|h| h.to_variable_type())
@@ -1750,8 +1821,133 @@ impl DataVisApp {
 
         // Render expanded members or array elements
         if is_expanded {
-            // First check if this is an array
-            if let Some((count, elem_size, elem_type)) = array_info.clone() {
+            // First check if this is a pointer that was expanded
+            if let Some((
+                pointee_type_name,
+                pointee_size,
+                pointee_members,
+                pointee_array,
+                pointee_handle,
+            )) = pointer_pointee
+            {
+                // Show pointer expansion header
+                ui.horizontal(|ui| {
+                    ui.add_space(((indent_level + 1) * 20) as f32);
+                    ui.colored_label(
+                        Color32::LIGHT_BLUE,
+                        format!(
+                            "→ Pointee: {} ({} bytes)",
+                            pointee_type_name,
+                            pointee_size.unwrap_or(0)
+                        ),
+                    );
+                });
+
+                ui.horizontal(|ui| {
+                    ui.add_space(((indent_level + 1) * 20) as f32);
+                    ui.colored_label(
+                        Color32::YELLOW,
+                        "⚠ Members shown use pointer address, not dereferenced address",
+                    );
+                });
+
+                // Handle pointee struct members
+                if let Some(member_list) = pointee_members {
+                    if member_list.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.add_space(((indent_level + 1) * 20) as f32);
+                            ui.colored_label(Color32::GRAY, "(No member info available)");
+                        });
+                    } else {
+                        // Add all members button (with warning)
+                        ui.horizontal(|ui| {
+                            ui.add_space(((indent_level + 1) * 20) as f32);
+                            if ui
+                                .small_button("➕ Add all pointee members")
+                                .on_hover_text(
+                                    "Add all members using pointer address as base (requires manual address adjustment)",
+                                )
+                                .clicked()
+                            {
+                                Self::collect_all_members(
+                                    &format!("(*{})", name),
+                                    address,
+                                    &member_list,
+                                    &pointee_handle,
+                                    variables_to_add,
+                                );
+                            }
+                        });
+
+                        // Render each member recursively
+                        for member in &member_list {
+                            let member_path = format!("{}->{}", path, member.name);
+                            let member_addr = address + member.offset;
+                            let full_name = format!("(*{})->{}", name, member.name);
+                            let member_type_handle = pointee_handle.member_type(member);
+
+                            Self::render_type_tree(
+                                ui,
+                                &full_name,
+                                member_addr,
+                                Some(member_type_handle),
+                                &member_path,
+                                indent_level + 1,
+                                expanded_paths,
+                                false,
+                                toggle_expand_path,
+                                variables_to_add,
+                                symbol_to_use,
+                                root_symbol,
+                            );
+                        }
+                    }
+                }
+
+                // Handle pointee array
+                if let Some((count, elem_size, elem_type)) = pointee_array {
+                    let display_count = count.min(MAX_ARRAY_ELEMENTS);
+                    let truncated = count > MAX_ARRAY_ELEMENTS;
+
+                    ui.horizontal(|ui| {
+                        ui.add_space(((indent_level + 1) * 20) as f32);
+                        if truncated {
+                            ui.colored_label(
+                                Color32::YELLOW,
+                                format!(
+                                    "Showing {} of {} elements (max {})",
+                                    display_count, count, MAX_ARRAY_ELEMENTS
+                                ),
+                            );
+                        } else {
+                            ui.colored_label(Color32::GRAY, format!("{} elements", count));
+                        }
+                    });
+
+                    // Render each array element
+                    for i in 0..display_count {
+                        let elem_addr = address + (i * elem_size);
+                        let elem_name = format!("(*{})[{}]", name, i);
+                        let elem_path = format!("{}[{}]", path, i);
+
+                        Self::render_type_tree(
+                            ui,
+                            &elem_name,
+                            elem_addr,
+                            elem_type.clone(),
+                            &elem_path,
+                            indent_level + 1,
+                            expanded_paths,
+                            false,
+                            toggle_expand_path,
+                            variables_to_add,
+                            symbol_to_use,
+                            root_symbol,
+                        );
+                    }
+                }
+            } else if let Some((count, elem_size, elem_type)) = array_info.clone() {
+                // Handle regular array expansion
                 let display_count = count.min(MAX_ARRAY_ELEMENTS);
                 let truncated = count > MAX_ARRAY_ELEMENTS;
 
@@ -1812,7 +2008,7 @@ impl DataVisApp {
                         root_symbol,
                     );
                 }
-            } else if let Some((member_list, parent_handle)) = members {
+            } else if let Some((member_list, parent_handle, _is_through_pointer)) = members {
                 // Handle struct/union members
                 if member_list.is_empty() {
                     ui.horizontal(|ui| {
@@ -2836,6 +3032,11 @@ impl DataVisApp {
                         );
                     }
                     ui.label(format!("| Success: {:.1}%", self.stats.success_rate()));
+                    // Show current memory access mode
+                    if !self.stats.memory_access_mode.is_empty() {
+                        ui.separator();
+                        ui.label(format!("Mode: {}", self.stats.memory_access_mode));
+                    }
                 });
             });
 
@@ -3152,50 +3353,33 @@ impl DataVisApp {
 
                 ui.horizontal(|ui| {
                     ui.label("Memory Access:");
-                    let current_mode = self.config.probe.memory_access_mode;
+                    let old_mode = self.config.probe.memory_access_mode;
                     egui::ComboBox::from_id_salt("memory_access_mode")
-                        .selected_text(current_mode.to_string())
+                        .selected_text(old_mode.to_string())
                         .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_value(
-                                    &mut self.config.probe.memory_access_mode,
-                                    crate::config::MemoryAccessMode::Background,
-                                    "Background (Running)",
-                                )
-                                .changed()
-                            {
-                                self.frontend
-                                    .send_command(BackendCommand::SetMemoryAccessMode(
-                                        self.config.probe.memory_access_mode,
-                                    ));
-                            }
-                            if ui
-                                .selectable_value(
-                                    &mut self.config.probe.memory_access_mode,
-                                    crate::config::MemoryAccessMode::Halted,
-                                    "Halted (Per-batch)",
-                                )
-                                .changed()
-                            {
-                                self.frontend
-                                    .send_command(BackendCommand::SetMemoryAccessMode(
-                                        self.config.probe.memory_access_mode,
-                                    ));
-                            }
-                            if ui
-                                .selectable_value(
-                                    &mut self.config.probe.memory_access_mode,
-                                    crate::config::MemoryAccessMode::HaltedPersistent,
-                                    "Halted (Persistent)",
-                                )
-                                .changed()
-                            {
-                                self.frontend
-                                    .send_command(BackendCommand::SetMemoryAccessMode(
-                                        self.config.probe.memory_access_mode,
-                                    ));
-                            }
+                            ui.selectable_value(
+                                &mut self.config.probe.memory_access_mode,
+                                crate::config::MemoryAccessMode::Background,
+                                "Background (Running)",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.probe.memory_access_mode,
+                                crate::config::MemoryAccessMode::Halted,
+                                "Halted (Per-batch)",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.probe.memory_access_mode,
+                                crate::config::MemoryAccessMode::HaltedPersistent,
+                                "Halted (Persistent)",
+                            );
                         });
+                    // Check if mode changed after combo box interaction
+                    if self.config.probe.memory_access_mode != old_mode {
+                        self.frontend
+                            .send_command(BackendCommand::SetMemoryAccessMode(
+                                self.config.probe.memory_access_mode,
+                            ));
+                    }
                 })
                 .response
                 .on_hover_text(

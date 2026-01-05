@@ -655,9 +655,9 @@ impl BackendWorker {
 
     /// Send statistics to UI
     fn send_stats(&self) {
-        let _ = self
-            .message_tx
-            .send(BackendMessage::Stats(self.stats.clone()));
+        let mut stats = self.stats.clone();
+        stats.memory_access_mode = self.probe.memory_access_mode().to_string();
+        let _ = self.message_tx.send(BackendMessage::Stats(stats));
     }
 
     /// Send variable list to UI

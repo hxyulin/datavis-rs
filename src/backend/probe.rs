@@ -456,6 +456,11 @@ impl ProbeBackend {
         };
 
         let access_mode = self.config.memory_access_mode;
+        tracing::trace!(
+            "Reading {} variables with access mode: {:?}",
+            variables.len(),
+            access_mode
+        );
         let start = Instant::now();
 
         // Get core once for all reads
@@ -475,9 +480,12 @@ impl ProbeBackend {
             MemoryAccessMode::Halted => {
                 // Check if core is currently running
                 let is_running = core.status().map(|s| !s.is_halted()).unwrap_or(false);
+                tracing::trace!("Halted mode: core is_running={}", is_running);
                 if is_running {
                     if let Err(e) = core.halt(Duration::from_millis(100)) {
                         tracing::warn!("Failed to halt core for read: {}", e);
+                    } else {
+                        tracing::trace!("Halted core for batch read");
                     }
                 }
                 is_running
@@ -485,14 +493,20 @@ impl ProbeBackend {
             MemoryAccessMode::HaltedPersistent => {
                 // For persistent halt, halt if not already halted but don't resume
                 let is_running = core.status().map(|s| !s.is_halted()).unwrap_or(false);
+                tracing::trace!("HaltedPersistent mode: core is_running={}", is_running);
                 if is_running {
                     if let Err(e) = core.halt(Duration::from_millis(100)) {
                         tracing::warn!("Failed to halt core for read: {}", e);
+                    } else {
+                        tracing::info!("Halted core persistently for reads");
                     }
                 }
                 false // Never resume in persistent mode
             }
-            MemoryAccessMode::Background => false, // No halt needed
+            MemoryAccessMode::Background => {
+                tracing::trace!("Background mode: reading while target runs");
+                false // No halt needed
+            }
         };
 
         let mut results = Vec::with_capacity(variables.len());
@@ -529,6 +543,8 @@ impl ProbeBackend {
         if was_running {
             if let Err(e) = core.run() {
                 tracing::warn!("Failed to resume core after read: {}", e);
+            } else {
+                tracing::trace!("Resumed core after batch read");
             }
         }
 
@@ -547,8 +563,9 @@ impl ProbeBackend {
 
     /// Set the memory access mode
     pub fn set_memory_access_mode(&mut self, mode: MemoryAccessMode) {
+        let old_mode = self.config.memory_access_mode;
         self.config.memory_access_mode = mode;
-        tracing::info!("Memory access mode set to: {}", mode);
+        tracing::info!("Memory access mode changed: {:?} -> {:?}", old_mode, mode);
     }
 
     /// Check if the target core is currently halted

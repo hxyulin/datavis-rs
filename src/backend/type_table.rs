@@ -767,6 +767,10 @@ impl TypeTable {
                 TypeDef::Struct(s) | TypeDef::Union(s) => !s.members.is_empty(),
                 // Arrays are expandable if they have a known count > 0
                 TypeDef::Array { count, .. } => count.map(|c| c > 0).unwrap_or(false),
+                // Pointers/references are expandable if they point to an expandable type
+                TypeDef::Pointer(inner) | TypeDef::Reference(inner) => {
+                    self.is_expandable_with_depth(*inner, depth + 1)
+                }
                 TypeDef::Typedef { underlying, .. } => {
                     self.is_expandable_with_depth(*underlying, depth + 1)
                 }
@@ -1100,6 +1104,23 @@ impl TypeHandle {
             _ => None,
         }
     }
+
+    /// Check if this is a pointer type that can be expanded to show its pointee type
+    /// Returns true if this is a pointer/reference to a struct, union, or array
+    pub fn is_pointer_expandable(&self) -> bool {
+        if let Some(pointee) = self.pointee() {
+            let pointee_underlying = pointee.underlying();
+            pointee_underlying.is_struct_or_union() || pointee_underlying.is_array()
+        } else {
+            false
+        }
+    }
+
+    /// Get the pointee's underlying type handle for pointer expansion
+    /// This allows accessing the struct/union members that the pointer points to
+    pub fn pointee_underlying(&self) -> Option<TypeHandle> {
+        self.pointee().map(|p| p.underlying())
+    }
 }
 
 /// Shared type table wrapped in Arc for zero-cost cloning
@@ -1310,6 +1331,49 @@ mod tests {
         let pointee = handle.pointee().unwrap();
         assert!(pointee.is_primitive());
         assert_eq!(pointee.type_name(), "int");
+    }
+
+    #[test]
+    fn test_is_pointer_expandable() {
+        let mut table = TypeTable::new();
+
+        // Create a struct with members
+        let int_id = table.insert(TypeDef::Primitive(PrimitiveDef::Int));
+        let mut struct_def = StructDef::new(Some("TestStruct".to_string()), 8, false);
+        struct_def
+            .members
+            .push(MemberDef::new("a".to_string(), 0, int_id));
+        struct_def
+            .members
+            .push(MemberDef::new("b".to_string(), 4, int_id));
+        let struct_id = table.insert(TypeDef::Struct(struct_def));
+
+        // Create a pointer to the struct
+        let ptr_to_struct_id = table.insert(TypeDef::Pointer(struct_id));
+
+        // Create a pointer to a primitive (should not be expandable)
+        let ptr_to_int_id = table.insert(TypeDef::Pointer(int_id));
+
+        let shared = Arc::new(table);
+
+        // Pointer to struct should be expandable
+        let ptr_to_struct = TypeHandle::new(shared.clone(), ptr_to_struct_id);
+        assert!(ptr_to_struct.is_pointer_or_reference());
+        assert!(ptr_to_struct.is_pointer_expandable());
+        assert!(ptr_to_struct.is_expandable());
+
+        // Pointer to primitive should NOT be expandable
+        let ptr_to_int = TypeHandle::new(shared.clone(), ptr_to_int_id);
+        assert!(ptr_to_int.is_pointer_or_reference());
+        assert!(!ptr_to_int.is_pointer_expandable());
+        assert!(!ptr_to_int.is_expandable());
+
+        // The pointee_underlying should give us access to the struct
+        let pointee = ptr_to_struct.pointee_underlying().unwrap();
+        assert!(pointee.is_struct_or_union());
+        assert_eq!(pointee.type_name(), "TestStruct");
+        assert!(pointee.members().is_some());
+        assert_eq!(pointee.members().unwrap().len(), 2);
     }
 
     #[test]
