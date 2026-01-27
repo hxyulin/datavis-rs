@@ -35,7 +35,10 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// Maximum number of data points to retain in memory per variable
-pub const MAX_DATA_POINTS: usize = 10_000;
+pub const MAX_DATA_POINTS: usize = 100_000;
+
+/// Maximum number of points to render per line for performance
+pub const MAX_RENDER_POINTS: usize = 2000;
 
 /// Represents the type of a variable being observed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -148,6 +151,57 @@ impl std::fmt::Display for VariableType {
     }
 }
 
+/// Visual style for plotting data
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PlotStyle {
+    /// Standard line plot (default)
+    #[default]
+    Line,
+    /// Scatter plot showing individual data points
+    Scatter,
+    /// Step plot with horizontal-then-vertical transitions
+    Step,
+    /// Area plot filled to the X-axis
+    Area,
+}
+
+impl PlotStyle {
+    /// Get all available plot styles
+    pub fn all() -> &'static [PlotStyle] {
+        &[PlotStyle::Line, PlotStyle::Scatter, PlotStyle::Step, PlotStyle::Area]
+    }
+
+    /// Get display name for this plot style
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            PlotStyle::Line => "Line",
+            PlotStyle::Scatter => "Scatter",
+            PlotStyle::Step => "Step",
+            PlotStyle::Area => "Area",
+        }
+    }
+
+    /// Get icon character for this plot style
+    pub fn icon(&self) -> &'static str {
+        match self {
+            PlotStyle::Line => "─",
+            PlotStyle::Scatter => "•",
+            PlotStyle::Step => "⌐",
+            PlotStyle::Area => "▄",
+        }
+    }
+
+    /// Get the next plot style (for cycling)
+    pub fn next(&self) -> PlotStyle {
+        match self {
+            PlotStyle::Line => PlotStyle::Scatter,
+            PlotStyle::Scatter => PlotStyle::Step,
+            PlotStyle::Step => PlotStyle::Area,
+            PlotStyle::Area => PlotStyle::Line,
+        }
+    }
+}
+
 /// A single data point with timestamp and value
 #[derive(Debug, Clone)]
 pub struct DataPoint {
@@ -202,6 +256,12 @@ pub struct Variable {
     pub unit: String,
     /// Polling rate for this variable in Hz (0 = use global rate)
     pub poll_rate_hz: u32,
+    /// Y-axis assignment (0 = primary left axis, 1 = secondary right axis)
+    #[serde(default)]
+    pub y_axis: u8,
+    /// Visual style for plotting this variable
+    #[serde(default)]
+    pub plot_style: PlotStyle,
 }
 
 impl Default for Variable {
@@ -217,16 +277,20 @@ impl Default for Variable {
             show_in_graph: true,
             unit: String::new(),
             poll_rate_hz: 0,
+            y_axis: 0, // Primary (left) axis by default
+            plot_style: PlotStyle::default(),
         }
     }
 }
+
+/// Global counter for generating unique variable IDs
+static NEXT_VARIABLE_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 impl Variable {
     /// Create a new variable with the given parameters
     /// Automatically assigns a distinct color based on the variable ID
     pub fn new(name: impl Into<String>, address: u64, var_type: VariableType) -> Self {
-        static NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let id = NEXT_VARIABLE_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Self {
             id,
             name: name.into(),
@@ -264,6 +328,18 @@ impl Variable {
     /// Set whether to show in graph
     pub fn with_show_in_graph(mut self, show: bool) -> Self {
         self.show_in_graph = show;
+        self
+    }
+
+    /// Set the Y-axis assignment (0 = primary/left, 1 = secondary/right)
+    pub fn with_y_axis(mut self, axis: u8) -> Self {
+        self.y_axis = axis;
+        self
+    }
+
+    /// Set the plot style for visualization
+    pub fn with_plot_style(mut self, style: PlotStyle) -> Self {
+        self.plot_style = style;
         self
     }
 
@@ -316,6 +392,28 @@ impl Variable {
     /// - It has no converter script (converters are one-way, read-only transformations)
     pub fn is_writable(&self) -> bool {
         self.var_type.is_writable() && self.converter_script.is_none()
+    }
+
+    /// Synchronize the NEXT_VARIABLE_ID counter with existing variables
+    ///
+    /// This should be called after loading variables from a saved project
+    /// to ensure new variables get IDs that don't conflict with loaded ones.
+    pub fn sync_next_id(variables: &[Variable]) {
+        if let Some(max_id) = variables.iter().map(|v| v.id).max() {
+            // Set NEXT_VARIABLE_ID to max + 1, but only if it would increase the counter
+            let mut current = NEXT_VARIABLE_ID.load(std::sync::atomic::Ordering::SeqCst);
+            while current <= max_id {
+                match NEXT_VARIABLE_ID.compare_exchange(
+                    current,
+                    max_id + 1,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(new_current) => current = new_current,
+                }
+            }
+        }
     }
 }
 
@@ -480,7 +578,7 @@ impl VariableData {
         }
     }
 
-    /// Clear all data points
+    /// Clear all data points and reset error state
     pub fn clear(&mut self) {
         self.data_points.clear();
         self.last_value = None;
@@ -488,6 +586,7 @@ impl VariableData {
         self.start_time = Instant::now();
         self.stats.reset();
         self.stats_recalc_counter = 0;
+        self.clear_errors();
     }
 
     /// Get data points as plot points (time in seconds, converted value)
@@ -526,6 +625,27 @@ impl VariableData {
     pub fn record_error(&mut self, error: impl Into<String>) {
         self.error_count += 1;
         self.last_error = Some(error.into());
+    }
+
+    /// Check if there have been any errors
+    pub fn has_errors(&self) -> bool {
+        self.error_count > 0
+    }
+
+    /// Get the error rate as a percentage (errors / total reads)
+    pub fn error_rate(&self) -> f64 {
+        let total = self.data_points.len() as u64 + self.error_count;
+        if total == 0 {
+            0.0
+        } else {
+            (self.error_count as f64 / total as f64) * 100.0
+        }
+    }
+
+    /// Clear error state (e.g., when clearing data)
+    pub fn clear_errors(&mut self) {
+        self.error_count = 0;
+        self.last_error = None;
     }
 
     /// Get the last data point
@@ -595,6 +715,22 @@ pub struct CollectionStats {
     pub total_bytes_read: u64,
     /// Current memory access mode name (for display)
     pub memory_access_mode: String,
+    /// Number of messages dropped due to queue backpressure
+    pub dropped_messages: u64,
+
+    // Latency tracking
+    /// Minimum read latency in recent window (microseconds)
+    pub min_latency_us: u64,
+    /// Maximum read latency in recent window (microseconds)
+    pub max_latency_us: u64,
+    /// Latency jitter (max - min) in microseconds
+    pub jitter_us: u64,
+
+    // Bulk read stats
+    /// Number of bulk read operations performed
+    pub bulk_reads: u64,
+    /// Number of individual reads saved by bulk optimization
+    pub reads_saved_by_bulk: u64,
 }
 
 impl CollectionStats {

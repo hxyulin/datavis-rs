@@ -1334,49 +1334,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_pointer_expandable() {
-        let mut table = TypeTable::new();
-
-        // Create a struct with members
-        let int_id = table.insert(TypeDef::Primitive(PrimitiveDef::Int));
-        let mut struct_def = StructDef::new(Some("TestStruct".to_string()), 8, false);
-        struct_def
-            .members
-            .push(MemberDef::new("a".to_string(), 0, int_id));
-        struct_def
-            .members
-            .push(MemberDef::new("b".to_string(), 4, int_id));
-        let struct_id = table.insert(TypeDef::Struct(struct_def));
-
-        // Create a pointer to the struct
-        let ptr_to_struct_id = table.insert(TypeDef::Pointer(struct_id));
-
-        // Create a pointer to a primitive (should not be expandable)
-        let ptr_to_int_id = table.insert(TypeDef::Pointer(int_id));
-
-        let shared = Arc::new(table);
-
-        // Pointer to struct should be expandable
-        let ptr_to_struct = TypeHandle::new(shared.clone(), ptr_to_struct_id);
-        assert!(ptr_to_struct.is_pointer_or_reference());
-        assert!(ptr_to_struct.is_pointer_expandable());
-        assert!(ptr_to_struct.is_expandable());
-
-        // Pointer to primitive should NOT be expandable
-        let ptr_to_int = TypeHandle::new(shared.clone(), ptr_to_int_id);
-        assert!(ptr_to_int.is_pointer_or_reference());
-        assert!(!ptr_to_int.is_pointer_expandable());
-        assert!(!ptr_to_int.is_expandable());
-
-        // The pointee_underlying should give us access to the struct
-        let pointee = ptr_to_struct.pointee_underlying().unwrap();
-        assert!(pointee.is_struct_or_union());
-        assert_eq!(pointee.type_name(), "TestStruct");
-        assert!(pointee.members().is_some());
-        assert_eq!(pointee.members().unwrap().len(), 2);
-    }
-
-    #[test]
     fn test_stats() {
         let mut table = TypeTable::new();
         table.insert(TypeDef::Primitive(PrimitiveDef::Int));

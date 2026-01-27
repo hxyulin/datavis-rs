@@ -44,8 +44,12 @@
 use crate::config::{AppConfig, ConnectUnderReset, MemoryAccessMode, ProbeConfig, ProbeProtocol};
 use crate::error::{DataVisError, Result};
 use crate::types::{Variable, VariableType};
-use probe_rs::{probe::list::Lister, MemoryInterface, Permissions, Session};
+use probe_rs::{config::Registry, probe::list::Lister, MemoryInterface, Permissions, Session};
 use std::time::{Duration, Instant};
+
+// Re-export ProbeStats from probe_trait for backwards compatibility
+pub use super::probe_trait::ProbeStats;
+use super::probe_trait::DebugProbe;
 
 /// Information about a detected probe
 #[derive(Debug, Clone)]
@@ -90,41 +94,6 @@ pub struct ProbeBackend {
     stats: ProbeStats,
 }
 
-/// Statistics for probe operations
-#[derive(Debug, Clone, Default)]
-pub struct ProbeStats {
-    /// Total number of successful reads
-    pub successful_reads: u64,
-    /// Total number of failed reads
-    pub failed_reads: u64,
-    /// Total read time in microseconds
-    pub total_read_time_us: u64,
-    /// Last read time in microseconds
-    pub last_read_time_us: u64,
-    /// Total bytes read
-    pub total_bytes_read: u64,
-}
-
-impl ProbeStats {
-    /// Calculate average read time in microseconds
-    pub fn avg_read_time_us(&self) -> f64 {
-        if self.successful_reads == 0 {
-            0.0
-        } else {
-            self.total_read_time_us as f64 / self.successful_reads as f64
-        }
-    }
-
-    /// Calculate success rate as percentage
-    pub fn success_rate(&self) -> f64 {
-        let total = self.successful_reads + self.failed_reads;
-        if total == 0 {
-            100.0
-        } else {
-            (self.successful_reads as f64 / total as f64) * 100.0
-        }
-    }
-}
 
 impl ProbeBackend {
     /// Create a new probe backend with the given configuration
@@ -158,10 +127,17 @@ impl ProbeBackend {
             .collect()
     }
 
-    /// Connect to a probe
+    /// Connect to a probe using the target chip from configuration
     ///
     /// If `selector` is None, connects to the first available probe.
+    /// This convenience method uses the target chip from the probe's configuration.
+    /// For trait-based usage, use `DebugProbe::connect` which takes an explicit target.
     pub fn connect(&mut self, selector: Option<&str>) -> Result<()> {
+        self.connect_internal(selector)
+    }
+
+    /// Internal connect implementation
+    fn connect_internal(&mut self, selector: Option<&str>) -> Result<()> {
         // Disconnect if already connected
         self.disconnect();
 
@@ -231,7 +207,8 @@ impl ProbeBackend {
 
         // Attach to target
         tracing::debug!("Looking up target: {}", self.config.target_chip);
-        let target = match probe_rs::config::get_target_by_name(&self.config.target_chip) {
+        let registry = Registry::from_builtin_families();
+        let target = match registry.get_target_by_name(&self.config.target_chip) {
             Ok(t) => {
                 tracing::debug!("Found target: {}", t.name);
                 t
@@ -241,7 +218,8 @@ impl ProbeBackend {
                 return Err(e.into());
             }
         };
-        let permissions = Permissions::default();
+        // Use minimal permissions - we only need memory read access, no flash operations
+        let permissions = Permissions::new();
 
         tracing::info!(
             "Attaching with method: {:?}",
@@ -433,14 +411,16 @@ impl ProbeBackend {
     }
 
     /// Read multiple variables efficiently (batched read)
-    /// This acquires the core once and reads all variables, which is much faster
-    /// than calling read_variable individually for each variable.
+    /// This acquires the core once and uses bulk read optimization to group
+    /// adjacent memory addresses into single larger reads.
     ///
     /// The memory_access_mode controls how reads are performed:
     /// - Background: Read while target is running (non-intrusive but slower)
     /// - Halted: Halt target before reading, resume after (faster but intrusive)
     /// - HaltedPersistent: Keep target halted (fastest, use when target doesn't need to run)
     pub fn read_variables(&mut self, variables: &[Variable]) -> Vec<Result<f64>> {
+        use super::read_manager::ReadManager;
+
         if variables.is_empty() {
             return Vec::new();
         }
@@ -456,10 +436,13 @@ impl ProbeBackend {
         };
 
         let access_mode = self.config.memory_access_mode;
+        let gap_threshold = self.config.bulk_read_gap_threshold;
+
         tracing::trace!(
-            "Reading {} variables with access mode: {:?}",
+            "Reading {} variables with access mode: {:?}, gap_threshold: {}",
             variables.len(),
-            access_mode
+            access_mode,
+            gap_threshold
         );
         let start = Instant::now();
 
@@ -509,32 +492,65 @@ impl ProbeBackend {
             }
         };
 
-        let mut results = Vec::with_capacity(variables.len());
+        // Use ReadManager to plan bulk reads
+        let read_manager = ReadManager::new(gap_threshold);
+        let regions = read_manager.plan_reads(variables);
+
+        // Track bulk read statistics
+        let num_regions = regions.len();
+        let individual_reads_saved = variables.len().saturating_sub(num_regions);
+        self.stats.bulk_reads_performed += num_regions as u64;
+        self.stats.individual_reads_saved += individual_reads_saved as u64;
+
+        tracing::trace!(
+            "Bulk read: {} regions for {} variables (saved {} individual reads)",
+            num_regions,
+            variables.len(),
+            individual_reads_saved
+        );
+
+        // Pre-initialize results vector with errors (will be replaced on success)
+        let mut results: Vec<Result<f64>> = variables
+            .iter()
+            .map(|_| Err(DataVisError::Variable("Not read".to_string())))
+            .collect();
         let mut total_bytes = 0usize;
 
-        for variable in variables {
-            let size = variable.var_type.size_bytes();
-            if self.read_buffer.len() < size {
-                self.read_buffer.resize(size, 0);
+        // Read each region and extract variable values
+        for region in &regions {
+            // Ensure buffer is large enough
+            if self.read_buffer.len() < region.size {
+                self.read_buffer.resize(region.size, 0);
             }
 
-            match core.read(variable.address, &mut self.read_buffer[..size]) {
+            match core.read(region.address, &mut self.read_buffer[..region.size]) {
                 Ok(()) => {
-                    self.stats.successful_reads += 1;
-                    total_bytes += size;
+                    total_bytes += region.size;
 
-                    let value = variable
-                        .var_type
-                        .parse_to_f64(&self.read_buffer[..size])
-                        .ok_or_else(|| DataVisError::Variable("Failed to parse value".to_string()));
-                    results.push(value);
+                    // Extract values for each variable in this region
+                    for &var_idx in &region.variable_indices {
+                        let variable = &variables[var_idx];
+                        if let Some(value) = read_manager.extract_value(variable, region, &self.read_buffer[..region.size]) {
+                            self.stats.successful_reads += 1;
+                            results[var_idx] = Ok(value);
+                        } else {
+                            self.stats.failed_reads += 1;
+                            results[var_idx] = Err(DataVisError::Variable(format!(
+                                "Failed to parse value for {} at 0x{:08X}",
+                                variable.name, variable.address
+                            )));
+                        }
+                    }
                 }
                 Err(e) => {
-                    self.stats.failed_reads += 1;
-                    results.push(Err(DataVisError::MemoryAccess {
-                        address: variable.address,
-                        message: e.to_string(),
-                    }));
+                    // Mark all variables in this region as failed
+                    for &var_idx in &region.variable_indices {
+                        self.stats.failed_reads += 1;
+                        results[var_idx] = Err(DataVisError::MemoryAccess {
+                            address: variables[var_idx].address,
+                            message: e.to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -549,9 +565,10 @@ impl ProbeBackend {
         }
 
         let read_time = start.elapsed();
-        self.stats.last_read_time_us = read_time.as_micros() as u64;
-        self.stats.total_read_time_us += self.stats.last_read_time_us;
-        self.stats.total_bytes_read += total_bytes as u64;
+        let read_time_us = read_time.as_micros() as u64;
+
+        // Record timing with the enhanced stats tracking
+        self.stats.record_success(read_time_us, total_bytes as u64);
 
         results
     }
@@ -714,6 +731,81 @@ impl ProbeBackend {
 impl Drop for ProbeBackend {
     fn drop(&mut self) {
         self.disconnect();
+    }
+}
+
+/// Implementation of the DebugProbe trait for ProbeBackend
+///
+/// This allows ProbeBackend to be used interchangeably with other probe
+/// implementations (like MockProbeBackend) through the trait object interface.
+impl DebugProbe for ProbeBackend {
+    fn connect(&mut self, selector: Option<&str>, target: &str) -> Result<()> {
+        // Update the target chip in config if different
+        if self.config.target_chip != target {
+            self.config.target_chip = target.to_string();
+        }
+        // Use the existing connect method which reads target from config
+        self.connect_internal(selector)
+    }
+
+    fn disconnect(&mut self) {
+        ProbeBackend::disconnect(self)
+    }
+
+    fn is_connected(&self) -> bool {
+        ProbeBackend::is_connected(self)
+    }
+
+    fn read_variable(&mut self, variable: &Variable) -> Result<f64> {
+        ProbeBackend::read_variable(self, variable)
+    }
+
+    fn read_variables(&mut self, variables: &[Variable]) -> Vec<Result<f64>> {
+        ProbeBackend::read_variables(self, variables)
+    }
+
+    fn write_variable(&mut self, variable: &Variable, value: f64) -> Result<()> {
+        ProbeBackend::write_variable(self, variable, value)
+    }
+
+    fn read_memory(&mut self, address: u64, size: usize) -> Result<Vec<u8>> {
+        ProbeBackend::read_memory(self, address, size)
+    }
+
+    fn write_memory(&mut self, address: u64, data: &[u8]) -> Result<()> {
+        ProbeBackend::write_memory(self, address, data)
+    }
+
+    fn halt(&mut self) -> Result<()> {
+        ProbeBackend::halt(self)
+    }
+
+    fn resume(&mut self) -> Result<()> {
+        ProbeBackend::resume(self)
+    }
+
+    fn reset(&mut self, halt: bool) -> Result<()> {
+        ProbeBackend::reset(self, halt)
+    }
+
+    fn is_halted(&mut self) -> Result<bool> {
+        ProbeBackend::is_halted(self)
+    }
+
+    fn stats(&self) -> &ProbeStats {
+        ProbeBackend::stats(self)
+    }
+
+    fn stats_mut(&mut self) -> &mut ProbeStats {
+        &mut self.stats
+    }
+
+    fn memory_access_mode(&self) -> MemoryAccessMode {
+        ProbeBackend::memory_access_mode(self)
+    }
+
+    fn set_memory_access_mode(&mut self, mode: MemoryAccessMode) {
+        ProbeBackend::set_memory_access_mode(self, mode)
     }
 }
 

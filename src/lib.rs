@@ -64,12 +64,14 @@
 //! }
 //! ```
 
+pub mod analysis;
 pub mod app;
 pub mod backend;
 pub mod config;
 pub mod error;
 pub mod frontend;
 pub mod scripting;
+pub mod session;
 pub mod types;
 
 // Re-export commonly used types

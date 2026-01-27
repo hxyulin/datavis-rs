@@ -170,9 +170,9 @@ impl PlotView {
         let allow_y_drag = !self.lock_y && !self.auto_scale_y;
 
         let mut plot = Plot::new("main_data_plot")
-            .allow_zoom(egui::Vec2b::new(allow_x_zoom, allow_y_zoom))
-            .allow_drag(egui::Vec2b::new(allow_x_drag, allow_y_drag))
-            .allow_scroll(egui::Vec2b::new(!self.lock_x, !self.lock_y))
+            .allow_zoom([allow_x_zoom, allow_y_zoom])
+            .allow_drag([allow_x_drag, allow_y_drag])
+            .allow_scroll([!self.lock_x, !self.lock_y])
             .allow_boxed_zoom(allow_x_zoom || allow_y_zoom)
             .show_axes(true)
             .show_grid(self.show_grid)
@@ -194,7 +194,7 @@ impl PlotView {
         });
 
         // Set auto bounds behavior based on autoscale settings
-        plot = plot.auto_bounds(egui::Vec2b::new(false, self.auto_scale_y));
+        plot = plot.auto_bounds([false, self.auto_scale_y]);
 
         // Calculate bounds for setting
         let time_window = self.time_window;
@@ -240,7 +240,7 @@ impl PlotView {
 
             // Render current time indicator if following latest
             if self.follow_latest && auto_scale_x {
-                let vline = VLine::new(current_time)
+                let vline = VLine::new("current_time", current_time)
                     .color(Color32::from_rgba_unmultiplied(255, 255, 255, 64))
                     .width(1.0);
                 plot_ui.vline(vline);
@@ -322,10 +322,12 @@ impl PlotView {
             );
 
             // Create and render the line
-            let line = Line::new(plot_points)
-                .name(format!("{} ({})", data.variable.name, data.variable.unit))
-                .color(color)
-                .width(self.line_width);
+            let line = Line::new(
+                format!("{} ({})", data.variable.name, data.variable.unit),
+                plot_points,
+            )
+            .color(color)
+            .width(self.line_width);
 
             plot_ui.line(line);
         }
@@ -355,8 +357,7 @@ impl PlotView {
                 data.variable.color[3],
             );
 
-            let line = Line::new(points)
-                .name(&data.variable.name)
+            let line = Line::new(&data.variable.name, points)
                 .color(color)
                 .width(self.line_width);
 
@@ -495,8 +496,7 @@ fn create_time_grid_marks(bounds: (f64, f64), _base_step: f64) -> Vec<GridMark> 
 /// Statistics for a variable's data
 ///
 /// Provides statistical analysis of variable data including min/max,
-/// mean, and standard deviation. Useful for data analysis overlays.
-#[allow(dead_code)]
+/// mean, standard deviation, and RMS. Useful for data analysis overlays.
 #[derive(Debug, Clone, Default)]
 pub struct PlotStatistics {
     /// Minimum value
@@ -507,11 +507,16 @@ pub struct PlotStatistics {
     pub mean: f64,
     /// Standard deviation
     pub std_dev: f64,
+    /// Root mean square
+    pub rms: f64,
     /// Number of samples
     pub count: usize,
+    /// Time range start (if calculated for a range)
+    pub time_start: Option<f64>,
+    /// Time range end (if calculated for a range)
+    pub time_end: Option<f64>,
 }
 
-#[allow(dead_code)]
 impl PlotStatistics {
     /// Calculate statistics from variable data
     pub fn from_data(data: &VariableData) -> Self {
@@ -520,6 +525,34 @@ impl PlotStatistics {
         }
 
         let values: Vec<f64> = data.data_points.iter().map(|p| p.converted_value).collect();
+        Self::from_values(&values, None, None)
+    }
+
+    /// Calculate statistics from variable data within a time range
+    pub fn from_data_range(data: &VariableData, time_start: f64, time_end: f64) -> Self {
+        let values: Vec<f64> = data
+            .data_points
+            .iter()
+            .filter(|p| {
+                let t = p.timestamp.as_secs_f64();
+                t >= time_start && t <= time_end
+            })
+            .map(|p| p.converted_value)
+            .collect();
+
+        Self::from_values(&values, Some(time_start), Some(time_end))
+    }
+
+    /// Calculate statistics from a slice of values
+    fn from_values(values: &[f64], time_start: Option<f64>, time_end: Option<f64>) -> Self {
+        if values.is_empty() {
+            return Self {
+                time_start,
+                time_end,
+                ..Default::default()
+            };
+        }
+
         let count = values.len();
 
         let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -530,12 +563,19 @@ impl PlotStatistics {
         let variance: f64 = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / count as f64;
         let std_dev = variance.sqrt();
 
+        // RMS: sqrt(mean of squares)
+        let sum_of_squares: f64 = values.iter().map(|v| v * v).sum();
+        let rms = (sum_of_squares / count as f64).sqrt();
+
         Self {
             min,
             max,
             mean,
             std_dev,
+            rms,
             count,
+            time_start,
+            time_end,
         }
     }
 
@@ -543,64 +583,133 @@ impl PlotStatistics {
     pub fn peak_to_peak(&self) -> f64 {
         self.max - self.min
     }
+
+    /// Check if this is a valid (non-empty) statistics
+    pub fn is_valid(&self) -> bool {
+        self.count > 0
+    }
 }
 
 /// Cursor information for the plot
 ///
 /// Tracks the cursor position and finds the nearest data point
-/// for hover tooltips and data inspection.
-#[allow(dead_code)]
+/// for hover tooltips and data inspection. Supports dual cursors
+/// for range measurements.
 #[derive(Debug, Clone, Default)]
 pub struct PlotCursor {
-    /// Current cursor position (time, value)
+    /// Current cursor position in plot coordinates (time, value)
     pub position: Option<PlotPoint>,
-    /// Nearest data point to cursor
-    pub nearest_point: Option<(u32, PlotPoint)>,
+    /// First marker cursor position (for range measurements)
+    pub cursor_a: Option<PlotPoint>,
+    /// Second marker cursor position (for range measurements)
+    pub cursor_b: Option<PlotPoint>,
+    /// Whether cursor mode is enabled
+    pub enabled: bool,
+    /// Nearest data points to cursor (variable_id -> (point, variable_name))
+    pub nearest_points: HashMap<u32, (PlotPoint, String)>,
 }
 
-#[allow(dead_code)]
 impl PlotCursor {
-    /// Update cursor position from plot interaction
-    pub fn update(&mut self, plot_response: &egui_plot::PlotResponse<()>) {
-        self.position = plot_response.response.hover_pos().map(|pos| {
-            // Convert screen position to plot coordinates
-            // This is a simplified version - actual implementation would use plot transform
-            PlotPoint::new(pos.x as f64, pos.y as f64)
-        });
+    /// Create a new cursor with enabled state
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            ..Default::default()
+        }
     }
 
-    /// Find the nearest data point to the cursor
+    /// Update cursor position from plot coordinates
+    pub fn update_position(&mut self, position: Option<PlotPoint>) {
+        self.position = position;
+    }
+
+    /// Set cursor A at the current position
+    pub fn set_cursor_a(&mut self) {
+        self.cursor_a = self.position;
+    }
+
+    /// Set cursor B at the current position
+    pub fn set_cursor_b(&mut self) {
+        self.cursor_b = self.position;
+    }
+
+    /// Clear both cursors
+    pub fn clear_cursors(&mut self) {
+        self.cursor_a = None;
+        self.cursor_b = None;
+    }
+
+    /// Get the time delta between cursors (if both set)
+    pub fn time_delta(&self) -> Option<f64> {
+        match (self.cursor_a, self.cursor_b) {
+            (Some(a), Some(b)) => Some((b.x - a.x).abs()),
+            _ => None,
+        }
+    }
+
+    /// Get the value delta between cursors (if both set)
+    pub fn value_delta(&self) -> Option<f64> {
+        match (self.cursor_a, self.cursor_b) {
+            (Some(a), Some(b)) => Some(b.y - a.y),
+            _ => None,
+        }
+    }
+
+    /// Get the time range between cursors (ordered)
+    pub fn time_range(&self) -> Option<(f64, f64)> {
+        match (self.cursor_a, self.cursor_b) {
+            (Some(a), Some(b)) => {
+                let (min, max) = if a.x < b.x { (a.x, b.x) } else { (b.x, a.x) };
+                Some((min, max))
+            }
+            _ => None,
+        }
+    }
+
+    /// Find the nearest data point to the cursor for each enabled variable
     pub fn find_nearest(&mut self, variable_data: &HashMap<u32, VariableData>) {
+        self.nearest_points.clear();
+
         let Some(cursor_pos) = self.position else {
-            self.nearest_point = None;
             return;
         };
 
-        let mut min_distance = f64::INFINITY;
-        let mut nearest = None;
-
         for (id, data) in variable_data {
-            if !data.variable.enabled {
+            if !data.variable.enabled || !data.variable.show_in_graph {
                 continue;
             }
+
+            // Find nearest point in time (X-axis only for better UX)
+            let mut min_distance = f64::INFINITY;
+            let mut nearest: Option<PlotPoint> = None;
 
             for point in &data.data_points {
                 let x = point.timestamp.as_secs_f64();
                 let y = point.converted_value;
 
-                // Calculate distance (using normalized coordinates would be better)
-                let dx = x - cursor_pos.x;
-                let dy = y - cursor_pos.y;
-                let distance = (dx * dx + dy * dy).sqrt();
+                let distance = (x - cursor_pos.x).abs();
 
                 if distance < min_distance {
                     min_distance = distance;
-                    nearest = Some((*id, PlotPoint::new(x, y)));
+                    nearest = Some(PlotPoint::new(x, y));
                 }
             }
-        }
 
-        self.nearest_point = nearest;
+            if let Some(point) = nearest {
+                self.nearest_points
+                    .insert(*id, (point, data.variable.name.clone()));
+            }
+        }
+    }
+
+    /// Check if we have any active cursors set
+    pub fn has_cursors(&self) -> bool {
+        self.cursor_a.is_some() || self.cursor_b.is_some()
+    }
+
+    /// Check if we have both cursors set (for range measurements)
+    pub fn has_range(&self) -> bool {
+        self.cursor_a.is_some() && self.cursor_b.is_some()
     }
 }
 
@@ -608,7 +717,6 @@ impl PlotCursor {
 ///
 /// Provides a set of visually distinct colors for plotting multiple
 /// variables. Colors cycle when all are used.
-#[allow(dead_code)]
 pub struct ColorPalette {
     colors: Vec<[u8; 4]>,
     index: usize,
@@ -620,7 +728,6 @@ impl Default for ColorPalette {
     }
 }
 
-#[allow(dead_code)]
 impl ColorPalette {
     /// Create a new color palette with default colors
     pub fn new() -> Self {
@@ -810,5 +917,132 @@ mod tests {
         let stats = PlotStatistics::from_data(&data);
 
         assert_eq!(stats.count, 0);
+        assert!(!stats.is_valid());
+    }
+
+    #[test]
+    fn test_plot_statistics_with_data() {
+        use crate::types::{DataPoint, Variable};
+        use std::time::Duration;
+
+        let var = Variable::new("test", 0x2000_0000, crate::types::VariableType::U32);
+        let mut data = VariableData::new(var);
+
+        // Add some test data points: 1, 2, 3, 4, 5
+        for i in 1..=5 {
+            let dp = DataPoint {
+                timestamp: Duration::from_secs(i as u64),
+                raw_value: i as f64,
+                converted_value: i as f64,
+            };
+            data.data_points.push_back(dp);
+        }
+
+        let stats = PlotStatistics::from_data(&data);
+
+        assert!(stats.is_valid());
+        assert_eq!(stats.count, 5);
+        assert!((stats.min - 1.0).abs() < 0.001);
+        assert!((stats.max - 5.0).abs() < 0.001);
+        assert!((stats.mean - 3.0).abs() < 0.001);
+        assert!((stats.peak_to_peak() - 4.0).abs() < 0.001);
+        // RMS of 1,2,3,4,5 = sqrt((1+4+9+16+25)/5) = sqrt(11) ≈ 3.317
+        assert!((stats.rms - 3.317).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_plot_statistics_range() {
+        use crate::types::{DataPoint, Variable};
+        use std::time::Duration;
+
+        let var = Variable::new("test", 0x2000_0000, crate::types::VariableType::U32);
+        let mut data = VariableData::new(var);
+
+        // Add data at times 0-9 with values 0-9
+        for i in 0..10 {
+            let dp = DataPoint {
+                timestamp: Duration::from_secs(i as u64),
+                raw_value: i as f64,
+                converted_value: i as f64,
+            };
+            data.data_points.push_back(dp);
+        }
+
+        // Get stats for range 2-5 (should include values 2, 3, 4, 5)
+        let stats = PlotStatistics::from_data_range(&data, 2.0, 5.0);
+
+        assert!(stats.is_valid());
+        assert_eq!(stats.count, 4);
+        assert!((stats.min - 2.0).abs() < 0.001);
+        assert!((stats.max - 5.0).abs() < 0.001);
+        assert!((stats.mean - 3.5).abs() < 0.001);
+        assert_eq!(stats.time_start, Some(2.0));
+        assert_eq!(stats.time_end, Some(5.0));
+    }
+
+    #[test]
+    fn test_plot_cursor_default() {
+        let cursor = PlotCursor::default();
+        assert!(!cursor.enabled);
+        assert!(cursor.cursor_a.is_none());
+        assert!(cursor.cursor_b.is_none());
+        assert!(!cursor.has_cursors());
+        assert!(!cursor.has_range());
+    }
+
+    #[test]
+    fn test_plot_cursor_set_cursors() {
+        let mut cursor = PlotCursor::new(true);
+        assert!(cursor.enabled);
+
+        cursor.update_position(Some(PlotPoint::new(1.0, 10.0)));
+        cursor.set_cursor_a();
+        assert!(cursor.cursor_a.is_some());
+        assert!(cursor.has_cursors());
+        assert!(!cursor.has_range());
+
+        cursor.update_position(Some(PlotPoint::new(3.0, 30.0)));
+        cursor.set_cursor_b();
+        assert!(cursor.cursor_b.is_some());
+        assert!(cursor.has_range());
+
+        // Check time delta
+        let dt = cursor.time_delta().unwrap();
+        assert!((dt - 2.0).abs() < 0.001);
+
+        // Check value delta
+        let dv = cursor.value_delta().unwrap();
+        assert!((dv - 20.0).abs() < 0.001);
+
+        // Check time range (should be ordered)
+        let (t_min, t_max) = cursor.time_range().unwrap();
+        assert!((t_min - 1.0).abs() < 0.001);
+        assert!((t_max - 3.0).abs() < 0.001);
+
+        // Clear cursors
+        cursor.clear_cursors();
+        assert!(!cursor.has_cursors());
+        assert!(!cursor.has_range());
+    }
+
+    #[test]
+    fn test_plot_cursor_time_range_reversed() {
+        let mut cursor = PlotCursor::new(true);
+
+        // Set B before A (reversed order)
+        cursor.update_position(Some(PlotPoint::new(5.0, 50.0)));
+        cursor.set_cursor_a();
+
+        cursor.update_position(Some(PlotPoint::new(2.0, 20.0)));
+        cursor.set_cursor_b();
+
+        // Time range should still be ordered
+        let (t_min, t_max) = cursor.time_range().unwrap();
+        assert!((t_min - 2.0).abs() < 0.001);
+        assert!((t_max - 5.0).abs() < 0.001);
+
+        // Time delta should be absolute
+        let dt = cursor.time_delta().unwrap();
+        assert!((dt - 3.0).abs() < 0.001);
     }
 }

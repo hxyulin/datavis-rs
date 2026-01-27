@@ -30,6 +30,7 @@
 //! - `prev()` / `prev_raw()` - Previous values for derivative calculations
 
 use crate::backend::{BackendCommand, BackendMessage, ProbeBackend};
+use crate::backend::probe_trait::DebugProbe;
 use crate::config::AppConfig;
 use crate::scripting::{ExecutionContext, ScriptEngine};
 use crate::types::{CollectionStats, ConnectionStatus, Variable};
@@ -96,14 +97,11 @@ pub struct BackendWorker {
     message_tx: Sender<BackendMessage>,
     /// Running flag
     running: Arc<AtomicBool>,
-    /// Probe backend for SWD operations (real hardware)
-    probe: ProbeBackend,
-    /// Mock probe backend for testing (only with mock-probe feature)
+    /// Probe backend for SWD operations (supports both real and mock probes)
+    probe: Box<dyn DebugProbe>,
+    /// Whether currently using a mock probe (only with mock-probe feature)
     #[cfg(feature = "mock-probe")]
-    mock_probe: MockProbeBackend,
-    /// Whether to use the mock probe (only with mock-probe feature)
-    #[cfg(feature = "mock-probe")]
-    use_mock_probe: bool,
+    is_mock_probe: bool,
     /// Script engine for value conversion
     script_engine: ScriptEngine,
     /// Variables being observed
@@ -137,7 +135,7 @@ impl BackendWorker {
         running: Arc<AtomicBool>,
     ) -> Self {
         let poll_rate_hz = config.collection.poll_rate_hz;
-        let probe = ProbeBackend::from_app_config(&config);
+        let probe: Box<dyn DebugProbe> = Box::new(ProbeBackend::from_app_config(&config));
 
         Self {
             config,
@@ -146,9 +144,7 @@ impl BackendWorker {
             running,
             probe,
             #[cfg(feature = "mock-probe")]
-            mock_probe: MockProbeBackend::new(),
-            #[cfg(feature = "mock-probe")]
-            use_mock_probe: false,
+            is_mock_probe: false,
             script_engine: ScriptEngine::new(),
             variables: HashMap::new(),
             converters: HashMap::new(),
@@ -188,8 +184,6 @@ impl BackendWorker {
 
         // Cleanup
         self.probe.disconnect();
-        #[cfg(feature = "mock-probe")]
-        self.mock_probe.disconnect();
 
         let _ = self.message_tx.send(BackendMessage::Shutdown);
         tracing::info!("Backend worker stopped");
@@ -257,8 +251,22 @@ impl BackendWorker {
             }
             #[cfg(feature = "mock-probe")]
             BackendCommand::UseMockProbe(use_mock) => {
-                self.use_mock_probe = use_mock;
-                tracing::info!("Using mock probe: {}", use_mock);
+                // Disconnect current probe if connected
+                if self.connection_status != ConnectionStatus::Disconnected {
+                    self.probe.disconnect();
+                    self.update_connection_status(ConnectionStatus::Disconnected);
+                }
+
+                // Swap to the appropriate probe implementation
+                if use_mock && !self.is_mock_probe {
+                    self.probe = Box::new(MockProbeBackend::new());
+                    self.is_mock_probe = true;
+                    tracing::info!("Switched to mock probe");
+                } else if !use_mock && self.is_mock_probe {
+                    self.probe = Box::new(ProbeBackend::from_app_config(&self.config));
+                    self.is_mock_probe = false;
+                    tracing::info!("Switched to real probe");
+                }
             }
             BackendCommand::RefreshProbes => {
                 self.refresh_probes();
@@ -274,13 +282,13 @@ impl BackendWorker {
             .send(crate::backend::BackendMessage::ProbeList(probes));
     }
 
-    /// Check if we should use mock probe
+    /// Check if we are using a mock probe
     #[allow(dead_code)]
     #[inline]
-    fn should_use_mock(&self) -> bool {
+    fn is_using_mock(&self) -> bool {
         #[cfg(feature = "mock-probe")]
         {
-            self.use_mock_probe
+            self.is_mock_probe
         }
         #[cfg(not(feature = "mock-probe"))]
         {
@@ -293,41 +301,15 @@ impl BackendWorker {
         &mut self,
         selector: Option<String>,
         target: String,
-        probe_config: crate::config::ProbeConfig,
+        _probe_config: crate::config::ProbeConfig,
     ) {
         self.update_connection_status(ConnectionStatus::Connecting);
 
-        #[cfg(feature = "mock-probe")]
-        if self.use_mock_probe {
-            // Connect to mock probe
-            match self.mock_probe.connect(selector.as_deref(), &target) {
-                Ok(()) => {
-                    self.update_connection_status(ConnectionStatus::Connected);
-                    tracing::info!("Connected to mock probe");
-                }
-                Err(e) => {
-                    self.update_connection_status(ConnectionStatus::Error);
-                    let error_msg = format!("Failed to connect to mock probe: {}", e);
-                    tracing::error!("{}", error_msg);
-                    let _ = self
-                        .message_tx
-                        .send(BackendMessage::ConnectionError(error_msg));
-                }
-            }
-            return;
-        }
-
-        // Use the probe configuration from the UI (includes connect_under_reset, halt_on_connect, etc.)
-        let mut config = probe_config;
-        config.target_chip = target;
-        config.probe_selector = selector.clone();
-        self.probe.set_config(config);
-
-        // Attempt connection to real probe
-        match self.probe.connect(selector.as_deref()) {
+        // Connect using the trait method (works for both real and mock probes)
+        match self.probe.connect(selector.as_deref(), &target) {
             Ok(()) => {
                 self.update_connection_status(ConnectionStatus::Connected);
-                tracing::info!("Connected to probe");
+                tracing::info!("Connected to probe (target: {})", target);
             }
             Err(e) => {
                 self.update_connection_status(ConnectionStatus::Error);
@@ -343,17 +325,7 @@ impl BackendWorker {
     /// Handle disconnect command
     fn handle_disconnect(&mut self) {
         self.collecting = false;
-
-        #[cfg(feature = "mock-probe")]
-        if self.use_mock_probe {
-            self.mock_probe.disconnect();
-        } else {
-            self.probe.disconnect();
-        }
-
-        #[cfg(not(feature = "mock-probe"))]
         self.probe.disconnect();
-
         self.update_connection_status(ConnectionStatus::Disconnected);
         tracing::info!("Disconnected from probe");
     }
@@ -362,17 +334,6 @@ impl BackendWorker {
     fn start_collection(&mut self) {
         if self.connection_status == ConnectionStatus::Connected {
             // Resume the core if it was halted (e.g., from halt_on_connect)
-            #[cfg(feature = "mock-probe")]
-            if !self.use_mock_probe {
-                match self.probe.resume() {
-                    Ok(()) => tracing::info!("Core resumed for data collection"),
-                    Err(e) => {
-                        tracing::warn!("Failed to resume core (may already be running): {}", e)
-                    }
-                }
-            }
-
-            #[cfg(not(feature = "mock-probe"))]
             match self.probe.resume() {
                 Ok(()) => tracing::info!("Core resumed for data collection"),
                 Err(e) => tracing::warn!("Failed to resume core (may already be running): {}", e),
@@ -475,27 +436,7 @@ impl BackendWorker {
             return;
         }
 
-        // Perform the write
-        #[cfg(feature = "mock-probe")]
-        if self.use_mock_probe {
-            match self.mock_probe.write_variable(&var, value) {
-                Ok(()) => {
-                    tracing::info!("Wrote value {} to variable '{}' (mock)", value, var.name);
-                    let _ = self
-                        .message_tx
-                        .send(BackendMessage::WriteSuccess { variable_id: id });
-                }
-                Err(e) => {
-                    tracing::error!("Failed to write to variable '{}': {}", var.name, e);
-                    let _ = self.message_tx.send(BackendMessage::WriteError {
-                        variable_id: id,
-                        error: format!("Write failed: {}", e),
-                    });
-                }
-            }
-            return;
-        }
-
+        // Perform the write using the trait method
         match self.probe.write_variable(&var, value) {
             Ok(()) => {
                 tracing::info!("Wrote value {} to variable '{}'", value, var.name);
@@ -541,24 +482,8 @@ impl BackendWorker {
         }
 
         // Use batched read for better performance (single core acquisition)
-        let read_results = {
-            #[cfg(feature = "mock-probe")]
-            {
-                if self.use_mock_probe {
-                    // Mock probe doesn't have batched read, use individual reads
-                    enabled_vars
-                        .iter()
-                        .map(|v| self.mock_probe.read_variable(v))
-                        .collect::<Vec<_>>()
-                } else {
-                    self.probe.read_variables(&enabled_vars)
-                }
-            }
-            #[cfg(not(feature = "mock-probe"))]
-            {
-                self.probe.read_variables(&enabled_vars)
-            }
-        };
+        // The trait provides read_variables which probes can optimize
+        let read_results = self.probe.read_variables(&enabled_vars);
 
         // Process results
         for (var, read_result) in enabled_vars.iter().zip(read_results.into_iter()) {
@@ -603,7 +528,7 @@ impl BackendWorker {
                 }
                 Err(e) => {
                     self.stats.failed_reads += 1;
-                    let _ = self.message_tx.send(BackendMessage::ReadError {
+                    self.try_send_message(BackendMessage::ReadError {
                         variable_id: var.id,
                         error: e.to_string(),
                     });
@@ -611,14 +536,27 @@ impl BackendWorker {
             }
         }
 
-        // Send batch if not empty
+        // Send batch if not empty (using try_send for backpressure)
         if !batch.is_empty() {
-            let _ = self.message_tx.send(BackendMessage::DataBatch(batch));
+            self.try_send_message(BackendMessage::DataBatch(batch));
         }
 
-        // Update effective sample rate based on batch timing
+        // Update stats from probe
         let probe_stats = self.probe.stats();
         self.stats.avg_read_time_us = probe_stats.avg_read_time_us();
+        self.stats.successful_reads = probe_stats.successful_reads;
+        self.stats.failed_reads = probe_stats.failed_reads;
+        self.stats.total_bytes_read = probe_stats.total_bytes_read;
+
+        // Update latency tracking
+        self.stats.min_latency_us = probe_stats.recent_min_us();
+        self.stats.max_latency_us = probe_stats.recent_max_us();
+        self.stats.jitter_us = probe_stats.jitter_us();
+
+        // Update bulk read stats
+        self.stats.bulk_reads = probe_stats.bulk_reads_performed;
+        self.stats.reads_saved_by_bulk = probe_stats.individual_reads_saved;
+
         // Calculate rate based on total batch time, not per-variable time
         if self.stats.avg_read_time_us > 0.0 && !enabled_vars.is_empty() {
             // The avg_read_time_us now represents the entire batch read time
@@ -653,17 +591,27 @@ impl BackendWorker {
             .send(BackendMessage::ConnectionStatus(status));
     }
 
-    /// Send statistics to UI
-    fn send_stats(&self) {
+    /// Send statistics to UI (using try_send for backpressure)
+    fn send_stats(&mut self) {
         let mut stats = self.stats.clone();
         stats.memory_access_mode = self.probe.memory_access_mode().to_string();
-        let _ = self.message_tx.send(BackendMessage::Stats(stats));
+        self.try_send_message(BackendMessage::Stats(stats));
     }
 
     /// Send variable list to UI
     fn send_variable_list(&self) {
         let vars: Vec<Variable> = self.variables.values().cloned().collect();
         let _ = self.message_tx.send(BackendMessage::VariableList(vars));
+    }
+
+    /// Try to send a message, tracking dropped messages if queue is full
+    ///
+    /// Uses try_send() to avoid blocking. If the queue is full, the message
+    /// is dropped and the dropped_messages counter is incremented.
+    fn try_send_message(&mut self, msg: BackendMessage) {
+        if self.message_tx.try_send(msg).is_err() {
+            self.stats.dropped_messages += 1;
+        }
     }
 }
 
@@ -754,10 +702,10 @@ mod tests {
 
         // When mock-probe feature is not enabled, should always return false
         #[cfg(not(feature = "mock-probe"))]
-        assert!(!worker.should_use_mock());
+        assert!(!worker.is_using_mock());
 
-        // When mock-probe feature is enabled, depends on use_mock_probe flag
+        // When mock-probe feature is enabled, depends on is_mock_probe flag
         #[cfg(feature = "mock-probe")]
-        assert!(!worker.should_use_mock()); // defaults to false
+        assert!(!worker.is_using_mock()); // defaults to false
     }
 }

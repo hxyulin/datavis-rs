@@ -10,7 +10,7 @@
 //! - Enum parsing
 //! - Full type reference resolution (pointers, arrays, typedefs, etc.)
 
-use super::dwarf_parser::DwarfParser;
+use super::dwarf_parser::{DwarfDiagnostics, DwarfParser, VariableStatus};
 use super::type_table::{MemberDef, SharedTypeTable, TypeHandle, TypeId, TypeTable};
 use crate::error::{DataVisError, Result};
 use crate::types::{Variable, VariableType};
@@ -43,6 +43,8 @@ pub struct SymbolInfo {
     pub is_global: bool,
     /// Type ID referencing the type table (if available)
     pub type_id: Option<TypeId>,
+    /// Status indicating why this variable can or cannot be read (from DWARF)
+    pub status: Option<VariableStatus>,
 }
 
 impl SymbolInfo {
@@ -88,6 +90,27 @@ impl SymbolInfo {
     /// Get a TypeHandle for this symbol's type (requires shared type table)
     pub fn type_handle(&self, table: &SharedTypeTable) -> Option<TypeHandle> {
         self.type_id.map(|id| TypeHandle::new(table.clone(), id))
+    }
+
+    /// Check if this symbol can be read (has a valid address)
+    pub fn is_readable(&self) -> bool {
+        self.status.as_ref().map_or(true, |s| s.is_readable())
+    }
+
+    /// Get the reason why this symbol cannot be read, if applicable
+    pub fn unreadable_reason(&self) -> Option<&'static str> {
+        match &self.status {
+            Some(status) if !status.is_readable() => Some(status.reason()),
+            _ => None,
+        }
+    }
+
+    /// Get detailed reason for unreadability
+    pub fn detailed_unreadable_reason(&self) -> Option<String> {
+        match &self.status {
+            Some(status) if !status.is_readable() => Some(status.detailed_reason()),
+            _ => None,
+        }
     }
 }
 
@@ -139,6 +162,8 @@ pub struct ElfInfo {
     symbols_by_address: HashMap<u64, Vec<usize>>,
     /// Global type table from DWARF (wrapped in Arc for sharing)
     type_table: SharedTypeTable,
+    /// Diagnostic statistics from DWARF parsing
+    diagnostics: DwarfDiagnostics,
 }
 
 impl ElfInfo {
@@ -154,6 +179,7 @@ impl ElfInfo {
             symbols_by_name: HashMap::new(),
             symbols_by_address: HashMap::new(),
             type_table: Arc::new(TypeTable::new()),
+            diagnostics: DwarfDiagnostics::default(),
         }
     }
 
@@ -162,9 +188,24 @@ impl ElfInfo {
         self.type_table = Arc::new(table);
     }
 
+    /// Set the diagnostics (used during parsing)
+    fn set_diagnostics(&mut self, diagnostics: DwarfDiagnostics) {
+        self.diagnostics = diagnostics;
+    }
+
     /// Get a reference to the shared type table
     pub fn type_table(&self) -> &SharedTypeTable {
         &self.type_table
+    }
+
+    /// Get DWARF parsing diagnostics
+    pub fn get_diagnostics(&self) -> &DwarfDiagnostics {
+        &self.diagnostics
+    }
+
+    /// Get the status of a specific symbol
+    pub fn get_symbol_status<'a>(&self, symbol: &'a SymbolInfo) -> Option<&'a VariableStatus> {
+        symbol.status.as_ref()
     }
 
     /// Add a symbol to the index
@@ -442,15 +483,17 @@ impl ElfParser {
         let result = DwarfParser::parse_bytes(data)
             .map_err(|e| DataVisError::ElfParsing(format!("DWARF parsing failed: {}", e)))?;
 
-        // Set the type table
+        // Set the type table and diagnostics
         info.set_type_table(result.type_table);
+        info.set_diagnostics(result.diagnostics);
 
         // Map parsed DWARF symbols to existing symbols by address
         // Build a lookup from address to parsed symbol for efficient matching
+        // Include address 0 symbols since they may be valid on embedded targets
         let dwarf_symbols_by_addr: HashMap<u64, &super::dwarf_parser::ParsedSymbol> = result
             .symbols
             .iter()
-            .filter(|s| s.address != 0)
+            .filter(|s| s.status.is_readable())
             .map(|s| (s.address, s))
             .collect();
 
@@ -468,11 +511,12 @@ impl ElfParser {
         let mut matched_by_addr = 0;
         let mut matched_by_name = 0;
 
-        // Update existing symbols with type information from DWARF
+        // Update existing symbols with type information and status from DWARF
         for symbol in &mut info.symbols {
             // First try to match by address
             if let Some(dwarf_sym) = dwarf_symbols_by_addr.get(&symbol.address) {
                 symbol.type_id = Some(dwarf_sym.type_id);
+                symbol.status = Some(dwarf_sym.status.clone());
                 // Update size if DWARF has better info
                 if dwarf_sym.size > 0 && symbol.size == 0 {
                     symbol.size = dwarf_sym.size;
@@ -489,6 +533,7 @@ impl ElfParser {
 
             if let Some(dwarf_sym) = matched {
                 symbol.type_id = Some(dwarf_sym.type_id);
+                symbol.status = Some(dwarf_sym.status.clone());
                 if dwarf_sym.size > 0 && symbol.size == 0 {
                     symbol.size = dwarf_sym.size;
                 }
@@ -516,9 +561,11 @@ impl ElfParser {
         }
 
         // Add any DWARF-discovered symbols that aren't in the symbol table
+        // Only add symbols that are readable (have valid addresses)
         let mut _added_from_dwarf = 0;
         for dwarf_sym in &result.symbols {
-            if dwarf_sym.address == 0 {
+            // Skip symbols that aren't readable
+            if !dwarf_sym.status.is_readable() {
                 continue;
             }
 
@@ -546,6 +593,7 @@ impl ElfParser {
                 section: String::new(),
                 is_global: dwarf_sym.is_global,
                 type_id: Some(dwarf_sym.type_id),
+                status: Some(dwarf_sym.status.clone()),
             });
             _added_from_dwarf += 1;
         }
@@ -648,6 +696,7 @@ impl ElfParser {
             section,
             is_global,
             type_id: None,
+            status: None,
         })
     }
 }

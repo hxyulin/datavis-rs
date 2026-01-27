@@ -4,6 +4,11 @@
 //! Each panel encapsulates a specific piece of UI functionality and can be
 //! composed together to build the main application interface.
 //!
+//! # Panel Trait
+//!
+//! The [`Panel`] trait provides a unified interface for panel components.
+//! Each panel implements this trait to standardize rendering and action handling.
+//!
 //! # Panels
 //!
 //! - [`ConnectionPanel`] - Displays connection status and probe controls
@@ -18,6 +23,99 @@ use crate::config::AppConfig;
 use crate::types::{CollectionStats, ConnectionStatus, VariableData};
 use egui::{Color32, RichText, Ui};
 use std::collections::HashMap;
+
+// ============================================================================
+// Panel Trait System
+// ============================================================================
+
+/// Response from panel rendering
+///
+/// Contains any actions the panel wants to perform and whether content changed.
+#[derive(Default)]
+pub struct PanelResponse<A = ()> {
+    /// Actions to perform after rendering
+    pub actions: Vec<A>,
+    /// Whether the panel contents changed (for optimization)
+    pub changed: bool,
+}
+
+impl<A> PanelResponse<A> {
+    /// Create a new empty panel response
+    pub fn new() -> Self {
+        Self {
+            actions: Vec::new(),
+            changed: false,
+        }
+    }
+
+    /// Add an action to the response
+    pub fn with_action(mut self, action: A) -> Self {
+        self.actions.push(action);
+        self
+    }
+
+    /// Mark the panel as having changed
+    pub fn with_changed(mut self, changed: bool) -> Self {
+        self.changed = changed;
+        self
+    }
+
+    /// Check if any actions were produced
+    pub fn has_actions(&self) -> bool {
+        !self.actions.is_empty()
+    }
+
+    /// Take all actions from the response
+    pub fn take_actions(&mut self) -> Vec<A> {
+        std::mem::take(&mut self.actions)
+    }
+}
+
+/// Trait for panel components
+///
+/// Panels are reusable UI components that render a specific piece of functionality.
+/// Each panel defines its own action type and props (context needed for rendering).
+///
+/// # Example
+///
+/// ```ignore
+/// pub enum MyPanelAction {
+///     ButtonClicked,
+///     ValueChanged(f64),
+/// }
+///
+/// pub struct MyPanelProps<'a> {
+///     pub value: &'a mut f64,
+///     pub enabled: bool,
+/// }
+///
+/// pub struct MyPanel;
+///
+/// impl Panel for MyPanel {
+///     type Action = MyPanelAction;
+///     type Props<'a> = MyPanelProps<'a>;
+///
+///     fn render(ui: &mut Ui, props: Self::Props<'_>) -> PanelResponse<Self::Action> {
+///         let mut response = PanelResponse::new();
+///         // Render panel content...
+///         response
+///     }
+/// }
+/// ```
+pub trait Panel {
+    /// The action type this panel can produce
+    type Action;
+
+    /// The props/context needed to render this panel
+    type Props<'a>;
+
+    /// Render the panel and return any actions
+    fn render(ui: &mut Ui, props: Self::Props<'_>) -> PanelResponse<Self::Action>;
+}
+
+// ============================================================================
+// Panel Implementations (Legacy - will be migrated to use Panel trait in Phase 4)
+// ============================================================================
 
 /// Renders the connection status panel
 pub struct ConnectionPanel;
@@ -55,15 +153,15 @@ impl ConnectionPanel {
             // Connect/Disconnect button
             match status {
                 ConnectionStatus::Disconnected | ConnectionStatus::Error => {
-                    if ui.button("🔌 Connect").clicked() {
+                    if ui.button("Connect").clicked() {
                         on_connect();
                     }
                 }
                 ConnectionStatus::Connecting => {
-                    ui.add_enabled(false, egui::Button::new("⏳ Connecting..."));
+                    ui.add_enabled(false, egui::Button::new("Connecting..."));
                 }
                 ConnectionStatus::Connected => {
-                    if ui.button("🔌 Disconnect").clicked() {
+                    if ui.button("Disconnect").clicked() {
                         on_disconnect();
                     }
                 }
@@ -128,7 +226,7 @@ impl StatsPanel {
 
         // Error message display
         if let Some(error) = error_message {
-            ui.colored_label(Color32::RED, format!("⚠ {}", error));
+            ui.colored_label(Color32::RED, format!("Warning:{}", error));
         }
     }
 }
@@ -150,7 +248,7 @@ impl VariableListPanel {
             ui.heading("Variables");
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("➕ Add").clicked() {
+                if ui.button("Add").clicked() {
                     on_add();
                 }
             });
@@ -268,7 +366,7 @@ impl VariableListPanel {
                     });
 
                 ui.horizontal(|ui| {
-                    if ui.button("🗑 Remove").clicked() {
+                    if ui.button("Remove").clicked() {
                         on_remove(id);
                         if *selected_id == Some(id) {
                             *selected_id = None;
@@ -301,7 +399,7 @@ impl CollectionControlPanel {
             if collecting {
                 // Stop button
                 if ui
-                    .add_enabled(connected, egui::Button::new("⏹ Stop"))
+                    .add_enabled(connected, egui::Button::new("Stop"))
                     .clicked()
                 {
                     on_stop();
@@ -310,15 +408,15 @@ impl CollectionControlPanel {
                 // Pause/Resume button
                 if paused {
                     if ui
-                        .add_enabled(connected, egui::Button::new("▶ Resume"))
+                        .add_enabled(connected, egui::Button::new("Resume"))
                         .clicked()
                     {
                         on_pause();
                     }
-                    ui.colored_label(Color32::YELLOW, "⏸ Paused");
+                    ui.colored_label(Color32::YELLOW, "Paused");
                 } else {
                     if ui
-                        .add_enabled(connected, egui::Button::new("⏸ Pause"))
+                        .add_enabled(connected, egui::Button::new("Pause"))
                         .clicked()
                     {
                         on_pause();
@@ -328,7 +426,7 @@ impl CollectionControlPanel {
             } else {
                 // Start button
                 if ui
-                    .add_enabled(connected, egui::Button::new("▶ Start"))
+                    .add_enabled(connected, egui::Button::new("Start"))
                     .clicked()
                 {
                     on_start();
@@ -339,7 +437,7 @@ impl CollectionControlPanel {
             ui.separator();
 
             // Clear button (always available)
-            if ui.button("🗑 Clear Data").clicked() {
+            if ui.button("Clear Data").clicked() {
                 on_clear();
             }
         });
@@ -418,7 +516,7 @@ impl ProbeListPanel {
 
         ui.separator();
 
-        if ui.button("🔄 Refresh").clicked() {
+        if ui.button("Refresh").clicked() {
             // Caller should refresh the probe list
         }
     }

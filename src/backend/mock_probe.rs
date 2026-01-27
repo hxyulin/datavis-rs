@@ -56,10 +56,13 @@
 //! cargo run --features mock-probe
 //! ```
 
+use crate::config::MemoryAccessMode;
 use crate::error::{DataVisError, Result};
 use crate::types::{Variable, VariableType};
 use std::collections::HashMap;
 use std::time::Instant;
+
+use super::probe_trait::{DebugProbe, ProbeStats};
 
 /// Pattern for generating mock data
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -318,6 +321,12 @@ pub struct MockProbeBackend {
     /// If true, always generate patterns instead of reading from memory
     /// This is useful for testing when you want interesting data
     pattern_only_mode: bool,
+    /// Probe statistics
+    stats: ProbeStats,
+    /// Memory access mode
+    memory_access_mode: MemoryAccessMode,
+    /// Simulated halt state
+    halted: bool,
 }
 
 impl MockProbeBackend {
@@ -336,6 +345,9 @@ impl MockProbeBackend {
             target_name: "MockTarget".to_string(),
             read_delay_us: 100,      // Simulate 100us read time
             pattern_only_mode: true, // Default to pattern mode for interesting data
+            stats: ProbeStats::default(),
+            memory_access_mode: MemoryAccessMode::Background,
+            halted: false,
         }
     }
 
@@ -475,7 +487,7 @@ impl MockProbeBackend {
     }
 
     /// Read raw memory
-    pub fn read_memory(&self, address: u64, size: usize) -> Result<Vec<u8>> {
+    pub fn read_memory(&mut self, address: u64, size: usize) -> Result<Vec<u8>> {
         if !self.connected {
             return Err(DataVisError::Config("Mock probe not connected".to_string()));
         }
@@ -544,6 +556,106 @@ impl MockProbeBackend {
 impl Default for MockProbeBackend {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Implementation of the DebugProbe trait for MockProbeBackend
+///
+/// This allows MockProbeBackend to be used interchangeably with real probe
+/// implementations through the trait object interface.
+impl DebugProbe for MockProbeBackend {
+    fn connect(&mut self, selector: Option<&str>, target: &str) -> Result<()> {
+        MockProbeBackend::connect(self, selector, target)
+    }
+
+    fn disconnect(&mut self) {
+        MockProbeBackend::disconnect(self)
+    }
+
+    fn is_connected(&self) -> bool {
+        MockProbeBackend::is_connected(self)
+    }
+
+    fn read_variable(&mut self, variable: &Variable) -> Result<f64> {
+        let start = Instant::now();
+        let result = MockProbeBackend::read_variable(self, variable);
+        let elapsed = start.elapsed().as_micros() as u64;
+
+        match &result {
+            Ok(_) => self
+                .stats
+                .record_success(elapsed, variable.var_type.size_bytes() as u64),
+            Err(_) => self.stats.record_failure(),
+        }
+
+        result
+    }
+
+    fn read_variables(&mut self, variables: &[Variable]) -> Vec<Result<f64>> {
+        variables.iter().map(|v| self.read_variable(v)).collect()
+    }
+
+    fn write_variable(&mut self, variable: &Variable, value: f64) -> Result<()> {
+        MockProbeBackend::write_variable(self, variable, value)
+    }
+
+    fn read_memory(&mut self, address: u64, size: usize) -> Result<Vec<u8>> {
+        MockProbeBackend::read_memory(self, address, size)
+    }
+
+    fn write_memory(&mut self, address: u64, data: &[u8]) -> Result<()> {
+        MockProbeBackend::write_memory(self, address, data)
+    }
+
+    fn halt(&mut self) -> Result<()> {
+        if !self.connected {
+            return Err(DataVisError::Config("Mock probe not connected".to_string()));
+        }
+        self.halted = true;
+        tracing::info!("Mock probe halted");
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<()> {
+        if !self.connected {
+            return Err(DataVisError::Config("Mock probe not connected".to_string()));
+        }
+        self.halted = false;
+        tracing::info!("Mock probe resumed");
+        Ok(())
+    }
+
+    fn reset(&mut self, halt: bool) -> Result<()> {
+        if !self.connected {
+            return Err(DataVisError::Config("Mock probe not connected".to_string()));
+        }
+        self.halted = halt;
+        self.start_time = Instant::now(); // Reset the pattern generation time
+        tracing::info!("Mock probe reset (halt={})", halt);
+        Ok(())
+    }
+
+    fn is_halted(&mut self) -> Result<bool> {
+        if !self.connected {
+            return Err(DataVisError::Config("Mock probe not connected".to_string()));
+        }
+        Ok(self.halted)
+    }
+
+    fn stats(&self) -> &ProbeStats {
+        &self.stats
+    }
+
+    fn stats_mut(&mut self) -> &mut ProbeStats {
+        &mut self.stats
+    }
+
+    fn memory_access_mode(&self) -> MemoryAccessMode {
+        self.memory_access_mode
+    }
+
+    fn set_memory_access_mode(&mut self, mode: MemoryAccessMode) {
+        self.memory_access_mode = mode;
     }
 }
 

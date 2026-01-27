@@ -504,20 +504,15 @@ impl ScriptEditorState {
 pub struct ScriptEditor<'a> {
     script: &'a mut String,
     state: &'a mut ScriptEditorState,
-    id: egui::Id,
 }
 
 impl<'a> ScriptEditor<'a> {
     pub fn new(
         script: &'a mut String,
         state: &'a mut ScriptEditorState,
-        id: impl std::hash::Hash,
+        _id: impl std::hash::Hash,
     ) -> Self {
-        Self {
-            script,
-            state,
-            id: egui::Id::new(id),
-        }
+        Self { script, state }
     }
 
     /// Validate the script using the provided engine
@@ -534,7 +529,7 @@ impl<'a> ScriptEditor<'a> {
 
     /// Show the script editor
     pub fn show(self, ui: &mut Ui) -> egui::Response {
-        let Self { script, state, id } = self;
+        let Self { script, state } = self;
 
         let response = ui
             .vertical(|ui| {
@@ -556,7 +551,7 @@ impl<'a> ScriptEditor<'a> {
                         for (name, source) in crate::scripting::builtins::all() {
                             if ui.button(name).clicked() {
                                 *script = source.trim().to_string();
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                         ui.separator();
@@ -564,7 +559,7 @@ impl<'a> ScriptEditor<'a> {
                         for (name, source) in crate::scripting::builtins::transformers() {
                             if ui.button(name).clicked() {
                                 *script = source.trim().to_string();
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     });
@@ -573,7 +568,7 @@ impl<'a> ScriptEditor<'a> {
 
                     // Validation status
                     if let Some(ref error) = state.validation_error {
-                        ui.label(RichText::new("⚠").color(Color32::YELLOW))
+                        ui.label(RichText::new("!").color(Color32::YELLOW))
                             .on_hover_text(error);
                     } else if !script.is_empty() {
                         ui.label(RichText::new("✓").color(Color32::GREEN))
@@ -603,7 +598,7 @@ impl<'a> ScriptEditor<'a> {
                     if response.changed() {
                         // Extract current word at cursor
                         if let Some(cursor) = output.cursor_range {
-                            let pos = cursor.primary.ccursor.index;
+                            let pos = cursor.primary.index;
                             let word = extract_word_at_cursor(script, pos);
                             state.current_word = word.clone();
                             state.autocomplete_start_pos = pos - word.len();
@@ -648,13 +643,9 @@ impl<'a> ScriptEditor<'a> {
 
                     // Show autocomplete popup
                     if state.autocomplete_open && !state.suggestions.is_empty() {
-                        let popup_id = id.with("autocomplete_popup");
-                        egui::popup_below_widget(
-                            ui,
-                            popup_id,
-                            &response,
-                            egui::PopupCloseBehavior::CloseOnClickOutside,
-                            |ui| {
+                        egui::Popup::from_response(&response)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .show(|ui| {
                                 egui::ScrollArea::vertical()
                                     .max_height(200.0)
                                     .show(ui, |ui| {
@@ -681,34 +672,9 @@ impl<'a> ScriptEditor<'a> {
                                                     );
                                                 });
                                             });
-
-                                            if ui
-                                                .interact(
-                                                    ui.min_rect(),
-                                                    id.with(("item", i)),
-                                                    egui::Sense::click(),
-                                                )
-                                                .clicked()
-                                            {
-                                                state.selected_suggestion = i;
-                                                // Insert on click
-                                                if let Some(item) = state.get_selected() {
-                                                    let completion = if item.signature.is_some() {
-                                                        format!("{}(", item.name)
-                                                    } else {
-                                                        item.name.clone()
-                                                    };
-                                                    let start = state.autocomplete_start_pos;
-                                                    let end = start + state.current_word.len();
-                                                    script.replace_range(start..end, &completion);
-                                                    state.autocomplete_open = false;
-                                                }
-                                            }
                                         }
                                     });
-                            },
-                        );
-                        ui.memory_mut(|mem| mem.open_popup(popup_id));
+                            });
                     }
 
                     // Help panel

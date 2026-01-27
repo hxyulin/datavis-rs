@@ -23,6 +23,162 @@ use gimli::{
 use object::{Object, ObjectSection};
 use std::borrow::Cow;
 
+/// Status of a variable's address resolution
+#[derive(Debug, Clone)]
+pub enum VariableStatus {
+    /// Variable has a valid static address
+    Valid { address: u64 },
+    /// Variable was optimized out (has type but no location)
+    OptimizedOut,
+    /// Variable is a local requiring runtime context
+    LocalVariable { reason: String },
+    /// Variable is an extern declaration (defined elsewhere)
+    ExternDeclaration,
+    /// Variable is a compile-time constant
+    CompileTimeConstant { value: Option<i64> },
+    /// Variable's type could not be resolved
+    UnresolvedType { type_name: Option<String> },
+    /// No location information in DWARF
+    NoLocation,
+    /// Location evaluated to address 0 (may be valid on embedded)
+    AddressZero,
+    /// Value is in a register only (no memory address)
+    RegisterOnly { register: u16 },
+    /// Value is implicit/computed (DW_OP_stack_value, DW_OP_implicit_value)
+    ImplicitValue,
+    /// Pointer to optimized-out data (DW_OP_implicit_pointer)
+    ImplicitPointer,
+    /// Variable split across multiple locations (DW_OP_piece)
+    MultiPiece { has_address: bool },
+    /// Compiler-generated variable (DW_AT_artificial)
+    Artificial,
+}
+
+impl VariableStatus {
+    /// Check if this variable is readable (has a valid address)
+    pub fn is_readable(&self) -> bool {
+        matches!(
+            self,
+            VariableStatus::Valid { .. }
+                | VariableStatus::AddressZero
+                | VariableStatus::MultiPiece { has_address: true }
+        )
+    }
+
+    /// Get the address if available
+    pub fn address(&self) -> Option<u64> {
+        match self {
+            VariableStatus::Valid { address } => Some(*address),
+            VariableStatus::AddressZero => Some(0),
+            VariableStatus::MultiPiece { has_address: true } => {
+                // For multi-piece with address, we return address 0 as placeholder
+                // The actual address handling happens during evaluation
+                Some(0)
+            }
+            _ => None,
+        }
+    }
+
+    /// Get a human-readable reason for the status
+    pub fn reason(&self) -> &'static str {
+        match self {
+            VariableStatus::Valid { .. } => "Valid address",
+            VariableStatus::OptimizedOut => "Optimized out by compiler",
+            VariableStatus::LocalVariable { .. } => "Local variable (requires runtime context)",
+            VariableStatus::ExternDeclaration => "External declaration (defined in another unit)",
+            VariableStatus::CompileTimeConstant { .. } => {
+                "Compile-time constant (no runtime storage)"
+            }
+            VariableStatus::UnresolvedType { .. } => "Type information unavailable",
+            VariableStatus::NoLocation => "No location information in debug info",
+            VariableStatus::AddressZero => "Address is 0 (may be valid on embedded targets)",
+            VariableStatus::RegisterOnly { .. } => "Value in register only (no memory address)",
+            VariableStatus::ImplicitValue => "Implicit value (computed, no storage)",
+            VariableStatus::ImplicitPointer => "Implicit pointer (points to optimized-out data)",
+            VariableStatus::MultiPiece { has_address: true } => {
+                "Split across locations (partial address)"
+            }
+            VariableStatus::MultiPiece { has_address: false } => {
+                "Split across registers/implicit values"
+            }
+            VariableStatus::Artificial => "Compiler-generated variable",
+        }
+    }
+
+    /// Get detailed reason including any additional context
+    pub fn detailed_reason(&self) -> String {
+        match self {
+            VariableStatus::LocalVariable { reason } => {
+                format!("Local variable: {}", reason)
+            }
+            VariableStatus::CompileTimeConstant { value: Some(v) } => {
+                format!("Compile-time constant: value = {}", v)
+            }
+            VariableStatus::UnresolvedType {
+                type_name: Some(name),
+            } => {
+                format!("Unresolved type: {}", name)
+            }
+            _ => self.reason().to_string(),
+        }
+    }
+}
+
+/// Diagnostic statistics from DWARF parsing
+#[derive(Debug, Default, Clone)]
+pub struct DwarfDiagnostics {
+    /// Total number of variables found in DWARF
+    pub total_variables: usize,
+    /// Variables with valid static addresses
+    pub with_valid_address: usize,
+    /// Variables optimized out by the compiler
+    pub optimized_out: usize,
+    /// Local variables requiring runtime context
+    pub local_variables: usize,
+    /// External declarations (defined elsewhere)
+    pub extern_declarations: usize,
+    /// Compile-time constants with no runtime storage
+    pub compile_time_constants: usize,
+    /// Variables with no location information
+    pub no_location: usize,
+    /// Variables with unresolved types
+    pub unresolved_types: usize,
+    /// Variables with address 0 (may be valid on embedded)
+    pub address_zero: usize,
+    /// Variables in registers only (no memory address)
+    pub register_only: usize,
+    /// Variables with implicit/computed values
+    pub implicit_value: usize,
+    /// Variables with implicit pointers
+    pub implicit_pointer: usize,
+    /// Variables split across multiple locations
+    pub multi_piece: usize,
+    /// Compiler-generated (artificial) variables
+    pub artificial: usize,
+}
+
+impl DwarfDiagnostics {
+    /// Increment the appropriate counter based on variable status
+    pub fn record(&mut self, status: &VariableStatus) {
+        self.total_variables += 1;
+        match status {
+            VariableStatus::Valid { .. } => self.with_valid_address += 1,
+            VariableStatus::OptimizedOut => self.optimized_out += 1,
+            VariableStatus::LocalVariable { .. } => self.local_variables += 1,
+            VariableStatus::ExternDeclaration => self.extern_declarations += 1,
+            VariableStatus::CompileTimeConstant { .. } => self.compile_time_constants += 1,
+            VariableStatus::UnresolvedType { .. } => self.unresolved_types += 1,
+            VariableStatus::NoLocation => self.no_location += 1,
+            VariableStatus::AddressZero => self.address_zero += 1,
+            VariableStatus::RegisterOnly { .. } => self.register_only += 1,
+            VariableStatus::ImplicitValue => self.implicit_value += 1,
+            VariableStatus::ImplicitPointer => self.implicit_pointer += 1,
+            VariableStatus::MultiPiece { .. } => self.multi_piece += 1,
+            VariableStatus::Artificial => self.artificial += 1,
+        }
+    }
+}
+
 /// A parsed symbol with type information
 #[derive(Debug, Clone)]
 pub struct ParsedSymbol {
@@ -32,6 +188,8 @@ pub struct ParsedSymbol {
     pub size: u64,
     pub type_id: TypeId,
     pub is_global: bool,
+    /// Status indicating why a variable can or cannot be read
+    pub status: VariableStatus,
 }
 
 /// Result of parsing DWARF info
@@ -42,6 +200,8 @@ pub struct DwarfParseResult {
     /// Mapping from variable name (including mangled names) to TypeId
     /// This includes variables without addresses that couldn't become full symbols
     pub name_to_type: std::collections::HashMap<String, TypeId>,
+    /// Diagnostic statistics about variable parsing
+    pub diagnostics: DwarfDiagnostics,
 }
 
 /// DWARF parser that populates a TypeTable
@@ -91,7 +251,7 @@ impl VariableInfo {
 #[derive(Debug)]
 struct DeferredVariable {
     info: VariableInfo,
-    address: Option<u64>,
+    status: VariableStatus,
     target_offset: usize,
 }
 
@@ -100,10 +260,10 @@ struct DeferredVariable {
 struct PendingSymbol {
     name: String,
     mangled_name: Option<String>,
-    address: Option<u64>,
     size: u64,
     type_key: Option<DwarfTypeKey>,
     is_global: bool,
+    status: VariableStatus,
 }
 
 type Reader<'a> = EndianSlice<'a, RunTimeEndian>;
@@ -129,10 +289,11 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
                 .unwrap_or(Cow::Borrowed(&[])))
         };
 
-        let dwarf_cow =
-            gimli::Dwarf::load(load_section).map_err(|e| format!("Failed to load DWARF: {}", e))?;
+        let dwarf_sections: gimli::DwarfSections<Cow<[u8]>> =
+            gimli::DwarfSections::load(load_section)
+                .map_err(|e| format!("Failed to load DWARF: {}", e))?;
 
-        let dwarf = dwarf_cow.borrow(|section| EndianSlice::new(section, endian));
+        let dwarf = dwarf_sections.borrow(|section| EndianSlice::new(section, endian));
 
         let mut parser = DwarfParser {
             dwarf: &dwarf,
@@ -759,6 +920,9 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
             return;
         }
 
+        // Get variable status (includes address if available)
+        let status = self.get_variable_status(unit, entry);
+
         // Check for DW_AT_specification or DW_AT_abstract_origin and inherit info
         let target_offset = self.get_reference_offset(unit, entry);
         if let Some(target_off) = target_offset {
@@ -766,10 +930,9 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
                 info.inherit_from(target_info);
             } else {
                 // Target not yet parsed - defer to second pass
-                let address = self.get_variable_location(unit, entry);
                 self.deferred_variables.push(DeferredVariable {
                     info,
-                    address,
+                    status,
                     target_offset: target_off,
                 });
                 return;
@@ -777,8 +940,7 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         }
 
         // Create pending symbol if we have enough info
-        let address = self.get_variable_location(unit, entry);
-        self.try_add_pending_symbol(info, address);
+        self.try_add_pending_symbol(info, status);
     }
 
     /// Get the global .debug_info offset for a DIE
@@ -818,7 +980,7 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
     }
 
     /// Try to create a pending symbol from variable info
-    fn try_add_pending_symbol(&mut self, info: VariableInfo, address: Option<u64>) {
+    fn try_add_pending_symbol(&mut self, info: VariableInfo, status: VariableStatus) {
         let name = info.linkage_name.clone().or(info.name.clone());
         let name = match name {
             Some(n) if !n.is_empty() => n,
@@ -836,10 +998,10 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
             } else {
                 None
             },
-            address,
             size: info.size,
             type_key: info.type_key,
             is_global: info.is_global,
+            status,
         });
     }
 
@@ -855,17 +1017,11 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         // Resolve inherited members
         self.resolve_inherited_members();
 
-        // Count variables without addresses before consuming pending_symbols
-        let without_address = self
-            .pending_symbols
-            .iter()
-            .filter(|p| p.address.is_none())
-            .count();
-
         // Build name-to-type mapping for ALL variables (including those without addresses)
         // and separate out symbols with addresses
         let mut name_to_type = std::collections::HashMap::new();
         let mut symbols = Vec::new();
+        let mut diagnostics = DwarfDiagnostics::default();
 
         for pending in self.pending_symbols {
             let type_id = pending
@@ -873,7 +1029,11 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
                 .and_then(|k| self.type_table.get_by_dwarf_key(k))
                 .unwrap_or(TypeId::INVALID);
 
+            // Track diagnostics based on status
+            diagnostics.record(&pending.status);
+
             if !type_id.is_valid() {
+                diagnostics.unresolved_types += 1;
                 continue;
             }
 
@@ -883,31 +1043,28 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
                 name_to_type.insert(mangled.clone(), type_id);
             }
 
-            // Only create full symbols for variables with addresses
-            if let Some(address) = pending.address {
-                // Get size from type if not specified
-                let size = if pending.size > 0 {
-                    pending.size
-                } else {
-                    self.type_table.type_size(type_id).unwrap_or(0)
-                };
+            // Get address from status (if readable)
+            let address = pending.status.address().unwrap_or(0);
 
-                symbols.push(ParsedSymbol {
-                    name: pending.name,
-                    mangled_name: pending.mangled_name,
-                    address,
-                    size,
-                    type_id,
-                    is_global: pending.is_global,
-                });
-            }
+            // Get size from type if not specified
+            let size = if pending.size > 0 {
+                pending.size
+            } else {
+                self.type_table.type_size(type_id).unwrap_or(0)
+            };
+
+            symbols.push(ParsedSymbol {
+                name: pending.name,
+                mangled_name: pending.mangled_name,
+                address,
+                size,
+                type_id,
+                is_global: pending.is_global,
+                status: pending.status,
+            });
         }
 
         let stats = self.type_table.stats();
-
-        // Count how many pending symbols had valid vs invalid type resolution
-        let _total_pending = symbols.len() + name_to_type.len();
-        let with_address = symbols.len();
 
         tracing::debug!(
             "DWARF parsing complete: {} types, {} structs, {} forward decls ({} unresolved)",
@@ -917,11 +1074,44 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
             stats.unresolved_forward_decls,
         );
 
-        tracing::debug!(
-            "DWARF variables: {} with addresses, {} without (name-to-type mappings for fallback matching)",
-            with_address,
-            without_address
+        // Log detailed diagnostics
+        tracing::info!(
+            "DWARF variables: {} total | {} readable | {} optimized | {} register-only | {} artificial",
+            diagnostics.total_variables,
+            diagnostics.with_valid_address + diagnostics.address_zero,
+            diagnostics.optimized_out,
+            diagnostics.register_only,
+            diagnostics.artificial,
         );
+
+        if diagnostics.local_variables > 0
+            || diagnostics.extern_declarations > 0
+            || diagnostics.compile_time_constants > 0
+        {
+            tracing::debug!(
+                "DWARF details: {} local | {} extern | {} const",
+                diagnostics.local_variables,
+                diagnostics.extern_declarations,
+                diagnostics.compile_time_constants,
+            );
+        }
+
+        if diagnostics.no_location > 0
+            || diagnostics.unresolved_types > 0
+            || diagnostics.implicit_value > 0
+            || diagnostics.implicit_pointer > 0
+            || diagnostics.multi_piece > 0
+        {
+            tracing::debug!(
+                "DWARF edge cases: {} no location | {} unresolved types | {} implicit | {} implicit ptr | {} multi-piece | {} addr zero",
+                diagnostics.no_location,
+                diagnostics.unresolved_types,
+                diagnostics.implicit_value,
+                diagnostics.implicit_pointer,
+                diagnostics.multi_piece,
+                diagnostics.address_zero,
+            );
+        }
 
         // Log info about variable cache and deferred resolution
         tracing::debug!(
@@ -934,6 +1124,7 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
             type_table: self.type_table,
             symbols,
             name_to_type,
+            diagnostics,
         }
     }
 
@@ -949,7 +1140,7 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
                 info.inherit_from(target_info);
             }
 
-            self.try_add_pending_symbol(info, var.address);
+            self.try_add_pending_symbol(info, var.status);
         }
     }
 
@@ -1255,6 +1446,292 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         }
     }
 
+    /// Get detailed variable status including why a variable can or cannot be read.
+    ///
+    /// This provides diagnostic information about:
+    /// - Artificial (compiler-generated) variables
+    /// - Compile-time constants (have value but no runtime storage)
+    /// - External declarations (defined in another compilation unit)
+    /// - Optimized out variables (no location in DWARF)
+    /// - Local variables (require runtime context like registers or stack)
+    /// - Valid static addresses (including address 0 on embedded targets)
+    fn get_variable_status(
+        &self,
+        unit: &Unit<Reader<'a>>,
+        entry: &DebuggingInformationEntry<Reader<'a>>,
+    ) -> VariableStatus {
+        // 0. Check for artificial (compiler-generated) FIRST
+        // These include: `this` pointers, VLA bounds, closure captures, temporaries
+        if self.has_artificial_attr(entry) {
+            return VariableStatus::Artificial;
+        }
+
+        // 1. Check for compile-time constant (has value but may not have location)
+        let has_const_value = entry.attr_value(gimli::DW_AT_const_value).ok().flatten().is_some();
+        let has_location = entry.attr_value(gimli::DW_AT_location).ok().flatten().is_some();
+
+        if has_const_value && !has_location {
+            let value = self.get_const_value(entry);
+            return VariableStatus::CompileTimeConstant { value };
+        }
+
+        // 2. Check for extern declaration (external + no location)
+        let is_external = self.has_external_attr(entry);
+        if is_external && !has_location {
+            return VariableStatus::ExternDeclaration;
+        }
+
+        // 3. No location attribute = likely optimized out
+        if !has_location {
+            return VariableStatus::OptimizedOut;
+        }
+
+        // 4. Evaluate the location expression to get the address
+        self.evaluate_location_to_status(unit, entry)
+    }
+
+    /// Evaluate a location attribute and return detailed status
+    fn evaluate_location_to_status(
+        &self,
+        unit: &Unit<Reader<'a>>,
+        entry: &DebuggingInformationEntry<Reader<'a>>,
+    ) -> VariableStatus {
+        let attr = match entry.attr_value(gimli::DW_AT_location).ok().flatten() {
+            Some(attr) => attr,
+            None => return VariableStatus::NoLocation,
+        };
+
+        match attr {
+            // Expression-based location (most common for global variables)
+            AttributeValue::Exprloc(expr) => self.evaluate_expr_to_status(unit, &expr),
+
+            // Direct address value (some older DWARF or simple cases)
+            AttributeValue::Addr(addr) => {
+                if addr == 0 {
+                    VariableStatus::AddressZero
+                } else {
+                    VariableStatus::Valid { address: addr }
+                }
+            }
+
+            // Indexed address (DWARF 5)
+            AttributeValue::DebugAddrIndex(index) => {
+                match self.dwarf.address(unit, index) {
+                    Ok(addr) if addr == 0 => VariableStatus::AddressZero,
+                    Ok(addr) => VariableStatus::Valid { address: addr },
+                    Err(_) => VariableStatus::NoLocation,
+                }
+            }
+
+            // Location list reference
+            AttributeValue::LocationListsRef(offset) => {
+                match self.evaluate_location_list(unit, offset) {
+                    Some(0) => VariableStatus::AddressZero,
+                    Some(addr) => VariableStatus::Valid { address: addr },
+                    None => VariableStatus::LocalVariable {
+                        reason: "Location list with no static entry".to_string(),
+                    },
+                }
+            }
+
+            // Offset into location lists (DWARF 5)
+            AttributeValue::DebugLocListsIndex(index) => {
+                if let Ok(offset) = self.dwarf.locations_offset(unit, index) {
+                    match self.evaluate_location_list(unit, offset) {
+                        Some(0) => VariableStatus::AddressZero,
+                        Some(addr) => VariableStatus::Valid { address: addr },
+                        None => VariableStatus::LocalVariable {
+                            reason: "Location list with no static entry".to_string(),
+                        },
+                    }
+                } else {
+                    VariableStatus::NoLocation
+                }
+            }
+
+            // Block containing location expression (older DWARF)
+            AttributeValue::Block(block) => {
+                let expr = gimli::Expression(block);
+                self.evaluate_expr_to_status(unit, &expr)
+            }
+
+            // Data forms that might contain addresses directly
+            AttributeValue::Udata(addr) => {
+                if addr == 0 {
+                    VariableStatus::AddressZero
+                } else {
+                    VariableStatus::Valid { address: addr }
+                }
+            }
+            AttributeValue::Data1(addr) => {
+                if addr == 0 {
+                    VariableStatus::AddressZero
+                } else {
+                    VariableStatus::Valid { address: addr as u64 }
+                }
+            }
+            AttributeValue::Data2(addr) => {
+                if addr == 0 {
+                    VariableStatus::AddressZero
+                } else {
+                    VariableStatus::Valid { address: addr as u64 }
+                }
+            }
+            AttributeValue::Data4(addr) => {
+                if addr == 0 {
+                    VariableStatus::AddressZero
+                } else {
+                    VariableStatus::Valid { address: addr as u64 }
+                }
+            }
+            AttributeValue::Data8(addr) => {
+                if addr == 0 {
+                    VariableStatus::AddressZero
+                } else {
+                    VariableStatus::Valid { address: addr }
+                }
+            }
+            AttributeValue::Sdata(addr) => {
+                if addr == 0 {
+                    VariableStatus::AddressZero
+                } else {
+                    VariableStatus::Valid { address: addr as u64 }
+                }
+            }
+
+            _ => VariableStatus::NoLocation,
+        }
+    }
+
+    /// Evaluate a DWARF expression and return detailed status
+    fn evaluate_expr_to_status(
+        &self,
+        unit: &Unit<Reader<'a>>,
+        expr: &gimli::Expression<Reader<'a>>,
+    ) -> VariableStatus {
+        let mut evaluation = expr.clone().evaluation(unit.encoding());
+
+        let mut result = match evaluation.evaluate() {
+            Ok(r) => r,
+            Err(_) => return VariableStatus::NoLocation,
+        };
+
+        loop {
+            match result {
+                // Evaluation complete - extract the address from the result
+                gimli::EvaluationResult::Complete => {
+                    let pieces = evaluation.result();
+
+                    // Empty result = optimized out
+                    if pieces.is_empty() {
+                        return VariableStatus::OptimizedOut;
+                    }
+
+                    // Multi-piece: variable split across locations (DW_OP_piece/DW_OP_bit_piece)
+                    if pieces.len() > 1 {
+                        let has_address = pieces
+                            .iter()
+                            .any(|p| matches!(p.location, gimli::Location::Address { .. }));
+                        return VariableStatus::MultiPiece { has_address };
+                    }
+
+                    // Single piece: check the location type
+                    return match pieces[0].location {
+                        gimli::Location::Address { address } => {
+                            if address == 0 {
+                                VariableStatus::AddressZero
+                            } else {
+                                VariableStatus::Valid { address }
+                            }
+                        }
+                        gimli::Location::Register { register } => VariableStatus::RegisterOnly {
+                            register: register.0,
+                        },
+                        gimli::Location::Value { .. } => VariableStatus::ImplicitValue,
+                        gimli::Location::ImplicitPointer { .. } => VariableStatus::ImplicitPointer,
+                        gimli::Location::Empty => VariableStatus::OptimizedOut,
+                        // Bytes is used for raw data in some DWARF versions
+                        gimli::Location::Bytes { .. } => VariableStatus::ImplicitValue,
+                    };
+                }
+
+                // Needs an address from .debug_addr section
+                gimli::EvaluationResult::RequiresIndexedAddress { index, relocate: _ } => {
+                    match self.dwarf.address(unit, index) {
+                        Ok(address) => {
+                            match evaluation.resume_with_indexed_address(address) {
+                                Ok(r) => result = r,
+                                Err(_) => return VariableStatus::NoLocation,
+                            }
+                        }
+                        Err(_) => return VariableStatus::NoLocation,
+                    }
+                }
+
+                // Needs address relocation
+                gimli::EvaluationResult::RequiresRelocatedAddress(address) => {
+                    match evaluation.resume_with_relocated_address(address) {
+                        Ok(r) => result = r,
+                        Err(_) => return VariableStatus::NoLocation,
+                    }
+                }
+
+                // Needs base type information
+                gimli::EvaluationResult::RequiresBaseType(_) => {
+                    let value_type = gimli::ValueType::Generic;
+                    match evaluation.resume_with_base_type(value_type) {
+                        Ok(r) => result = r,
+                        Err(_) => return VariableStatus::NoLocation,
+                    }
+                }
+
+                // Runtime requirements - these indicate local variables
+                gimli::EvaluationResult::RequiresRegister { register, .. } => {
+                    return VariableStatus::LocalVariable {
+                        reason: format!("Requires register {}", register.0),
+                    };
+                }
+                gimli::EvaluationResult::RequiresFrameBase => {
+                    return VariableStatus::LocalVariable {
+                        reason: "Stack variable (requires frame base)".to_string(),
+                    };
+                }
+                gimli::EvaluationResult::RequiresMemory { .. } => {
+                    return VariableStatus::LocalVariable {
+                        reason: "Requires memory read at runtime".to_string(),
+                    };
+                }
+                gimli::EvaluationResult::RequiresTls(_) => {
+                    return VariableStatus::LocalVariable {
+                        reason: "Thread-local storage variable".to_string(),
+                    };
+                }
+                gimli::EvaluationResult::RequiresCallFrameCfa => {
+                    return VariableStatus::LocalVariable {
+                        reason: "Requires call frame CFA".to_string(),
+                    };
+                }
+                gimli::EvaluationResult::RequiresAtLocation(_) => {
+                    return VariableStatus::LocalVariable {
+                        reason: "Requires DW_AT_location from another DIE".to_string(),
+                    };
+                }
+                gimli::EvaluationResult::RequiresEntryValue(_) => {
+                    return VariableStatus::LocalVariable {
+                        reason: "Requires entry value (function parameter)".to_string(),
+                    };
+                }
+                gimli::EvaluationResult::RequiresParameterRef(_) => {
+                    return VariableStatus::LocalVariable {
+                        reason: "Requires parameter reference".to_string(),
+                    };
+                }
+            }
+        }
+    }
+
+    /// Get variable location as an optional address (legacy method, kept for compatibility)
+    #[allow(dead_code)]
     fn get_variable_location(
         &self,
         unit: &Unit<Reader<'a>>,
@@ -1432,6 +1909,13 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
     fn has_enum_class_attr(&self, entry: &DebuggingInformationEntry<Reader<'a>>) -> bool {
         matches!(
             entry.attr_value(gimli::DW_AT_enum_class).ok(),
+            Some(Some(AttributeValue::Flag(true)))
+        )
+    }
+
+    fn has_artificial_attr(&self, entry: &DebuggingInformationEntry<Reader<'a>>) -> bool {
+        matches!(
+            entry.attr_value(gimli::DW_AT_artificial).ok(),
             Some(Some(AttributeValue::Flag(true)))
         )
     }

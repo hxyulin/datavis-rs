@@ -53,12 +53,14 @@ pub mod elf_parser;
 #[cfg(feature = "mock-probe")]
 pub mod mock_probe;
 pub mod probe;
+pub mod probe_trait;
+pub mod read_manager;
 pub mod type_table;
 pub mod worker;
 
 use crate::config::ProbeConfig;
 
-pub use dwarf_parser::{DwarfParseResult, DwarfParser, ParsedSymbol};
+pub use dwarf_parser::{DwarfDiagnostics, DwarfParseResult, DwarfParser, ParsedSymbol, VariableStatus};
 pub use elf_parser::{demangle_symbol, ElfInfo, ElfParser, SymbolInfo, SymbolType};
 pub use type_table::{
     BaseClassDef, DwarfTypeKey, EnumDef, EnumVariant as TypeTableEnumVariant, ForwardDeclKind,
@@ -69,11 +71,13 @@ pub use type_table::{
 #[cfg(feature = "mock-probe")]
 pub use mock_probe::{MockDataPattern, MockProbeBackend, MockProbeInfo, MockVariableConfig};
 pub use probe::{ProbeBackend, ProbeInfo};
+pub use probe_trait::{DebugProbe, DetectedProbeInfo, ProbeStats};
+pub use read_manager::{ReadManager, ReadRegion, DEFAULT_GAP_THRESHOLD};
 pub use worker::{BackendWorker, SwdCommand, SwdResponse};
 
 use crate::config::AppConfig;
 use crate::types::{CollectionStats, ConnectionStatus, Variable};
-use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -353,7 +357,9 @@ impl SwdBackend {
     /// Create a new SWD backend with communication channels
     pub fn new(config: AppConfig) -> (Self, FrontendReceiver) {
         let (cmd_tx, cmd_rx) = bounded(256);
-        let (msg_tx, msg_rx) = unbounded();
+        // Use bounded channel for backpressure - prevents memory spikes if UI can't keep up
+        // 10,000 messages is enough for ~10 seconds at 1000 Hz with batching
+        let (msg_tx, msg_rx) = bounded(10_000);
 
         let backend = Self {
             config,

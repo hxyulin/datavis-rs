@@ -647,6 +647,29 @@ pub struct ProbeConfig {
     /// - Halted: Halt target during reads (faster but stops execution)
     #[serde(default)]
     pub memory_access_mode: MemoryAccessMode,
+
+    /// USB/HID communication timeout in milliseconds.
+    /// Default: 1000ms. Increase for slow wireless probes (e.g., wireless CMSIS-DAP).
+    /// Note: This is a configuration placeholder - probe-rs currently uses hardcoded
+    /// timeouts (1s for CMSIS-DAP v2). This field documents the expected timeout
+    /// and prepares for future probe-rs support.
+    #[serde(default = "default_usb_timeout_ms")]
+    pub usb_timeout_ms: u64,
+
+    /// Gap threshold for bulk read optimization (bytes).
+    /// Variables with addresses within this distance will be read together
+    /// in a single larger read operation to reduce probe communication overhead.
+    /// Default: 64 bytes.
+    #[serde(default = "default_bulk_read_gap")]
+    pub bulk_read_gap_threshold: usize,
+}
+
+fn default_usb_timeout_ms() -> u64 {
+    1000
+}
+
+fn default_bulk_read_gap() -> usize {
+    64
 }
 
 impl Default for ProbeConfig {
@@ -659,30 +682,42 @@ impl Default for ProbeConfig {
             connect_under_reset: ConnectUnderReset::default(),
             halt_on_connect: false,
             memory_access_mode: MemoryAccessMode::default(),
+            usb_timeout_ms: default_usb_timeout_ms(),
+            bulk_read_gap_threshold: default_bulk_read_gap(),
         }
     }
 }
 
 /// Memory access mode for reading variables
 ///
-/// Different modes trade off between intrusiveness and speed:
-/// - Background reads happen while the target is running, which is less intrusive
-///   but typically slower due to potential bus contention
-/// - Halted reads stop the target during memory access, which is faster and more
-///   reliable but interrupts program execution
+/// # Non-Intrusive Reads (Background Mode)
+/// For ARM Cortex-M targets, memory reads through the Debug Access Port (DAP)
+/// do not halt the CPU. This means Background mode provides truly non-intrusive
+/// access for most use cases. The target program continues running while reads occur.
+///
+/// # When to Use Each Mode
+/// - **Background**: Default choice. Best for monitoring running code without
+///   affecting timing or behavior. Memory reads happen via DAP without halting.
+/// - **Halted**: Use if you see inconsistent reads due to race conditions with
+///   multi-byte values being updated mid-read (tearing). The target is briefly
+///   stopped during each read batch.
+/// - **HaltedPersistent**: Use for maximum read speed when the target doesn't
+///   need to run during data collection. Best for analyzing static memory state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MemoryAccessMode {
-    /// Read memory while target is running (non-intrusive, slower)
-    /// This is the default mode - target continues execution during reads
+    /// Read memory while target is running (non-intrusive)
+    /// For ARM Cortex-M, this uses DAP access which doesn't halt the CPU.
+    /// This is the default and recommended mode for most use cases.
     #[default]
     Background,
 
     /// Halt target before reading, resume after (faster, but intrusive)
-    /// The target is briefly stopped during each read batch
+    /// The target is briefly stopped during each read batch.
+    /// Use this if you experience read tearing with multi-byte values.
     Halted,
 
     /// Halt target and keep it halted (fastest, fully intrusive)
-    /// Use this for maximum read speed when you don't need the target running
+    /// Use for maximum read speed when target execution is not needed.
     HaltedPersistent,
 }
 
