@@ -1,7 +1,7 @@
 //! Shared state types for the frontend
 //!
 //! This module defines the shared state container and action types used by
-//! the page-based architecture. Pages receive `SharedState` via borrowing
+//! the workspace-based architecture. Panes receive `SharedState` via borrowing
 //! and return `AppAction`s instead of mutating state directly.
 
 use std::collections::HashMap;
@@ -11,6 +11,8 @@ use crate::backend::{ElfInfo, ElfSymbol, FrontendReceiver};
 use crate::config::{AppConfig, AppState, DataPersistenceConfig};
 use crate::config::settings::RuntimeSettings;
 use crate::types::{CollectionStats, ConnectionStatus, Variable, VariableData};
+
+use super::workspace::{PaneId, PaneKind};
 
 /// Shared state accessible by all pages (borrowed, not owned)
 ///
@@ -71,10 +73,6 @@ pub struct SharedState<'a> {
 /// - Centralized action handling
 #[derive(Debug, Clone)]
 pub enum AppAction {
-    // Navigation
-    /// Navigate to a different page
-    NavigateTo(AppPage),
-
     // Backend commands
     /// Connect to a debug probe
     Connect {
@@ -128,6 +126,14 @@ pub enum AppAction {
     ClearData,
     /// Clear data for a specific variable
     ClearVariableData(u32),
+
+    // Workspace actions
+    /// Open/focus a singleton pane, or create if not exists
+    OpenPane(PaneKind),
+    /// Create a new visualizer instance
+    NewVisualizer(PaneKind),
+    /// Close a pane (remove from dock and clean up state)
+    ClosePane(PaneId),
 }
 
 /// Dialog identifiers
@@ -153,45 +159,3 @@ pub enum DialogId {
     DuplicateConfirm,
 }
 
-/// Application pages
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AppPage {
-    /// Variables page - ELF browser, variable list
-    #[default]
-    Variables,
-    /// Visualizer page - Plot, time controls
-    Visualizer,
-    /// Settings page - Probe, collection, UI settings
-    Settings,
-}
-
-impl AppPage {
-    /// Get the display name for this page
-    pub fn name(&self) -> &'static str {
-        match self {
-            AppPage::Variables => "Variables",
-            AppPage::Visualizer => "Visualizer",
-            AppPage::Settings => "Settings",
-        }
-    }
-
-    /// Get the icon for this page
-    pub fn icon(&self) -> &'static str {
-        match self {
-            AppPage::Variables => ".",
-            AppPage::Visualizer => ".",
-            AppPage::Settings => ".",
-        }
-    }
-
-    /// Get all available pages
-    pub fn all() -> &'static [AppPage] {
-        &[AppPage::Variables, AppPage::Visualizer, AppPage::Settings]
-    }
-}
-
-impl std::fmt::Display for AppPage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name())
-    }
-}

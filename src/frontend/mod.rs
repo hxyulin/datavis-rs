@@ -6,27 +6,20 @@
 //!
 //! # Architecture
 //!
-//! The frontend runs on the main thread and communicates with the backend
-//! worker thread via channels. It never blocks on SWD operations, ensuring
-//! a responsive UI even when the probe is slow or unresponsive.
+//! The frontend uses an egui_dock workspace where every UI element is a pane:
+//! variable browser, variable list, settings, time series, watcher, FFT view.
+//! Panes can be rearranged via drag-and-drop docking.
 //!
 //! # Main Types
 //!
 //! - [`DataVisApp`] - Main application state implementing [`eframe::App`]
-//! - [`AppPage`] - Enum of available pages (Variables, Visualizer, Settings)
+//! - [`Workspace`] - Dock state and pane management
 //! - [`PlotView`] - Plot configuration and rendering
-//! - [`VariableEditorState`] - State for the variable add/edit dialog
-//!
-//! # Pages
-//!
-//! The application has three main pages:
-//!
-//! 1. **Variables** - Add, edit, and manage observed variables
-//! 2. **Visualizer** - Real-time plotting with axis controls
-//! 3. **Settings** - Configure probe, collection, and UI options
 //!
 //! # Submodules
 //!
+//! - `workspace` - Dock workspace, tab viewer, default layout
+//! - `panes` - Individual pane render functions
 //! - `panels` - Reusable panel components (connection, stats, etc.)
 //! - `plot` - Plot rendering with egui_plot
 //! - [`script_editor`] - Rhai script editor with syntax highlighting
@@ -34,18 +27,18 @@
 
 pub mod dialogs;
 pub mod markers;
-pub mod pages;
+pub mod panes;
 mod panels;
 mod plot;
 pub mod script_editor;
 pub mod state;
-mod widgets;
+pub mod widgets;
+pub mod workspace;
 
-pub use pages::{Page, SettingsPage, SettingsPageState, VariablesPage, VariablesPageState, VisualizerPage, VisualizerPageState};
 pub use panels::*;
 pub use plot::PlotView;
 pub use script_editor::{ScriptEditor, ScriptEditorState};
-pub use state::{AppAction, AppPage, DialogId, SharedState};
+pub use state::{AppAction, DialogId, SharedState};
 pub use widgets::*;
 
 use dialogs::{
@@ -53,6 +46,8 @@ use dialogs::{
     ElfSymbolsState, VariableChangeAction, VariableChangeContext, VariableChangeDialog,
     VariableChangeState,
 };
+use workspace::tab_viewer::WorkspaceTabViewer;
+use workspace::{PaneId, PaneKind, PaneState, Workspace};
 
 use crate::backend::{
     parse_elf, BackendCommand, BackendMessage, ElfInfo, ElfSymbol, FrontendReceiver,
@@ -65,9 +60,6 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 /// Actions that can be performed on variables from the UI
-///
-/// These actions are used internally to handle variable management
-/// operations from the UI.
 #[allow(dead_code)]
 #[derive(Debug)]
 enum VariableAction {
@@ -76,133 +68,82 @@ enum VariableAction {
     Remove,
 }
 
-// AppPage is now defined in state.rs
-
 /// Type of change detected for a variable when reloading ELF
 #[derive(Debug, Clone)]
 pub enum VariableChangeType {
-    /// Variable found but at a different address
     AddressChanged { old_address: u64, new_address: u64 },
-    /// Variable found but DWARF type differs from configured VariableType
     TypeChanged {
         old_type: VariableType,
         new_type: VariableType,
         new_type_name: String,
     },
-    /// Variable was in config but no longer found in ELF
     NotFound,
 }
 
 /// A detected change for a single variable
 #[derive(Debug, Clone)]
 pub struct VariableChange {
-    /// The variable ID from config
     pub variable_id: u32,
-    /// The variable name
     pub variable_name: String,
-    /// Current configured address
     pub current_address: u64,
-    /// Current configured type
     pub current_type: VariableType,
-    /// The type of change detected
     pub change_type: VariableChangeType,
-    /// Whether this change is selected for update
     pub selected: bool,
 }
 
 /// Main application state for the data visualizer
-///
-/// This struct holds all UI state for the application including
-/// connection status, variable data, configuration, and dialog states.
 #[allow(dead_code)]
 pub struct DataVisApp {
     // === Communication ===
-    /// Frontend receiver for backend communication
     frontend: FrontendReceiver,
 
     // === Shared State ===
-    /// Application configuration (from current project)
     config: AppConfig,
-    /// Application state (persisted across sessions)
     app_state: AppState,
-    /// Runtime settings
     settings: RuntimeSettings,
-    /// Current connection status
     connection_status: ConnectionStatus,
-    /// Variable data storage
     variable_data: HashMap<u32, VariableData>,
-    /// Collection statistics
     stats: CollectionStats,
-    /// Start time for the session
     start_time: Instant,
-    /// Last error message
     last_error: Option<String>,
-    /// Data persistence configuration
     persistence_config: crate::config::DataPersistenceConfig,
 
-    // === ELF Data (shared across pages) ===
-    /// Loaded ELF/AXF file path
+    // === ELF Data ===
     elf_file_path: Option<PathBuf>,
-    /// Parsed ELF info (contains symbols and type info)
     elf_info: Option<ElfInfo>,
-    /// Symbols parsed from ELF file (for display)
     elf_symbols: Vec<ElfSymbol>,
 
-    // === Navigation ===
-    /// Current page/view being displayed
-    current_page: AppPage,
+    // === Workspace (replaces page navigation) ===
+    workspace: Workspace,
 
-    // === Page State ===
-    /// Variables page state
-    variables_page: VariablesPageState,
-    /// Visualizer page state
-    visualizer_page: VisualizerPageState,
-    /// Settings page state
-    settings_page: SettingsPageState,
-
-    // === Global Dialogs (can appear on any page) ===
-    /// Variable change detection dialog state
+    // === Global Dialogs ===
     variable_change_open: bool,
     variable_change_state: VariableChangeState,
-    /// ELF symbols dialog state
     elf_symbols_open: bool,
     elf_symbols_state: ElfSymbolsState,
-    /// Duplicate variable confirmation dialog state
     duplicate_confirm_open: bool,
     duplicate_confirm_state: DuplicateConfirmState,
 }
 
-/// State for variable autocomplete/selector
-///
-/// Manages the autocomplete dropdown for selecting variables from
-/// ELF files, including filtering and keyboard navigation.
+/// State for variable autocomplete/selector (kept for compatibility)
 #[allow(dead_code)]
 #[derive(Default)]
 pub struct VariableSelectorState {
-    /// Current search query
     pub query: String,
-    /// Filtered symbols matching query
     pub filtered_symbols: Vec<ElfSymbol>,
-    /// Currently selected index in filtered list
     pub selected_index: Option<usize>,
-    /// Whether the dropdown is open
     pub dropdown_open: bool,
-    /// Cursor position for text input
     pub cursor_position: usize,
-    /// Set of expanded paths (supports nested expansion like "0", "0.member1", "0.member1.nested")
     pub expanded_paths: std::collections::HashSet<String>,
 }
 
 impl VariableSelectorState {
-    /// Update filtered symbols based on query
     pub fn update_filter(&mut self, elf_info: Option<&ElfInfo>) {
         self.filtered_symbols.clear();
         if let Some(info) = elf_info {
             let results = info.search_variables(&self.query);
-            // Show all results - ScrollArea handles virtualization for performance
             self.filtered_symbols = results.into_iter().cloned().collect();
         }
-        // Reset selection if list changed
         if self.filtered_symbols.is_empty() {
             self.selected_index = None;
         } else if let Some(idx) = self.selected_index {
@@ -212,7 +153,6 @@ impl VariableSelectorState {
         }
     }
 
-    /// Move selection up
     pub fn select_previous(&mut self) {
         if self.filtered_symbols.is_empty() {
             return;
@@ -224,7 +164,6 @@ impl VariableSelectorState {
         });
     }
 
-    /// Move selection down
     pub fn select_next(&mut self) {
         if self.filtered_symbols.is_empty() {
             return;
@@ -236,13 +175,11 @@ impl VariableSelectorState {
         });
     }
 
-    /// Get currently selected symbol
     pub fn selected_symbol(&self) -> Option<&ElfSymbol> {
         self.selected_index
             .and_then(|idx| self.filtered_symbols.get(idx))
     }
 
-    /// Clear state
     pub fn clear(&mut self) {
         self.query.clear();
         self.filtered_symbols.clear();
@@ -251,17 +188,14 @@ impl VariableSelectorState {
         self.expanded_paths.clear();
     }
 
-    /// Toggle expansion state for a path
     pub fn toggle_expanded(&mut self, path: &str) {
         if self.expanded_paths.contains(path) {
-            // Remove this path and all child paths
             self.expanded_paths.retain(|p| !p.starts_with(path));
         } else {
             self.expanded_paths.insert(path.to_string());
         }
     }
 
-    /// Check if a path is expanded
     pub fn is_expanded(&self, path: &str) -> bool {
         self.expanded_paths.contains(path)
     }
@@ -277,16 +211,12 @@ pub struct VariableEditorState {
     pub converter_script: String,
     pub color: [u8; 4],
     pub editing_id: Option<u32>,
-    /// Type name from DWARF info (for display)
     pub type_name: Option<String>,
-    /// Size from symbol info
     pub size: Option<u64>,
-    /// Script editor state for autocomplete
     pub script_editor_state: ScriptEditorState,
 }
 
 impl VariableEditorState {
-    /// Populate from an ELF symbol
     pub fn from_symbol(symbol: &ElfSymbol, elf_info: Option<&ElfInfo>) -> Self {
         let (var_type, type_name) = if let Some(info) = elf_info {
             let vt = info.infer_variable_type_for_symbol(symbol);
@@ -302,7 +232,7 @@ impl VariableEditorState {
             var_type,
             unit: String::new(),
             converter_script: String::new(),
-            color: [100, 149, 237, 255], // Cornflower blue default
+            color: [100, 149, 237, 255],
             editing_id: None,
             type_name,
             size: Some(symbol.size),
@@ -325,14 +255,12 @@ impl DataVisApp {
         let fonts = egui::FontDefinitions::default();
         cc.egui_ctx.set_fonts(fonts);
 
-        // Apply font scale from preferences
         let mut style = (*cc.egui_ctx.style()).clone();
         style.text_styles.iter_mut().for_each(|(_, font_id)| {
             font_id.size *= app_state.ui_preferences.font_scale;
         });
         cc.egui_ctx.set_style(style);
 
-        // Determine project name
         let project_name = if let Some(ref path) = project_path {
             path.file_stem()
                 .and_then(|s| s.to_str())
@@ -342,30 +270,40 @@ impl DataVisApp {
             "Untitled Project".to_string()
         };
 
-        // Sync the variable ID counter to avoid ID collisions with loaded variables
         crate::types::Variable::sync_next_id(&config.variables);
 
-        // Initialize variable data from config
         let mut variable_data = HashMap::new();
         for var in &config.variables {
             variable_data.insert(var.id, VariableData::new(var.clone()));
         }
 
-        // Send initial variables to backend
         for var in &config.variables {
             frontend.add_variable(var.clone());
         }
 
         let target_chip_input = config.probe.target_chip.clone();
 
-        // Request probe list asynchronously from backend
         frontend.send_command(BackendCommand::RefreshProbes);
 
-        // Initialize settings page state with target chip
-        let mut settings_page = SettingsPageState::default();
-        settings_page.target_chip_input = target_chip_input;
-        settings_page.project_name = project_name;
-        settings_page.project_file_path = project_path;
+        // Build workspace with default layout
+        let mut workspace = Workspace {
+            dock_state: egui_dock::DockState::new(vec![]),
+            pane_states: HashMap::new(),
+            pane_entries: HashMap::new(),
+        };
+        let dock_state = workspace::default_layout::build_default_layout(&mut workspace);
+        workspace.dock_state = dock_state;
+
+        // Initialize settings pane state with target chip and project info
+        if let Some(settings_pane_id) = workspace.find_singleton(PaneKind::Settings) {
+            if let Some(PaneState::Settings(ref mut settings_state)) =
+                workspace.pane_states.get_mut(&settings_pane_id)
+            {
+                settings_state.target_chip_input = target_chip_input;
+                settings_state.project_name = project_name;
+                settings_state.project_file_path = project_path.clone();
+            }
+        }
 
         Self {
             frontend,
@@ -381,10 +319,7 @@ impl DataVisApp {
             elf_file_path: None,
             elf_info: None,
             elf_symbols: Vec::new(),
-            current_page: AppPage::default(),
-            variables_page: VariablesPageState::default(),
-            visualizer_page: VisualizerPageState::default(),
-            settings_page,
+            workspace,
             variable_change_open: false,
             variable_change_state: VariableChangeState::default(),
             elf_symbols_open: false,
@@ -394,8 +329,6 @@ impl DataVisApp {
         }
     }
 
-    /// Process messages from the backend
-    /// Process messages from the backend, returns true if any messages were processed
     fn process_backend_messages(&mut self) -> bool {
         let messages = self.frontend.drain();
         let had_messages = !messages.is_empty();
@@ -446,7 +379,6 @@ impl DataVisApp {
                     self.stats = stats;
                 }
                 BackendMessage::VariableList(vars) => {
-                    // Update variable data with new list
                     for var in vars {
                         if !self.variable_data.contains_key(&var.id) {
                             self.variable_data.insert(var.id, VariableData::new(var));
@@ -454,21 +386,27 @@ impl DataVisApp {
                     }
                 }
                 BackendMessage::ProbeList(probes) => {
-                    self.settings_page.available_probes = probes;
-                    // Reset selection if it's now out of bounds
-                    if let Some(idx) = self.settings_page.selected_probe_index {
-                        if idx >= self.settings_page.available_probes.len() {
-                            self.settings_page.selected_probe_index = None;
+                    // Update probes in settings pane
+                    if let Some(settings_id) = self.workspace.find_singleton(PaneKind::Settings) {
+                        if let Some(PaneState::Settings(ref mut s)) =
+                            self.workspace.pane_states.get_mut(&settings_id)
+                        {
+                            // Reset selection if out of bounds
+                            if let Some(idx) = s.selected_probe_index {
+                                if idx >= probes.len() {
+                                    s.selected_probe_index = None;
+                                }
+                            }
+                            s.available_probes = probes.clone();
                         }
                     }
-                    tracing::info!("Received {} probes", self.settings_page.available_probes.len());
+                    tracing::info!("Received {} probes", probes.len());
                 }
                 BackendMessage::Shutdown => {
                     tracing::info!("Backend shutdown received");
                 }
                 BackendMessage::WriteSuccess { variable_id } => {
                     tracing::info!("Successfully wrote to variable {}", variable_id);
-                    // Could show a toast notification here
                 }
                 BackendMessage::WriteError { variable_id, error } => {
                     tracing::error!("Failed to write to variable {}: {}", variable_id, error);
@@ -480,13 +418,12 @@ impl DataVisApp {
         had_messages
     }
 
-    /// Handle an action emitted by a page
     fn handle_action(&mut self, action: AppAction) {
         match action {
-            AppAction::NavigateTo(page) => {
-                self.current_page = page;
-            }
-            AppAction::Connect { probe_selector, target } => {
+            AppAction::Connect {
+                probe_selector,
+                target,
+            } => {
                 self.frontend.send_command(BackendCommand::Connect {
                     selector: probe_selector,
                     target,
@@ -508,10 +445,12 @@ impl DataVisApp {
                 self.frontend.send_command(BackendCommand::RefreshProbes);
             }
             AppAction::SetMemoryAccessMode(mode) => {
-                self.frontend.send_command(BackendCommand::SetMemoryAccessMode(mode));
+                self.frontend
+                    .send_command(BackendCommand::SetMemoryAccessMode(mode));
             }
             AppAction::SetPollRate(rate) => {
-                self.frontend.send_command(BackendCommand::SetPollRate(rate));
+                self.frontend
+                    .send_command(BackendCommand::SetPollRate(rate));
             }
             #[cfg(feature = "mock-probe")]
             AppAction::UseMockProbe(use_mock) => {
@@ -523,10 +462,12 @@ impl DataVisApp {
             AppAction::RemoveVariable(id) => {
                 self.config.remove_variable(id);
                 self.variable_data.remove(&id);
-                self.frontend.send_command(BackendCommand::RemoveVariable(id));
+                self.frontend
+                    .send_command(BackendCommand::RemoveVariable(id));
             }
             AppAction::UpdateVariable(var) => {
-                self.frontend.send_command(BackendCommand::UpdateVariable(var));
+                self.frontend
+                    .send_command(BackendCommand::UpdateVariable(var));
             }
             AppAction::WriteVariable { id, value } => {
                 self.frontend.write_variable(id, value);
@@ -556,26 +497,43 @@ impl DataVisApp {
                     data.clear();
                 }
             }
+            AppAction::OpenPane(kind) => {
+                if kind.is_singleton() {
+                    if let Some(id) = self.workspace.find_singleton(kind) {
+                        // Focus existing singleton
+                        if let Some(tab_location) = self.workspace.dock_state.find_tab(&id) {
+                            self.workspace.dock_state.set_active_tab(tab_location);
+                        }
+                    } else {
+                        let id = self.workspace.register_pane(kind, kind.display_name());
+                        self.workspace.dock_state.push_to_first_leaf(id);
+                    }
+                } else {
+                    let id = self.workspace.register_pane(kind, kind.display_name());
+                    self.workspace.dock_state.push_to_first_leaf(id);
+                }
+            }
+            AppAction::NewVisualizer(kind) => {
+                let count = self
+                    .workspace
+                    .pane_entries
+                    .values()
+                    .filter(|e| e.kind == kind)
+                    .count();
+                let title = format!("{} {}", kind.display_name(), count + 1);
+                let id = self.workspace.register_pane(kind, title);
+                self.workspace.dock_state.push_to_first_leaf(id);
+            }
+            AppAction::ClosePane(id) => {
+                self.workspace.remove_pane(id);
+            }
         }
     }
 
-    /// Open a dialog by ID
     fn open_dialog(&mut self, dialog_id: DialogId) {
         match dialog_id {
-            DialogId::AddVariable => {
-                // Not implemented in new page system yet
-            }
-            DialogId::EditVariable(_id) => {
-                // Not implemented in new page system yet
-            }
-            DialogId::ConverterEditor(_id) => {
-                // Handled by page state
-            }
-            DialogId::ValueEditor(_id) => {
-                // Handled by page state
-            }
-            DialogId::VariableDetail(_id) => {
-                // Handled by page state
+            DialogId::AddVariable | DialogId::EditVariable(_) => {}
+            DialogId::ConverterEditor(_) | DialogId::ValueEditor(_) | DialogId::VariableDetail(_) => {
             }
             DialogId::ElfSymbols => {
                 self.elf_symbols_open = true;
@@ -583,13 +541,10 @@ impl DataVisApp {
             DialogId::VariableChange => {
                 self.variable_change_open = true;
             }
-            DialogId::DuplicateConfirm => {
-                // Handled by page state
-            }
+            DialogId::DuplicateConfirm => {}
         }
     }
 
-    /// Load an ELF file
     fn load_elf(&mut self, path: &PathBuf) {
         self.elf_file_path = Some(path.clone());
         match parse_elf(path) {
@@ -601,7 +556,14 @@ impl DataVisApp {
                 );
                 self.elf_symbols = info.get_variables().into_iter().cloned().collect();
                 self.elf_info = Some(info);
-                self.variables_page.selector.update_filter(self.elf_info.as_ref());
+                // Update variable browser filter
+                if let Some(browser_id) = self.workspace.find_singleton(PaneKind::VariableBrowser) {
+                    if let Some(PaneState::VariableBrowser(ref mut s)) =
+                        self.workspace.pane_states.get_mut(&browser_id)
+                    {
+                        s.update_filter(self.elf_info.as_ref());
+                    }
+                }
                 self.detect_variable_changes();
             }
             Err(e) => {
@@ -612,10 +574,7 @@ impl DataVisApp {
         }
     }
 
-
-    /// Add a variable directly, checking for duplicates
     fn add_variable(&mut self, var: crate::types::Variable) {
-        // Check for duplicate by address
         let is_duplicate = self
             .config
             .variables
@@ -623,7 +582,6 @@ impl DataVisApp {
             .any(|v| v.address == var.address);
 
         if is_duplicate {
-            // Store pending variable and show confirmation dialog
             self.duplicate_confirm_state = DuplicateConfirmState::with_variable(var);
             self.duplicate_confirm_open = true;
         } else {
@@ -631,18 +589,13 @@ impl DataVisApp {
         }
     }
 
-    /// Add a variable without duplicate check (after confirmation)
     fn add_variable_confirmed(&mut self, var: crate::types::Variable) {
-        // Add to config
         self.config.add_variable(var.clone());
-        // Add to variable data for display
         self.variable_data
             .insert(var.id, VariableData::new(var.clone()));
-        // Send to backend
         self.frontend.add_variable(var);
     }
 
-    /// Clear all collected data
     fn clear_all_data(&mut self) {
         for data in self.variable_data.values_mut() {
             data.clear();
@@ -650,7 +603,6 @@ impl DataVisApp {
         self.stats = CollectionStats::default();
     }
 
-    /// Render the ELF symbols dialog using the Dialog trait
     fn render_elf_symbols_with_context(&mut self, ctx: &egui::Context) {
         let dialog_ctx = ElfSymbolsContext {
             elf_file_path: self.elf_file_path.as_deref(),
@@ -666,7 +618,6 @@ impl DataVisApp {
         ) {
             match action {
                 ElfSymbolsAction::Select(symbol) => {
-                    // Add the variable directly from the symbol
                     let var_type = self
                         .elf_info
                         .as_ref()
@@ -684,9 +635,23 @@ impl DataVisApp {
     }
 
     fn save_project_to_path(&mut self, path: PathBuf) {
+        // Get project name from settings pane
+        let project_name = self
+            .workspace
+            .find_singleton(PaneKind::Settings)
+            .and_then(|id| self.workspace.pane_states.get(&id))
+            .and_then(|s| {
+                if let PaneState::Settings(s) = s {
+                    Some(s.project_name.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "Untitled Project".to_string());
+
         let project = crate::config::ProjectFile {
             version: 1,
-            name: self.settings_page.project_name.clone(),
+            name: project_name.clone(),
             config: self.config.clone(),
             binary_path: self.elf_file_path.clone(),
             persistence: self.persistence_config.clone(),
@@ -694,16 +659,21 @@ impl DataVisApp {
 
         match project.save(&path) {
             Ok(()) => {
-                self.settings_page.project_file_path = Some(path.clone());
+                // Update project file path in settings pane
+                if let Some(settings_id) = self.workspace.find_singleton(PaneKind::Settings) {
+                    if let Some(PaneState::Settings(ref mut s)) =
+                        self.workspace.pane_states.get_mut(&settings_id)
+                    {
+                        s.project_file_path = Some(path.clone());
+                    }
+                }
 
-                // Update app state with recent project
                 self.app_state.add_recent_project(
                     &path,
-                    &self.settings_page.project_name,
+                    &project_name,
                     Some(&self.config.probe.target_chip),
                 );
 
-                // Save app state
                 if let Err(e) = self.app_state.save() {
                     tracing::warn!("Failed to save app state: {}", e);
                 }
@@ -716,41 +686,52 @@ impl DataVisApp {
         }
     }
 
-    /// Load a project from a file path
     fn load_project_from_path(&mut self, path: PathBuf) {
         match crate::config::ProjectFile::load(&path) {
             Ok(project) => {
                 self.config = project.config;
                 self.persistence_config = project.persistence;
 
-                // Sync the variable ID counter to avoid ID collisions with loaded variables
                 crate::types::Variable::sync_next_id(&self.config.variables);
-                self.settings_page.project_name = project.name.clone();
-                self.settings_page.project_file_path = Some(path.clone());
 
-                // Update app state with recent project
+                // Update settings pane
+                if let Some(settings_id) = self.workspace.find_singleton(PaneKind::Settings) {
+                    if let Some(PaneState::Settings(ref mut s)) =
+                        self.workspace.pane_states.get_mut(&settings_id)
+                    {
+                        s.project_name = project.name.clone();
+                        s.project_file_path = Some(path.clone());
+                        s.target_chip_input = self.config.probe.target_chip.clone();
+                    }
+                }
+
                 self.app_state.add_recent_project(
                     &path,
                     &project.name,
                     Some(&self.config.probe.target_chip),
                 );
 
-                // Save app state
                 if let Err(e) = self.app_state.save() {
                     tracing::warn!("Failed to save app state: {}", e);
                 }
 
-                // Update ELF path and try to load it
                 if let Some(binary_path) = project.binary_path {
                     self.elf_file_path = Some(binary_path.clone());
-                    // Try to parse the ELF file
                     match crate::backend::parse_elf(&binary_path) {
                         Ok(info) => {
                             self.elf_symbols = info.symbols.clone();
                             self.elf_info = Some(info);
-                            self.variables_page.selector.update_filter(self.elf_info.as_ref());
+                            // Update variable browser filter
+                            if let Some(browser_id) =
+                                self.workspace.find_singleton(PaneKind::VariableBrowser)
+                            {
+                                if let Some(PaneState::VariableBrowser(ref mut s)) =
+                                    self.workspace.pane_states.get_mut(&browser_id)
+                                {
+                                    s.update_filter(self.elf_info.as_ref());
+                                }
+                            }
                             tracing::info!("Loaded ELF from project: {:?}", binary_path);
-                            // Detect variable changes after ELF reload
                             self.detect_variable_changes();
                         }
                         Err(e) => {
@@ -759,10 +740,6 @@ impl DataVisApp {
                     }
                 }
 
-                // Update target chip input
-                self.settings_page.target_chip_input = self.config.probe.target_chip.clone();
-
-                // Reload variables
                 self.variable_data.clear();
                 for var in &self.config.variables {
                     self.variable_data
@@ -778,9 +755,7 @@ impl DataVisApp {
         }
     }
 
-    /// Detect changes between watched variables and newly loaded ELF symbols
     fn detect_variable_changes(&mut self) {
-        // Skip if no ELF loaded or no variables to check
         let elf_info = match &self.elf_info {
             Some(info) => info,
             None => return,
@@ -793,12 +768,10 @@ impl DataVisApp {
         let mut changes: Vec<VariableChange> = Vec::new();
 
         for var in &self.config.variables {
-            // Try to find the symbol by name in the new ELF
             let symbol = elf_info.find_symbol(&var.name);
 
             match symbol {
                 Some(sym) => {
-                    // Symbol found - check for address change
                     if sym.address != var.address {
                         changes.push(VariableChange {
                             variable_id: var.id,
@@ -809,11 +782,10 @@ impl DataVisApp {
                                 old_address: var.address,
                                 new_address: sym.address,
                             },
-                            selected: true, // Pre-select for convenience
+                            selected: true,
                         });
                     }
 
-                    // Check for type change
                     let new_var_type = elf_info.infer_variable_type_for_symbol(sym);
                     if var.var_type != new_var_type {
                         let type_name = elf_info.get_symbol_type_name(sym);
@@ -832,20 +804,18 @@ impl DataVisApp {
                     }
                 }
                 None => {
-                    // Symbol not found in new ELF
                     changes.push(VariableChange {
                         variable_id: var.id,
                         variable_name: var.name.clone(),
                         current_address: var.address,
                         current_type: var.var_type,
                         change_type: VariableChangeType::NotFound,
-                        selected: false, // Don't pre-select removal
+                        selected: false,
                     });
                 }
             }
         }
 
-        // Only show dialog if there are changes
         if !changes.is_empty() {
             tracing::info!(
                 "Detected {} variable changes after ELF reload",
@@ -856,7 +826,6 @@ impl DataVisApp {
         }
     }
 
-    /// Render the variable change detection dialog using the Dialog trait
     fn render_variable_change_with_context(&mut self, ctx: &egui::Context) {
         if let Some(action) = show_dialog::<VariableChangeDialog>(
             ctx,
@@ -876,12 +845,8 @@ impl DataVisApp {
         }
     }
 
-    /// Apply selected variable changes from the dialog
     fn apply_selected_variable_changes(&mut self) {
-        // Collect IDs to remove (NotFound with selected = true)
         let mut ids_to_remove: Vec<u32> = Vec::new();
-
-        // Collect updates to apply (to avoid borrowing issues)
         let mut address_updates: Vec<(u32, u64)> = Vec::new();
         let mut type_updates: Vec<(u32, VariableType)> = Vec::new();
 
@@ -903,7 +868,6 @@ impl DataVisApp {
             }
         }
 
-        // Apply address updates
         for (var_id, new_address) in address_updates {
             if let Some(var) = self.config.variables.iter_mut().find(|v| v.id == var_id) {
                 tracing::info!(
@@ -914,19 +878,14 @@ impl DataVisApp {
                 );
                 var.address = new_address;
             }
-
-            // Update in variable_data
             if let Some(data) = self.variable_data.get_mut(&var_id) {
                 data.variable.address = new_address;
             }
-
-            // Notify backend
             if let Some(var) = self.config.variables.iter().find(|v| v.id == var_id) {
                 self.frontend.update_variable(var.clone());
             }
         }
 
-        // Apply type updates
         for (var_id, new_type) in type_updates {
             if let Some(var) = self.config.variables.iter_mut().find(|v| v.id == var_id) {
                 tracing::info!(
@@ -937,19 +896,14 @@ impl DataVisApp {
                 );
                 var.var_type = new_type;
             }
-
-            // Update in variable_data
             if let Some(data) = self.variable_data.get_mut(&var_id) {
                 data.variable.var_type = new_type;
             }
-
-            // Notify backend
             if let Some(var) = self.config.variables.iter().find(|v| v.id == var_id) {
                 self.frontend.update_variable(var.clone());
             }
         }
 
-        // Remove not-found variables
         for id in ids_to_remove {
             if let Some(var) = self.config.variables.iter().find(|v| v.id == id) {
                 tracing::info!("Removing missing variable '{}' (id: {})", var.name, id);
@@ -961,58 +915,32 @@ impl DataVisApp {
         }
     }
 
-    /// Handle global keyboard shortcuts
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
         use egui::Key;
 
-        // Collect which shortcuts were triggered (to avoid borrow issues)
         let mut toggle_collection = false;
         let mut save_project = false;
-        let mut nav_to: Option<AppPage> = None;
         let mut clear_data = false;
         let mut toggle_pause = false;
 
         ctx.input(|i| {
-            // Space: Start/Stop collection (only on Visualizer page)
-            if i.key_pressed(Key::Space)
-                && !i.modifiers.any()
-                && self.current_page == AppPage::Visualizer
-            {
+            if i.key_pressed(Key::Space) && !i.modifiers.any() {
                 toggle_collection = true;
             }
 
-            // Ctrl+S / Cmd+S: Save project
             if i.key_pressed(Key::S) && i.modifiers.command_only() {
                 save_project = true;
             }
 
-            // Ctrl+1/2/3: Navigate to page
-            if i.modifiers.command_only() {
-                if i.key_pressed(Key::Num1) {
-                    nav_to = Some(AppPage::Variables);
-                } else if i.key_pressed(Key::Num2) {
-                    nav_to = Some(AppPage::Visualizer);
-                } else if i.key_pressed(Key::Num3) {
-                    nav_to = Some(AppPage::Settings);
-                }
-            }
-
-            // Ctrl+L: Clear all data
             if i.key_pressed(Key::L) && i.modifiers.command_only() {
                 clear_data = true;
             }
 
-            // P: Toggle pause (only when collecting)
-            if i.key_pressed(Key::P)
-                && !i.modifiers.any()
-                && self.settings.collecting
-                && self.current_page == AppPage::Visualizer
-            {
+            if i.key_pressed(Key::P) && !i.modifiers.any() && self.settings.collecting {
                 toggle_pause = true;
             }
         });
 
-        // Apply collected actions
         if toggle_collection {
             if self.settings.collecting {
                 self.settings.collecting = false;
@@ -1024,22 +952,28 @@ impl DataVisApp {
         }
 
         if save_project {
-            if let Some(ref path) = self.settings_page.project_file_path {
-                self.save_project_to_path(path.clone());
-            } else {
-                // Open save dialog
-                if let Some(path) = rfd::FileDialog::new()
-                    .set_title("Save Project")
-                    .add_filter("DataVis Project", &["dvproj", "json"])
-                    .save_file()
-                {
-                    self.save_project_to_path(path);
-                }
-            }
-        }
+            // Get project file path from settings pane
+            let project_file_path = self
+                .workspace
+                .find_singleton(PaneKind::Settings)
+                .and_then(|id| self.workspace.pane_states.get(&id))
+                .and_then(|s| {
+                    if let PaneState::Settings(s) = s {
+                        s.project_file_path.clone()
+                    } else {
+                        None
+                    }
+                });
 
-        if let Some(page) = nav_to {
-            self.current_page = page;
+            if let Some(path) = project_file_path {
+                self.save_project_to_path(path);
+            } else if let Some(path) = rfd::FileDialog::new()
+                .set_title("Save Project")
+                .add_filter("DataVis Project", &["dvproj", "json"])
+                .save_file()
+            {
+                self.save_project_to_path(path);
+            }
         }
 
         if clear_data {
@@ -1052,20 +986,69 @@ impl DataVisApp {
             self.settings.paused = !self.settings.paused;
         }
     }
+
+    /// Render pane dialogs that need &Context (called after dock area renders)
+    fn render_pane_dialogs(&mut self, ctx: &egui::Context) {
+        let mut actions = Vec::new();
+
+        // We need to iterate pane states and call dialog rendering.
+        // To avoid borrow issues with SharedState, we construct it per-pane.
+        let pane_ids: Vec<PaneId> = self.workspace.pane_states.keys().copied().collect();
+
+        for pane_id in pane_ids {
+            let kind = self
+                .workspace
+                .pane_entries
+                .get(&pane_id)
+                .map(|e| e.kind);
+
+            if let Some(kind) = kind {
+                // For each pane that has dialogs, construct SharedState and call
+                let state = self.workspace.pane_states.get_mut(&pane_id);
+                if let Some(state) = state {
+                    let mut shared = SharedState {
+                        frontend: &self.frontend,
+                        connection_status: self.connection_status,
+                        config: &mut self.config,
+                        settings: &mut self.settings,
+                        app_state: &mut self.app_state,
+                        variable_data: &mut self.variable_data,
+                        stats: &self.stats,
+                        elf_info: self.elf_info.as_ref(),
+                        elf_symbols: &self.elf_symbols,
+                        elf_file_path: self.elf_file_path.as_ref(),
+                        persistence_config: &mut self.persistence_config,
+                        last_error: &mut self.last_error,
+                        start_time: self.start_time,
+                    };
+
+                    match (kind, state) {
+                        (PaneKind::TimeSeries, PaneState::TimeSeries(s)) => {
+                            panes::time_series::render_dialogs(s, &mut shared, ctx, &mut actions);
+                        }
+                        (PaneKind::VariableList, PaneState::VariableList(s)) => {
+                            panes::variable_list::render_dialogs(s, &mut shared, ctx, &mut actions);
+                        }
+                        (PaneKind::Settings, PaneState::Settings(s)) => {
+                            panes::settings::render_dialogs(s, &mut shared, ctx, &mut actions);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        for action in actions {
+            self.handle_action(action);
+        }
+    }
 }
 
 impl eframe::App for DataVisApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Process backend messages
         let had_messages = self.process_backend_messages();
-
-        // Handle global keyboard shortcuts
         self.handle_keyboard_shortcuts(ctx);
 
-        // Request continuous repaint when:
-        // 1. Actively collecting and not paused
-        // 2. Connected (to show status updates)
-        // 3. Just received messages (to ensure UI stays responsive)
         if (self.settings.collecting && !self.settings.paused)
             || self.connection_status == ConnectionStatus::Connected
             || had_messages
@@ -1073,22 +1056,62 @@ impl eframe::App for DataVisApp {
             ctx.request_repaint();
         }
 
-        // Top navigation bar with page tabs
-        egui::TopBottomPanel::top("nav_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("DataVis-RS");
-                ui.separator();
-
-                // Page tabs
-                for page in [AppPage::Variables, AppPage::Visualizer, AppPage::Settings] {
-                    let selected = self.current_page == page;
-                    if ui.selectable_label(selected, page.name()).clicked() {
-                        self.current_page = page;
+        // Menu bar
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Save Project").clicked() {
+                        self.handle_action(AppAction::SaveProject(PathBuf::new()));
+                        ui.close();
                     }
-                }
+                    if ui.button("Load Project...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter(
+                                "DataVis Project",
+                                &[crate::config::PROJECT_FILE_EXTENSION],
+                            )
+                            .pick_file()
+                        {
+                            self.handle_action(AppAction::LoadProject(path));
+                        }
+                        ui.close();
+                    }
+                });
 
+                ui.menu_button("View", |ui| {
+                    // Singleton panes (open/focus)
+                    if ui.button("Variable Browser").clicked() {
+                        self.handle_action(AppAction::OpenPane(PaneKind::VariableBrowser));
+                        ui.close();
+                    }
+                    if ui.button("Variables").clicked() {
+                        self.handle_action(AppAction::OpenPane(PaneKind::VariableList));
+                        ui.close();
+                    }
+                    if ui.button("Settings").clicked() {
+                        self.handle_action(AppAction::OpenPane(PaneKind::Settings));
+                        ui.close();
+                    }
+
+                    ui.separator();
+
+                    // New visualizer instances
+                    if ui.button("New Time Series").clicked() {
+                        self.handle_action(AppAction::NewVisualizer(PaneKind::TimeSeries));
+                        ui.close();
+                    }
+                    if ui.button("New Watcher").clicked() {
+                        self.handle_action(AppAction::NewVisualizer(PaneKind::Watcher));
+                        ui.close();
+                    }
+                    if ui.button("New FFT View").clicked() {
+                        self.handle_action(AppAction::NewVisualizer(PaneKind::FftView));
+                        ui.close();
+                    }
+                });
+
+                // Right-aligned: connection status, collection controls
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Connection status indicator
                     let (status_color, status_text) = match self.connection_status {
                         ConnectionStatus::Connected => (Color32::GREEN, "Connected"),
                         ConnectionStatus::Connecting => (Color32::YELLOW, "Connecting..."),
@@ -1097,8 +1120,7 @@ impl eframe::App for DataVisApp {
                     };
                     ui.colored_label(status_color, status_text);
 
-                    // Show collection status on visualizer
-                    if self.current_page == AppPage::Visualizer && self.settings.collecting {
+                    if self.settings.collecting {
                         if self.settings.paused {
                             ui.colored_label(Color32::YELLOW, "Paused");
                         } else {
@@ -1109,75 +1131,101 @@ impl eframe::App for DataVisApp {
             });
         });
 
-        // Build shared state for pages
-        let mut shared = SharedState {
-            frontend: &self.frontend,
-            connection_status: self.connection_status,
-            config: &mut self.config,
-            settings: &mut self.settings,
-            app_state: &mut self.app_state,
-            variable_data: &mut self.variable_data,
-            stats: &self.stats,
-            elf_info: self.elf_info.as_ref(),
-            elf_symbols: &self.elf_symbols,
-            elf_file_path: self.elf_file_path.as_ref(),
-            persistence_config: &mut self.persistence_config,
-            last_error: &mut self.last_error,
-            start_time: self.start_time,
-        };
+        // Dock workspace
+        {
+            let mut viewer = WorkspaceTabViewer {
+                frontend: &self.frontend,
+                connection_status: self.connection_status,
+                config: &mut self.config,
+                settings: &mut self.settings,
+                app_state: &mut self.app_state,
+                variable_data: &mut self.variable_data,
+                stats: &self.stats,
+                elf_info: self.elf_info.as_ref(),
+                elf_symbols: &self.elf_symbols,
+                elf_file_path: self.elf_file_path.as_ref(),
+                persistence_config: &mut self.persistence_config,
+                last_error: &mut self.last_error,
+                start_time: self.start_time,
+                pane_states: &mut self.workspace.pane_states,
+                pane_entries: &self.workspace.pane_entries,
+                actions: Vec::new(),
+            };
 
-        // Render current page and collect actions
-        let actions = match self.current_page {
-            AppPage::Variables => {
-                VariablesPage::render(&mut self.variables_page, &mut shared, ctx)
-            }
-            AppPage::Visualizer => {
-                VisualizerPage::render(&mut self.visualizer_page, &mut shared, ctx)
-            }
-            AppPage::Settings => {
-                SettingsPage::render(&mut self.settings_page, &mut shared, ctx)
-            }
-        };
+            egui_dock::DockArea::new(&mut self.workspace.dock_state)
+                .style(egui_dock::Style::from_egui(ctx.style().as_ref()))
+                .show(ctx, &mut viewer);
 
-        // Drop shared state before handling actions (avoids borrow conflicts)
-        drop(shared);
-
-        // Handle actions from pages
-        for action in actions {
-            self.handle_action(action);
+            let actions = viewer.actions;
+            for action in actions {
+                self.handle_action(action);
+            }
         }
 
-        // Global dialogs (can appear on any page)
+        // Render pane dialogs (require &Context)
+        self.render_pane_dialogs(ctx);
+
+        // Global dialogs
         self.render_variable_change_with_context(ctx);
         self.render_elf_symbols_with_context(ctx);
+
+        // Duplicate confirm dialog
+        if self.duplicate_confirm_open {
+            use dialogs::{
+                show_dialog, DuplicateConfirmAction, DuplicateConfirmContext, DuplicateConfirmDialog,
+            };
+
+            let dialog_ctx = DuplicateConfirmContext;
+            if let Some(action) = show_dialog::<DuplicateConfirmDialog>(
+                ctx,
+                &mut self.duplicate_confirm_open,
+                &mut self.duplicate_confirm_state,
+                dialog_ctx,
+            ) {
+                match action {
+                    DuplicateConfirmAction::Confirm(var) => {
+                        self.add_variable_confirmed(var);
+                    }
+                }
+            }
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Signal backend to shutdown
         self.frontend.shutdown();
 
-        // Update last connection info in app state
         self.app_state.update_last_connection(
             &self.config.probe.target_chip,
             self.config.probe.probe_selector.as_deref(),
         );
 
-        // Save app state
         if let Err(e) = self.app_state.save() {
             tracing::warn!("Failed to save app state: {}", e);
         }
 
-        // Auto-save current project if we have a path
-        if let Some(ref path) = self.settings_page.project_file_path {
+        // Auto-save from settings pane state
+        let project_info = self
+            .workspace
+            .find_singleton(PaneKind::Settings)
+            .and_then(|id| self.workspace.pane_states.get(&id))
+            .and_then(|s| {
+                if let PaneState::Settings(s) = s {
+                    s.project_file_path.as_ref().map(|p| (p.clone(), s.project_name.clone()))
+                } else {
+                    None
+                }
+            });
+
+        if let Some((path, name)) = project_info {
             let project = crate::config::ProjectFile {
                 version: 1,
-                name: self.settings_page.project_name.clone(),
+                name,
                 config: self.config.clone(),
                 binary_path: self.elf_file_path.clone(),
                 persistence: self.persistence_config.clone(),
             };
 
-            if let Err(e) = project.save(path) {
+            if let Err(e) = project.save(&path) {
                 tracing::warn!("Failed to auto-save project on exit: {}", e);
             }
         }
