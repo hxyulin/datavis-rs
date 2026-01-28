@@ -5,7 +5,9 @@
 use egui::{Color32, Ui};
 
 use crate::analysis::{FftAnalyzer, FftConfig, FftResult, WindowFunction};
+use crate::frontend::pane_trait::Pane;
 use crate::frontend::state::{AppAction, SharedState};
+use crate::frontend::workspace::PaneKind;
 
 /// State for the FFT View pane
 pub struct FftViewState {
@@ -148,7 +150,7 @@ pub fn render(
     // Compute FFT if we have a selected variable
     if let Some(var_id) = state.target_variable_id {
         if state.fft_result.is_none() {
-            if let Some(data) = shared.variable_data.get(&var_id) {
+            if let Some(data) = shared.topics.variable_data.get(&var_id) {
                 if !data.data_points.is_empty() {
                     let samples: Vec<f64> = data
                         .data_points
@@ -255,4 +257,15 @@ pub fn render(
     }
 
     Vec::new()
+}
+
+impl Pane for FftViewState {
+    fn kind(&self) -> PaneKind { PaneKind::FftView }
+
+    fn render(&mut self, shared: &mut SharedState, ui: &mut Ui) -> Vec<AppAction> {
+        render(self, shared, ui)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }

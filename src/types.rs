@@ -262,6 +262,9 @@ pub struct Variable {
     /// Visual style for plotting this variable
     #[serde(default)]
     pub plot_style: PlotStyle,
+    /// Parent variable ID (None = root-level variable)
+    #[serde(default)]
+    pub parent_id: Option<u32>,
 }
 
 impl Default for Variable {
@@ -279,6 +282,7 @@ impl Default for Variable {
             poll_rate_hz: 0,
             y_axis: 0, // Primary (left) axis by default
             plot_style: PlotStyle::default(),
+            parent_id: None,
         }
     }
 }
@@ -364,26 +368,27 @@ impl Variable {
         let saturation = 0.7;
         let value = 0.85;
 
-        // HSV to RGB conversion
-        let c = value * saturation;
-        let x = c * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
-        let m = value - c;
+        let (r, g, b) = hsv_to_rgb(hue, saturation, value);
+        [r, g, b, 255]
+    }
 
-        let (r, g, b) = match (hue / 60.0) as u32 {
-            0 => (c, x, 0.0),
-            1 => (x, c, 0.0),
-            2 => (0.0, c, x),
-            3 => (0.0, x, c),
-            4 => (x, 0.0, c),
-            _ => (c, 0.0, x),
-        };
+    /// Generate a shade/tint of a base color for child variable differentiation.
+    /// `child_index` determines the shade variant.
+    /// Uses HSV adjustments: varies saturation and value around the parent's base color.
+    pub fn generate_child_color(parent_color: [u8; 4], child_index: usize, child_count: usize) -> [u8; 4] {
+        let (h, _s, _v) = rgb_to_hsv(parent_color);
+        let count = child_count.max(1) as f32;
+        let t = if child_count <= 1 { 0.5 } else { child_index as f32 / (count - 1.0) };
+        // Vary saturation from 0.4 to 0.9 and value from 1.0 to 0.6
+        let new_s = (0.4 + t * 0.5).clamp(0.3, 0.95);
+        let new_v = (1.0 - t * 0.4).clamp(0.5, 1.0);
+        let (r, g, b) = hsv_to_rgb(h, new_s, new_v);
+        [r, g, b, 255]
+    }
 
-        [
-            ((r + m) * 255.0) as u8,
-            ((g + m) * 255.0) as u8,
-            ((b + m) * 255.0) as u8,
-            255,
-        ]
+    /// Check if this variable is a root-level variable (no parent)
+    pub fn is_root(&self) -> bool {
+        self.parent_id.is_none()
     }
 
     /// Check if this variable can be written to
@@ -677,9 +682,10 @@ impl VariableData {
 }
 
 /// Represents the connection status to the debug probe
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionStatus {
     /// Not connected to any probe
+    #[default]
     Disconnected,
     /// Attempting to connect
     Connecting,
@@ -743,6 +749,55 @@ impl CollectionStats {
             (self.successful_reads as f64 / total as f64) * 100.0
         }
     }
+}
+
+/// Convert RGB color (u8 array) to HSV (hue 0-360, saturation 0-1, value 0-1)
+fn rgb_to_hsv(color: [u8; 4]) -> (f32, f32, f32) {
+    let r = color[0] as f32 / 255.0;
+    let g = color[1] as f32 / 255.0;
+    let b = color[2] as f32 / 255.0;
+
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+
+    let hue = if delta < f32::EPSILON {
+        0.0
+    } else if (max - r).abs() < f32::EPSILON {
+        60.0 * (((g - b) / delta) % 6.0)
+    } else if (max - g).abs() < f32::EPSILON {
+        60.0 * (((b - r) / delta) + 2.0)
+    } else {
+        60.0 * (((r - g) / delta) + 4.0)
+    };
+    let hue = if hue < 0.0 { hue + 360.0 } else { hue };
+
+    let saturation = if max < f32::EPSILON { 0.0 } else { delta / max };
+    let value = max;
+
+    (hue, saturation, value)
+}
+
+/// Convert HSV (hue 0-360, saturation 0-1, value 0-1) to RGB (u8, u8, u8)
+fn hsv_to_rgb(hue: f32, saturation: f32, value: f32) -> (u8, u8, u8) {
+    let c = value * saturation;
+    let x = c * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
+    let m = value - c;
+
+    let (r, g, b) = match (hue / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+
+    (
+        ((r + m) * 255.0) as u8,
+        ((g + m) * 255.0) as u8,
+        ((b + m) * 255.0) as u8,
+    )
 }
 
 #[cfg(test)]

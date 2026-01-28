@@ -58,8 +58,11 @@ impl WindowFunction {
             WindowFunction::Hann => 0.5 * (1.0 - (2.0 * PI * i_f / n_f).cos()),
             WindowFunction::Hamming => 0.54 - 0.46 * (2.0 * PI * i_f / n_f).cos(),
             WindowFunction::Blackman => {
-                0.42 - 0.5 * (2.0 * PI * i_f / n_f).cos()
-                    + 0.08 * (4.0 * PI * i_f / n_f).cos()
+                // Clamp to 0.0: the formula is exactly 0 at endpoints but
+                // floating-point representation of 0.42 and 0.08 can produce -ε.
+                (0.42 - 0.5 * (2.0 * PI * i_f / n_f).cos()
+                    + 0.08 * (4.0 * PI * i_f / n_f).cos())
+                .max(0.0)
             }
             WindowFunction::FlatTop => {
                 let a0 = 0.21557895;
@@ -448,9 +451,10 @@ mod tests {
             let coeffs = window.generate(n);
             assert_eq!(coeffs.len(), n);
 
-            // All coefficients should be between 0 and 1 (approximately)
+            // All coefficients should be approximately in [0, 1].
+            // FlatTop window has small negative side lobes (~-0.0004) by design.
             for &c in &coeffs {
-                assert!(c >= 0.0 && c <= 1.5, "Window {} out of range", window.display_name());
+                assert!(c >= -0.1 && c <= 1.5, "Window {} coefficient {} out of range", window.display_name(), c);
             }
         }
     }

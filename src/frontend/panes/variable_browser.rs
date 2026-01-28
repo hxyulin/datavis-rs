@@ -7,8 +7,11 @@ use std::collections::HashSet;
 use egui::{Color32, Ui};
 
 use crate::backend::{ElfInfo, ElfSymbol, TypeHandle};
-use crate::frontend::state::{AppAction, SharedState};
+use crate::frontend::state::{AppAction, ChildVariableSpec, SharedState};
 use crate::types::Variable;
+
+use crate::frontend::pane_trait::Pane;
+use crate::frontend::workspace::PaneKind;
 
 /// Maximum number of array elements to display when expanding an array
 const MAX_ARRAY_ELEMENTS: u64 = 1024;
@@ -26,6 +29,8 @@ pub struct VariableBrowserState {
     pub expanded_paths: HashSet<String>,
     /// Whether to show unreadable variables
     pub show_unreadable: bool,
+    /// Last seen ELF generation (for auto-refreshing on ELF reload)
+    last_elf_generation: u64,
 }
 
 impl VariableBrowserState {
@@ -67,6 +72,13 @@ pub fn render(
 ) -> Vec<AppAction> {
     let mut actions = Vec::new();
     let mut variables_to_add: Vec<Variable> = Vec::new();
+    let mut struct_add_actions: Vec<AppAction> = Vec::new();
+
+    // Auto-refresh when ELF is reloaded
+    if shared.topics.elf_generation != state.last_elf_generation {
+        state.last_elf_generation = shared.topics.elf_generation;
+        state.update_filter(shared.elf_info);
+    }
 
     ui.heading("Variable Browser");
     ui.separator();
@@ -190,6 +202,7 @@ pub fn render(
                             state.selected_index == Some(idx),
                             &mut toggle_expand_path,
                             &mut variables_to_add,
+                            &mut struct_add_actions,
                             &mut None,
                             None,
                         );
@@ -207,6 +220,8 @@ pub fn render(
     for var in variables_to_add {
         actions.push(AppAction::AddVariable(var));
     }
+
+    actions.extend(struct_add_actions);
 
     actions
 }
@@ -322,6 +337,7 @@ fn render_type_tree(
     is_selected: bool,
     toggle_expand_path: &mut Option<String>,
     variables_to_add: &mut Vec<Variable>,
+    struct_add_actions: &mut Vec<AppAction>,
     symbol_to_use: &mut Option<ElfSymbol>,
     root_symbol: Option<&ElfSymbol>,
 ) {
@@ -416,6 +432,22 @@ fn render_type_tree(
                 variables_to_add.push(var);
             }
         }
+
+        // "Add all" button for expandable (struct/array) types with children
+        if can_expand && !is_pointer {
+            if ui.small_button("+all").on_hover_text("Add struct with all fields").clicked() {
+                let parent_type = type_handle
+                    .as_ref()
+                    .map(|h| h.to_variable_type())
+                    .unwrap_or(crate::types::VariableType::U32);
+                let parent_var = Variable::new(name, address, parent_type);
+                let children = collect_children_from_type(&type_handle, name, address);
+                struct_add_actions.push(AppAction::AddStructVariable {
+                    parent: parent_var,
+                    children,
+                });
+            }
+        }
     });
 
     // Render expanded members or array elements
@@ -438,6 +470,7 @@ fn render_type_tree(
                     false,
                     toggle_expand_path,
                     variables_to_add,
+                    struct_add_actions,
                     symbol_to_use,
                     root_symbol,
                 );
@@ -461,6 +494,7 @@ fn render_type_tree(
                     false,
                     toggle_expand_path,
                     variables_to_add,
+                    struct_add_actions,
                     symbol_to_use,
                     root_symbol,
                 );
@@ -486,4 +520,88 @@ fn render_type_tree(
             }
         }
     }
+}
+
+/// Collect leaf children from a struct/array type handle for AddStructVariable.
+/// Walks members recursively, collecting only leaf (addable, non-expandable) fields.
+fn collect_children_from_type(
+    type_handle: &Option<TypeHandle>,
+    parent_name: &str,
+    parent_address: u64,
+) -> Vec<ChildVariableSpec> {
+    let mut children = Vec::new();
+    let Some(handle) = type_handle else {
+        return children;
+    };
+
+    let underlying = handle.underlying();
+
+    // Struct members
+    if let Some(members) = underlying.members() {
+        for member in members {
+            let member_addr = parent_address + member.offset;
+            let full_name = format!("{}.{}", parent_name, member.name);
+            let member_type = handle.member_type(member);
+            let member_underlying = member_type.underlying();
+
+            if member_underlying.is_expandable() && !member_underlying.is_pointer_or_reference() {
+                // Recurse into nested structs
+                let nested = collect_children_from_type(
+                    &Some(member_type),
+                    &full_name,
+                    member_addr,
+                );
+                children.extend(nested);
+            } else if member_type.is_addable() {
+                children.push(ChildVariableSpec {
+                    name: full_name,
+                    address: member_addr,
+                    var_type: member_type.to_variable_type(),
+                });
+            }
+        }
+    }
+
+    // Array elements
+    if !underlying.is_pointer_or_reference() && underlying.is_array() {
+        let count = underlying.array_count().unwrap_or(0).min(MAX_ARRAY_ELEMENTS);
+        let elem_size = underlying.element_size().unwrap_or(0);
+        let elem_type = underlying.element_type();
+        if count > 0 && elem_size > 0 {
+            for i in 0..count {
+                let elem_addr = parent_address + (i * elem_size);
+                let full_name = format!("{}[{}]", parent_name, i);
+                if let Some(ref et) = elem_type {
+                    let et_underlying = et.underlying();
+                    if et_underlying.is_expandable() && !et_underlying.is_pointer_or_reference() {
+                        let nested = collect_children_from_type(
+                            &elem_type,
+                            &full_name,
+                            elem_addr,
+                        );
+                        children.extend(nested);
+                    } else if et.is_addable() {
+                        children.push(ChildVariableSpec {
+                            name: full_name,
+                            address: elem_addr,
+                            var_type: et.to_variable_type(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    children
+}
+
+impl Pane for VariableBrowserState {
+    fn kind(&self) -> PaneKind { PaneKind::VariableBrowser }
+
+    fn render(&mut self, shared: &mut SharedState, ui: &mut Ui) -> Vec<AppAction> {
+        render(self, shared, ui)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }

@@ -4,10 +4,12 @@
 //! using Serial Wire Debug (SWD) interface.
 
 use datavis_rs::{
-    backend::SwdBackend,
     config::{AppConfig, AppState, ProjectFile},
     frontend::DataVisApp,
+    pipeline::{PipelineBridge, PipelineBuilder, PipelineNodeIds},
 };
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 fn main() -> eframe::Result<()> {
@@ -42,13 +44,18 @@ fn main() -> eframe::Result<()> {
         (AppConfig::default(), None)
     };
 
-    // Create the SWD backend with communication channels
-    let (backend, frontend_receiver) = SwdBackend::new(config.clone());
-
-    // Spawn the backend thread
+    // Create the pipeline bridge and spawn the pipeline thread
+    let (bridge, cmd_rx, msg_tx) = PipelineBridge::new();
+    let running = Arc::new(AtomicBool::new(true));
+    let builder = PipelineBuilder::new(config.clone());
+    let running_clone = running.clone();
+    let (node_ids_tx, node_ids_rx) = std::sync::mpsc::sync_channel::<PipelineNodeIds>(1);
     let backend_handle = std::thread::spawn(move || {
-        backend.run();
+        let (mut pipeline, node_ids) = builder.build_default(cmd_rx, msg_tx, running_clone);
+        let _ = node_ids_tx.send(node_ids);
+        pipeline.run();
     });
+    let node_ids = node_ids_rx.recv().expect("Failed to receive pipeline node IDs");
 
     // Configure eframe options
     let native_options = eframe::NativeOptions {
@@ -78,10 +85,11 @@ fn main() -> eframe::Result<()> {
 
             Ok(Box::new(DataVisApp::new(
                 cc,
-                frontend_receiver,
+                bridge,
                 config,
                 app_state,
                 project_path,
+                node_ids,
             )))
         }),
     );

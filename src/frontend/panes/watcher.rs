@@ -4,7 +4,9 @@
 
 use egui::{Color32, Ui};
 
+use crate::frontend::pane_trait::Pane;
 use crate::frontend::state::{AppAction, SharedState};
+use crate::frontend::workspace::PaneKind;
 
 /// State for the Watcher pane
 #[derive(Default)]
@@ -84,7 +86,7 @@ pub fn render(
 
                         ui.colored_label(color, &var.name);
 
-                        if let Some(data) = shared.variable_data.get(&var.id) {
+                        if let Some(data) = shared.topics.variable_data.get(&var.id) {
                             if let Some(last) = data.last() {
                                 ui.label(
                                     egui::RichText::new(format!("{:.4}", last.converted_value))
@@ -139,4 +141,15 @@ pub fn render(
         });
 
     Vec::new()
+}
+
+impl Pane for WatcherState {
+    fn kind(&self) -> PaneKind { PaneKind::Watcher }
+
+    fn render(&mut self, shared: &mut SharedState, ui: &mut Ui) -> Vec<AppAction> {
+        render(self, shared, ui)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }

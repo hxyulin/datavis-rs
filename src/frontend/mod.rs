@@ -27,11 +27,14 @@
 
 pub mod dialogs;
 pub mod markers;
+pub mod pane_registry;
+pub mod pane_trait;
 pub mod panes;
 mod panels;
 mod plot;
 pub mod script_editor;
 pub mod state;
+pub mod topics;
 pub mod widgets;
 pub mod workspace;
 
@@ -39,6 +42,7 @@ pub use panels::*;
 pub use plot::PlotView;
 pub use script_editor::{ScriptEditor, ScriptEditorState};
 pub use state::{AppAction, DialogId, SharedState};
+pub use topics::Topics;
 pub use widgets::*;
 
 use dialogs::{
@@ -47,17 +51,18 @@ use dialogs::{
     VariableChangeState,
 };
 use workspace::tab_viewer::WorkspaceTabViewer;
-use workspace::{PaneId, PaneKind, PaneState, Workspace};
+use panes::SettingsPaneState;
+use workspace::{PaneId, PaneKind, Workspace};
 
-use crate::backend::{
-    parse_elf, BackendCommand, BackendMessage, ElfInfo, ElfSymbol, FrontendReceiver,
-};
+use crate::backend::{parse_elf, ElfInfo, ElfSymbol};
+use crate::pipeline::bridge::{PipelineBridge, PipelineCommand, SinkMessage};
+use crate::pipeline::executor::PipelineNodeIds;
 use crate::config::{settings::RuntimeSettings, AppConfig, AppState};
 use crate::types::{CollectionStats, ConnectionStatus, DataPoint, VariableData, VariableType};
 use egui::Color32;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Actions that can be performed on variables from the UI
 #[allow(dead_code)]
@@ -95,18 +100,22 @@ pub struct VariableChange {
 #[allow(dead_code)]
 pub struct DataVisApp {
     // === Communication ===
-    frontend: FrontendReceiver,
+    frontend: PipelineBridge,
 
     // === Shared State ===
     config: AppConfig,
     app_state: AppState,
     settings: RuntimeSettings,
-    connection_status: ConnectionStatus,
-    variable_data: HashMap<u32, VariableData>,
-    stats: CollectionStats,
     start_time: Instant,
+    /// Base time accumulated from previous start/stop cycles
+    accumulated_time: Duration,
+    /// Instant when the current collection session started (None if stopped)
+    collection_start: Option<Instant>,
     last_error: Option<String>,
     persistence_config: crate::config::DataPersistenceConfig,
+
+    // === All published data (variables, stats, status, snapshots) ===
+    topics: Topics,
 
     // === ELF Data ===
     elf_file_path: Option<PathBuf>,
@@ -246,10 +255,11 @@ impl DataVisApp {
     /// Create a new application instance
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        frontend: FrontendReceiver,
+        frontend: PipelineBridge,
         config: AppConfig,
         app_state: AppState,
         project_path: Option<PathBuf>,
+        node_ids: PipelineNodeIds,
     ) -> Self {
         // Configure fonts and styles
         let fonts = egui::FontDefinitions::default();
@@ -283,39 +293,44 @@ impl DataVisApp {
 
         let target_chip_input = config.probe.target_chip.clone();
 
-        frontend.send_command(BackendCommand::RefreshProbes);
+        frontend.send_command(PipelineCommand::RefreshProbes);
 
         // Build workspace with default layout
-        let mut workspace = Workspace {
-            dock_state: egui_dock::DockState::new(vec![]),
-            pane_states: HashMap::new(),
-            pane_entries: HashMap::new(),
-        };
+        let mut workspace = Workspace::new();
         let dock_state = workspace::default_layout::build_default_layout(&mut workspace);
         workspace.dock_state = dock_state;
 
-        // Initialize settings pane state with target chip and project info
+        // Initialize settings pane state with target chip
         if let Some(settings_pane_id) = workspace.find_singleton(PaneKind::Settings) {
-            if let Some(PaneState::Settings(ref mut settings_state)) =
-                workspace.pane_states.get_mut(&settings_pane_id)
+            if let Some(settings_state) = workspace
+                .pane_states
+                .get_mut(&settings_pane_id)
+                .and_then(|p| p.as_any_mut().downcast_mut::<SettingsPaneState>())
             {
                 settings_state.target_chip_input = target_chip_input;
-                settings_state.project_name = project_name;
-                settings_state.project_file_path = project_path.clone();
             }
         }
+
+        let topics = Topics {
+            recorder_node_id: node_ids.recorder_sink,
+            exporter_node_id: node_ids.exporter_sink,
+            variable_data,
+            project_name,
+            project_file_path: project_path.clone(),
+            ..Topics::default()
+        };
 
         Self {
             frontend,
             config,
             app_state,
             settings: RuntimeSettings::default(),
-            connection_status: ConnectionStatus::Disconnected,
-            variable_data,
-            stats: CollectionStats::default(),
             start_time: Instant::now(),
+            accumulated_time: Duration::ZERO,
+            collection_start: None,
             last_error: None,
             persistence_config: crate::config::DataPersistenceConfig::default(),
+            topics,
             elf_file_path: None,
             elf_info: None,
             elf_symbols: Vec::new(),
@@ -335,33 +350,20 @@ impl DataVisApp {
 
         for msg in messages {
             match msg {
-                BackendMessage::ConnectionStatus(status) => {
-                    self.connection_status = status;
+                SinkMessage::ConnectionStatus(status) => {
+                    self.topics.connection_status = status;
                     if status == ConnectionStatus::Connected {
                         self.last_error = None;
                     }
                 }
-                BackendMessage::ConnectionError(err) => {
+                SinkMessage::ConnectionError(err) => {
                     self.last_error = Some(err);
-                    self.connection_status = ConnectionStatus::Error;
+                    self.topics.connection_status = ConnectionStatus::Error;
                 }
-                BackendMessage::DataPoint {
-                    variable_id,
-                    timestamp,
-                    raw_value,
-                    converted_value,
-                } => {
-                    if let Some(data) = self.variable_data.get_mut(&variable_id) {
-                        data.push(DataPoint::with_conversion(
-                            timestamp,
-                            raw_value,
-                            converted_value,
-                        ));
-                    }
-                }
-                BackendMessage::DataBatch(batch) => {
-                    for (variable_id, timestamp, raw_value, converted_value) in batch {
-                        if let Some(data) = self.variable_data.get_mut(&variable_id) {
+                SinkMessage::DataBatch(batch) => {
+                    for (var_id, timestamp, raw_value, converted_value) in batch {
+                        let variable_id = var_id.0;
+                        if let Some(data) = self.topics.variable_data.get_mut(&variable_id) {
                             data.push(DataPoint::with_conversion(
                                 timestamp,
                                 raw_value,
@@ -370,52 +372,67 @@ impl DataVisApp {
                         }
                     }
                 }
-                BackendMessage::ReadError { variable_id, error } => {
-                    if let Some(data) = self.variable_data.get_mut(&variable_id) {
+                SinkMessage::ReadError { variable_id, error } => {
+                    if let Some(data) = self.topics.variable_data.get_mut(&variable_id) {
                         data.record_error(error);
                     }
                 }
-                BackendMessage::Stats(stats) => {
-                    self.stats = stats;
+                SinkMessage::Stats(stats) => {
+                    self.topics.stats = stats;
                 }
-                BackendMessage::VariableList(vars) => {
+                SinkMessage::VariableList(vars) => {
                     for var in vars {
-                        if !self.variable_data.contains_key(&var.id) {
-                            self.variable_data.insert(var.id, VariableData::new(var));
+                        if !self.topics.variable_data.contains_key(&var.id) {
+                            self.topics.variable_data.insert(var.id, VariableData::new(var));
                         }
                     }
                 }
-                BackendMessage::ProbeList(probes) => {
-                    // Update probes in settings pane
-                    if let Some(settings_id) = self.workspace.find_singleton(PaneKind::Settings) {
-                        if let Some(PaneState::Settings(ref mut s)) =
-                            self.workspace.pane_states.get_mut(&settings_id)
-                        {
-                            // Reset selection if out of bounds
-                            if let Some(idx) = s.selected_probe_index {
-                                if idx >= probes.len() {
-                                    s.selected_probe_index = None;
-                                }
-                            }
-                            s.available_probes = probes.clone();
-                        }
-                    }
+                SinkMessage::ProbeList(probes) => {
                     tracing::info!("Received {} probes", probes.len());
+                    self.topics.available_probes = probes;
                 }
-                BackendMessage::Shutdown => {
+                SinkMessage::Shutdown => {
                     tracing::info!("Backend shutdown received");
                 }
-                BackendMessage::WriteSuccess { variable_id } => {
+                SinkMessage::WriteSuccess { variable_id } => {
                     tracing::info!("Successfully wrote to variable {}", variable_id);
                 }
-                BackendMessage::WriteError { variable_id, error } => {
+                SinkMessage::WriteError { variable_id, error } => {
                     tracing::error!("Failed to write to variable {}: {}", variable_id, error);
                     self.last_error = Some(format!("Write failed: {}", error));
+                }
+                SinkMessage::NodeError { node_id, message } => {
+                    tracing::error!("Node {:?} error: {}", node_id, message);
+                }
+                SinkMessage::RecorderStatus { state, frame_count } => {
+                    self.topics.recorder_state = state;
+                    self.topics.recorder_frame_count = frame_count;
+                }
+                SinkMessage::ExporterStatus { active, rows_written } => {
+                    self.topics.exporter_active = active;
+                    self.topics.exporter_rows_written = rows_written;
+                }
+                SinkMessage::VariableTreeSnapshot(snapshots) => {
+                    self.topics.variable_tree = snapshots;
+                }
+                SinkMessage::Topology(snapshot) => {
+                    self.topics.topology = Some(snapshot);
+                }
+                SinkMessage::RecordingComplete(recording) => {
+                    tracing::info!("Recording complete: {} frames", recording.frames.len());
+                    self.topics.completed_recordings.push(recording);
                 }
             }
         }
 
         had_messages
+    }
+
+    /// Compute current display time (frozen when not collecting)
+    fn display_time(&self) -> Duration {
+        self.accumulated_time + self.collection_start
+            .map(|s| s.elapsed())
+            .unwrap_or(Duration::ZERO)
     }
 
     fn handle_action(&mut self, action: AppAction) {
@@ -424,33 +441,38 @@ impl DataVisApp {
                 probe_selector,
                 target,
             } => {
-                self.frontend.send_command(BackendCommand::Connect {
+                self.frontend.send_command(PipelineCommand::Connect {
                     selector: probe_selector,
                     target,
                     probe_config: self.config.probe.clone(),
                 });
             }
             AppAction::Disconnect => {
-                self.frontend.send_command(BackendCommand::Disconnect);
+                self.frontend.send_command(PipelineCommand::Disconnect);
             }
             AppAction::StartCollection => {
                 self.settings.collecting = true;
-                self.frontend.send_command(BackendCommand::StartCollection);
+                self.collection_start = Some(Instant::now());
+                self.frontend.send_command(PipelineCommand::Start);
             }
             AppAction::StopCollection => {
                 self.settings.collecting = false;
-                self.frontend.send_command(BackendCommand::StopCollection);
+                // Freeze: accumulate elapsed time from this session
+                if let Some(start) = self.collection_start.take() {
+                    self.accumulated_time += start.elapsed();
+                }
+                self.frontend.send_command(PipelineCommand::Stop);
             }
             AppAction::RefreshProbes => {
-                self.frontend.send_command(BackendCommand::RefreshProbes);
+                self.frontend.send_command(PipelineCommand::RefreshProbes);
             }
             AppAction::SetMemoryAccessMode(mode) => {
                 self.frontend
-                    .send_command(BackendCommand::SetMemoryAccessMode(mode));
+                    .send_command(PipelineCommand::SetMemoryAccessMode(mode));
             }
             AppAction::SetPollRate(rate) => {
                 self.frontend
-                    .send_command(BackendCommand::SetPollRate(rate));
+                    .send_command(PipelineCommand::SetPollRate(rate));
             }
             #[cfg(feature = "mock-probe")]
             AppAction::UseMockProbe(use_mock) => {
@@ -459,15 +481,36 @@ impl DataVisApp {
             AppAction::AddVariable(var) => {
                 self.add_variable(var);
             }
+            AppAction::AddStructVariable { parent, children } => {
+                let parent_id = parent.id;
+                let parent_color = parent.color;
+                let child_count = children.len();
+                self.add_variable_confirmed(parent);
+                for (i, child_spec) in children.into_iter().enumerate() {
+                    let mut child = crate::types::Variable::new(
+                        &child_spec.name, child_spec.address, child_spec.var_type,
+                    );
+                    child.parent_id = Some(parent_id);
+                    child.enabled = false;
+                    child.show_in_graph = false;
+                    child.color = crate::types::Variable::generate_child_color(parent_color, i, child_count);
+                    self.add_variable_confirmed(child);
+                }
+            }
             AppAction::RemoveVariable(id) => {
-                self.config.remove_variable(id);
-                self.variable_data.remove(&id);
-                self.frontend
-                    .send_command(BackendCommand::RemoveVariable(id));
+                // Remove children first
+                let child_ids: Vec<u32> = self.config.variables.iter()
+                    .filter(|v| v.parent_id == Some(id))
+                    .map(|v| v.id)
+                    .collect();
+                for child_id in child_ids {
+                    self.remove_variable_internal(child_id);
+                }
+                self.remove_variable_internal(id);
             }
             AppAction::UpdateVariable(var) => {
                 self.frontend
-                    .send_command(BackendCommand::UpdateVariable(var));
+                    .send_command(PipelineCommand::UpdateVariable(var));
             }
             AppAction::WriteVariable { id, value } => {
                 self.frontend.write_variable(id, value);
@@ -488,28 +531,30 @@ impl DataVisApp {
                 self.open_dialog(dialog_id);
             }
             AppAction::ClearData => {
-                for data in self.variable_data.values_mut() {
+                for data in self.topics.variable_data.values_mut() {
                     data.clear();
                 }
             }
             AppAction::ClearVariableData(id) => {
-                if let Some(data) = self.variable_data.get_mut(&id) {
+                if let Some(data) = self.topics.variable_data.get_mut(&id) {
                     data.clear();
                 }
             }
             AppAction::OpenPane(kind) => {
-                if kind.is_singleton() {
+                if self.workspace.is_singleton(kind) {
                     if let Some(id) = self.workspace.find_singleton(kind) {
                         // Focus existing singleton
                         if let Some(tab_location) = self.workspace.dock_state.find_tab(&id) {
                             self.workspace.dock_state.set_active_tab(tab_location);
                         }
                     } else {
-                        let id = self.workspace.register_pane(kind, kind.display_name());
+                        let name = self.workspace.display_name(kind);
+                        let id = self.workspace.register_pane(kind, name);
                         self.workspace.dock_state.push_to_first_leaf(id);
                     }
                 } else {
-                    let id = self.workspace.register_pane(kind, kind.display_name());
+                    let name = self.workspace.display_name(kind);
+                    let id = self.workspace.register_pane(kind, name);
                     self.workspace.dock_state.push_to_first_leaf(id);
                 }
             }
@@ -520,12 +565,53 @@ impl DataVisApp {
                     .values()
                     .filter(|e| e.kind == kind)
                     .count();
-                let title = format!("{} {}", kind.display_name(), count + 1);
+                let display = self.workspace.display_name(kind);
+                let title = format!("{} {}", display, count + 1);
                 let id = self.workspace.register_pane(kind, title);
                 self.workspace.dock_state.push_to_first_leaf(id);
             }
+            AppAction::NodeConfig { node_id, key, value } => {
+                self.frontend.send_command(PipelineCommand::NodeConfig {
+                    node_id,
+                    key,
+                    value,
+                });
+            }
+            AppAction::RequestTopology => {
+                self.frontend.send_command(PipelineCommand::RequestTopology);
+            }
             AppAction::ClosePane(id) => {
                 self.workspace.remove_pane(id);
+            }
+            AppAction::RenameVariable { id, new_name } => {
+                let old_name = self.config.find_variable(id).map(|v| v.name.clone());
+                if let Some(old_name) = old_name {
+                    // Update parent name in config
+                    if let Some(var) = self.config.find_variable_mut(id) {
+                        var.name = new_name.clone();
+                    }
+                    // Update parent name in topics
+                    if let Some(data) = self.topics.variable_data.get_mut(&id) {
+                        data.variable.name = new_name.clone();
+                    }
+                    // Propagate prefix change to children
+                    let child_ids: Vec<u32> = self.config.variables.iter()
+                        .filter(|v| v.parent_id == Some(id))
+                        .map(|v| v.id)
+                        .collect();
+                    for child_id in child_ids {
+                        if let Some(child) = self.config.find_variable_mut(child_id) {
+                            if let Some(suffix) = child.name.strip_prefix(&old_name) {
+                                child.name = format!("{}{}", new_name, suffix);
+                            }
+                        }
+                        if let Some(child_data) = self.topics.variable_data.get_mut(&child_id) {
+                            if let Some(suffix) = child_data.variable.name.strip_prefix(&old_name) {
+                                child_data.variable.name = format!("{}{}", new_name, suffix);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -556,14 +642,8 @@ impl DataVisApp {
                 );
                 self.elf_symbols = info.get_variables().into_iter().cloned().collect();
                 self.elf_info = Some(info);
-                // Update variable browser filter
-                if let Some(browser_id) = self.workspace.find_singleton(PaneKind::VariableBrowser) {
-                    if let Some(PaneState::VariableBrowser(ref mut s)) =
-                        self.workspace.pane_states.get_mut(&browser_id)
-                    {
-                        s.update_filter(self.elf_info.as_ref());
-                    }
-                }
+                // Signal ELF reload — VariableBrowser auto-refreshes via elf_generation
+                self.topics.elf_generation += 1;
                 self.detect_variable_changes();
             }
             Err(e) => {
@@ -591,16 +671,23 @@ impl DataVisApp {
 
     fn add_variable_confirmed(&mut self, var: crate::types::Variable) {
         self.config.add_variable(var.clone());
-        self.variable_data
+        self.topics.variable_data
             .insert(var.id, VariableData::new(var.clone()));
         self.frontend.add_variable(var);
     }
 
+    fn remove_variable_internal(&mut self, id: u32) {
+        self.config.remove_variable(id);
+        self.topics.variable_data.remove(&id);
+        self.frontend
+            .send_command(PipelineCommand::RemoveVariable(id));
+    }
+
     fn clear_all_data(&mut self) {
-        for data in self.variable_data.values_mut() {
+        for data in self.topics.variable_data.values_mut() {
             data.clear();
         }
-        self.stats = CollectionStats::default();
+        self.topics.stats = CollectionStats::default();
     }
 
     fn render_elf_symbols_with_context(&mut self, ctx: &egui::Context) {
@@ -635,19 +722,7 @@ impl DataVisApp {
     }
 
     fn save_project_to_path(&mut self, path: PathBuf) {
-        // Get project name from settings pane
-        let project_name = self
-            .workspace
-            .find_singleton(PaneKind::Settings)
-            .and_then(|id| self.workspace.pane_states.get(&id))
-            .and_then(|s| {
-                if let PaneState::Settings(s) = s {
-                    Some(s.project_name.clone())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "Untitled Project".to_string());
+        let project_name = self.topics.project_name.clone();
 
         let project = crate::config::ProjectFile {
             version: 1,
@@ -659,14 +734,7 @@ impl DataVisApp {
 
         match project.save(&path) {
             Ok(()) => {
-                // Update project file path in settings pane
-                if let Some(settings_id) = self.workspace.find_singleton(PaneKind::Settings) {
-                    if let Some(PaneState::Settings(ref mut s)) =
-                        self.workspace.pane_states.get_mut(&settings_id)
-                    {
-                        s.project_file_path = Some(path.clone());
-                    }
-                }
+                self.topics.project_file_path = Some(path.clone());
 
                 self.app_state.add_recent_project(
                     &path,
@@ -694,13 +762,18 @@ impl DataVisApp {
 
                 crate::types::Variable::sync_next_id(&self.config.variables);
 
-                // Update settings pane
+                // Update project metadata in Topics
+                self.topics.project_name = project.name.clone();
+                self.topics.project_file_path = Some(path.clone());
+
+                // Update settings pane target chip
                 if let Some(settings_id) = self.workspace.find_singleton(PaneKind::Settings) {
-                    if let Some(PaneState::Settings(ref mut s)) =
-                        self.workspace.pane_states.get_mut(&settings_id)
+                    if let Some(s) = self
+                        .workspace
+                        .pane_states
+                        .get_mut(&settings_id)
+                        .and_then(|p| p.as_any_mut().downcast_mut::<SettingsPaneState>())
                     {
-                        s.project_name = project.name.clone();
-                        s.project_file_path = Some(path.clone());
                         s.target_chip_input = self.config.probe.target_chip.clone();
                     }
                 }
@@ -721,16 +794,8 @@ impl DataVisApp {
                         Ok(info) => {
                             self.elf_symbols = info.symbols.clone();
                             self.elf_info = Some(info);
-                            // Update variable browser filter
-                            if let Some(browser_id) =
-                                self.workspace.find_singleton(PaneKind::VariableBrowser)
-                            {
-                                if let Some(PaneState::VariableBrowser(ref mut s)) =
-                                    self.workspace.pane_states.get_mut(&browser_id)
-                                {
-                                    s.update_filter(self.elf_info.as_ref());
-                                }
-                            }
+                            // Signal ELF reload — VariableBrowser auto-refreshes via elf_generation
+                            self.topics.elf_generation += 1;
                             tracing::info!("Loaded ELF from project: {:?}", binary_path);
                             self.detect_variable_changes();
                         }
@@ -740,9 +805,9 @@ impl DataVisApp {
                     }
                 }
 
-                self.variable_data.clear();
+                self.topics.variable_data.clear();
                 for var in &self.config.variables {
-                    self.variable_data
+                    self.topics.variable_data
                         .insert(var.id, crate::types::VariableData::new(var.clone()));
                     self.frontend.add_variable(var.clone());
                 }
@@ -878,7 +943,7 @@ impl DataVisApp {
                 );
                 var.address = new_address;
             }
-            if let Some(data) = self.variable_data.get_mut(&var_id) {
+            if let Some(data) = self.topics.variable_data.get_mut(&var_id) {
                 data.variable.address = new_address;
             }
             if let Some(var) = self.config.variables.iter().find(|v| v.id == var_id) {
@@ -896,7 +961,7 @@ impl DataVisApp {
                 );
                 var.var_type = new_type;
             }
-            if let Some(data) = self.variable_data.get_mut(&var_id) {
+            if let Some(data) = self.topics.variable_data.get_mut(&var_id) {
                 data.variable.var_type = new_type;
             }
             if let Some(var) = self.config.variables.iter().find(|v| v.id == var_id) {
@@ -909,9 +974,9 @@ impl DataVisApp {
                 tracing::info!("Removing missing variable '{}' (id: {})", var.name, id);
             }
             self.config.remove_variable(id);
-            self.variable_data.remove(&id);
+            self.topics.variable_data.remove(&id);
             self.frontend
-                .send_command(BackendCommand::RemoveVariable(id));
+                .send_command(PipelineCommand::RemoveVariable(id));
         }
     }
 
@@ -944,26 +1009,15 @@ impl DataVisApp {
         if toggle_collection {
             if self.settings.collecting {
                 self.settings.collecting = false;
-                self.frontend.send_command(BackendCommand::StopCollection);
+                self.frontend.send_command(PipelineCommand::Stop);
             } else {
                 self.settings.collecting = true;
-                self.frontend.send_command(BackendCommand::StartCollection);
+                self.frontend.send_command(PipelineCommand::Start);
             }
         }
 
         if save_project {
-            // Get project file path from settings pane
-            let project_file_path = self
-                .workspace
-                .find_singleton(PaneKind::Settings)
-                .and_then(|id| self.workspace.pane_states.get(&id))
-                .and_then(|s| {
-                    if let PaneState::Settings(s) = s {
-                        s.project_file_path.clone()
-                    } else {
-                        None
-                    }
-                });
+            let project_file_path = self.topics.project_file_path.clone();
 
             if let Some(path) = project_file_path {
                 self.save_project_to_path(path);
@@ -977,7 +1031,7 @@ impl DataVisApp {
         }
 
         if clear_data {
-            for data in self.variable_data.values_mut() {
+            for data in self.topics.variable_data.values_mut() {
                 data.clear();
             }
         }
@@ -990,51 +1044,29 @@ impl DataVisApp {
     /// Render pane dialogs that need &Context (called after dock area renders)
     fn render_pane_dialogs(&mut self, ctx: &egui::Context) {
         let mut actions = Vec::new();
+        let display_time = self.display_time().as_secs_f64();
 
-        // We need to iterate pane states and call dialog rendering.
-        // To avoid borrow issues with SharedState, we construct it per-pane.
+        // Iterate all panes and call render_dialogs via trait dispatch.
         let pane_ids: Vec<PaneId> = self.workspace.pane_states.keys().copied().collect();
 
         for pane_id in pane_ids {
-            let kind = self
-                .workspace
-                .pane_entries
-                .get(&pane_id)
-                .map(|e| e.kind);
+            if let Some(pane) = self.workspace.pane_states.get_mut(&pane_id) {
+                let mut shared = SharedState {
+                    frontend: &self.frontend,
+                    config: &mut self.config,
+                    settings: &mut self.settings,
+                    app_state: &mut self.app_state,
+                    elf_info: self.elf_info.as_ref(),
+                    elf_symbols: &self.elf_symbols,
+                    elf_file_path: self.elf_file_path.as_ref(),
+                    persistence_config: &mut self.persistence_config,
+                    last_error: &mut self.last_error,
+                    display_time,
+                    topics: &mut self.topics,
+                };
 
-            if let Some(kind) = kind {
-                // For each pane that has dialogs, construct SharedState and call
-                let state = self.workspace.pane_states.get_mut(&pane_id);
-                if let Some(state) = state {
-                    let mut shared = SharedState {
-                        frontend: &self.frontend,
-                        connection_status: self.connection_status,
-                        config: &mut self.config,
-                        settings: &mut self.settings,
-                        app_state: &mut self.app_state,
-                        variable_data: &mut self.variable_data,
-                        stats: &self.stats,
-                        elf_info: self.elf_info.as_ref(),
-                        elf_symbols: &self.elf_symbols,
-                        elf_file_path: self.elf_file_path.as_ref(),
-                        persistence_config: &mut self.persistence_config,
-                        last_error: &mut self.last_error,
-                        start_time: self.start_time,
-                    };
-
-                    match (kind, state) {
-                        (PaneKind::TimeSeries, PaneState::TimeSeries(s)) => {
-                            panes::time_series::render_dialogs(s, &mut shared, ctx, &mut actions);
-                        }
-                        (PaneKind::VariableList, PaneState::VariableList(s)) => {
-                            panes::variable_list::render_dialogs(s, &mut shared, ctx, &mut actions);
-                        }
-                        (PaneKind::Settings, PaneState::Settings(s)) => {
-                            panes::settings::render_dialogs(s, &mut shared, ctx, &mut actions);
-                        }
-                        _ => {}
-                    }
-                }
+                let pane_actions = pane.render_dialogs(&mut shared, ctx);
+                actions.extend(pane_actions);
             }
         }
 
@@ -1050,7 +1082,7 @@ impl eframe::App for DataVisApp {
         self.handle_keyboard_shortcuts(ctx);
 
         if (self.settings.collecting && !self.settings.paused)
-            || self.connection_status == ConnectionStatus::Connected
+            || self.topics.connection_status == ConnectionStatus::Connected
             || had_messages
         {
             ctx.request_repaint();
@@ -1079,40 +1111,34 @@ impl eframe::App for DataVisApp {
                 });
 
                 ui.menu_button("View", |ui| {
-                    // Singleton panes (open/focus)
-                    if ui.button("Variable Browser").clicked() {
-                        self.handle_action(AppAction::OpenPane(PaneKind::VariableBrowser));
-                        ui.close();
-                    }
-                    if ui.button("Variables").clicked() {
-                        self.handle_action(AppAction::OpenPane(PaneKind::VariableList));
-                        ui.close();
-                    }
-                    if ui.button("Settings").clicked() {
-                        self.handle_action(AppAction::OpenPane(PaneKind::Settings));
-                        ui.close();
+                    // Singleton panes (open/focus) — auto-generated from registry
+                    let singletons: Vec<_> = self.workspace.registry_singletons()
+                        .map(|info| (info.kind, info.display_name))
+                        .collect();
+                    for (kind, name) in singletons {
+                        if ui.button(name).clicked() {
+                            self.handle_action(AppAction::OpenPane(kind));
+                            ui.close();
+                        }
                     }
 
                     ui.separator();
 
-                    // New visualizer instances
-                    if ui.button("New Time Series").clicked() {
-                        self.handle_action(AppAction::NewVisualizer(PaneKind::TimeSeries));
-                        ui.close();
-                    }
-                    if ui.button("New Watcher").clicked() {
-                        self.handle_action(AppAction::NewVisualizer(PaneKind::Watcher));
-                        ui.close();
-                    }
-                    if ui.button("New FFT View").clicked() {
-                        self.handle_action(AppAction::NewVisualizer(PaneKind::FftView));
-                        ui.close();
+                    // Multi-instance visualizers — auto-generated from registry
+                    let multi: Vec<_> = self.workspace.registry_multi()
+                        .map(|info| (info.kind, info.display_name))
+                        .collect();
+                    for (kind, name) in multi {
+                        if ui.button(format!("New {}", name)).clicked() {
+                            self.handle_action(AppAction::NewVisualizer(kind));
+                            ui.close();
+                        }
                     }
                 });
 
                 // Right-aligned: connection status, collection controls
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (status_color, status_text) = match self.connection_status {
+                    let (status_color, status_text) = match self.topics.connection_status {
                         ConnectionStatus::Connected => (Color32::GREEN, "Connected"),
                         ConnectionStatus::Connecting => (Color32::YELLOW, "Connecting..."),
                         ConnectionStatus::Disconnected => (Color32::GRAY, "Disconnected"),
@@ -1133,27 +1159,37 @@ impl eframe::App for DataVisApp {
 
         // Dock workspace
         {
+            let display_time = self.display_time().as_secs_f64();
+            let singleton_pane_kinds: Vec<_> = self.workspace.registry_singletons()
+                .map(|info| (info.kind, info.display_name))
+                .collect();
+            let multi_pane_kinds: Vec<_> = self.workspace.registry_multi()
+                .map(|info| (info.kind, info.display_name))
+                .collect();
+
             let mut viewer = WorkspaceTabViewer {
                 frontend: &self.frontend,
-                connection_status: self.connection_status,
                 config: &mut self.config,
                 settings: &mut self.settings,
                 app_state: &mut self.app_state,
-                variable_data: &mut self.variable_data,
-                stats: &self.stats,
                 elf_info: self.elf_info.as_ref(),
                 elf_symbols: &self.elf_symbols,
                 elf_file_path: self.elf_file_path.as_ref(),
                 persistence_config: &mut self.persistence_config,
                 last_error: &mut self.last_error,
-                start_time: self.start_time,
+                display_time,
+                topics: &mut self.topics,
                 pane_states: &mut self.workspace.pane_states,
                 pane_entries: &self.workspace.pane_entries,
                 actions: Vec::new(),
+                singleton_pane_kinds,
+                multi_pane_kinds,
             };
 
             egui_dock::DockArea::new(&mut self.workspace.dock_state)
                 .style(egui_dock::Style::from_egui(ctx.style().as_ref()))
+                .show_add_buttons(true)
+                .show_add_popup(true)
                 .show(ctx, &mut viewer);
 
             let actions = viewer.actions;
@@ -1203,18 +1239,12 @@ impl eframe::App for DataVisApp {
             tracing::warn!("Failed to save app state: {}", e);
         }
 
-        // Auto-save from settings pane state
+        // Auto-save from Topics
         let project_info = self
-            .workspace
-            .find_singleton(PaneKind::Settings)
-            .and_then(|id| self.workspace.pane_states.get(&id))
-            .and_then(|s| {
-                if let PaneState::Settings(s) = s {
-                    s.project_file_path.as_ref().map(|p| (p.clone(), s.project_name.clone()))
-                } else {
-                    None
-                }
-            });
+            .topics
+            .project_file_path
+            .as_ref()
+            .map(|p| (p.clone(), self.topics.project_name.clone()));
 
         if let Some((path, name)) = project_info {
             let project = crate::config::ProjectFile {

@@ -11,9 +11,10 @@ use crate::frontend::dialogs::{
     ExportConfigState, TriggerConfigState, ValueEditorState,
 };
 use crate::frontend::markers::{MarkerManager, MarkerType};
+use crate::frontend::pane_trait::Pane;
 use crate::frontend::plot::{PlotCursor, PlotStatistics};
 use crate::frontend::state::{AppAction, SharedState};
-use crate::session::{SessionMetadata, SessionPlayer, SessionRecorder, SessionState};
+use crate::frontend::workspace::PaneKind;
 use crate::types::ConnectionStatus;
 
 /// A horizontal threshold/reference line
@@ -60,12 +61,10 @@ pub struct TimeSeriesState {
     pub secondary_y_min: Option<f64>,
     pub secondary_y_max: Option<f64>,
     pub secondary_autoscale_y: bool,
-    // Session
-    pub session_recorder: SessionRecorder,
-    pub session_player: SessionPlayer,
-    pub session_name: String,
     // Threshold lines
     pub threshold_lines: Vec<ThresholdLine>,
+    /// Decimation cache: var_id -> (source_point_count, decimated_points)
+    pub decimation_cache: HashMap<u32, (usize, Vec<[f64; 2]>)>,
 }
 
 impl Default for TimeSeriesState {
@@ -87,10 +86,8 @@ impl Default for TimeSeriesState {
             secondary_y_min: None,
             secondary_y_max: None,
             secondary_autoscale_y: true,
-            session_recorder: SessionRecorder::new(),
-            session_player: SessionPlayer::new(),
-            session_name: String::new(),
             threshold_lines: Vec::new(),
+            decimation_cache: HashMap::new(),
         }
     }
 }
@@ -139,7 +136,7 @@ pub fn render_dialogs(
             };
 
             let current_value = shared
-                .variable_data
+                .topics.variable_data
                 .get(&var_id)
                 .and_then(|d| d.last())
                 .map(|p| p.raw_value);
@@ -148,7 +145,7 @@ pub fn render_dialogs(
                 var_name: &var_name,
                 var_type,
                 is_writable,
-                connection_status: shared.connection_status,
+                connection_status: shared.topics.connection_status,
                 current_value,
             };
 
@@ -201,11 +198,11 @@ pub fn render_dialogs(
     // Export config dialog
     if state.export_config_open {
         let total_samples: usize = shared
-            .variable_data
+            .topics.variable_data
             .values()
             .map(|d| d.data_points.len())
             .sum();
-        let data_duration = shared.start_time.elapsed().as_secs_f64();
+        let data_duration = shared.display_time;
 
         let dialog_ctx = ExportConfigContext {
             variables: &shared.config.variables,
@@ -271,7 +268,7 @@ fn render_toolbar_simple(
     actions: &mut Vec<AppAction>,
 ) {
     ui.horizontal(|ui| {
-        if shared.connection_status == ConnectionStatus::Connected {
+        if shared.topics.connection_status == ConnectionStatus::Connected {
             if shared.settings.collecting {
                 if ui.button("Stop").clicked() {
                     actions.push(AppAction::StopCollection);
@@ -292,7 +289,7 @@ fn render_toolbar_simple(
 
         ui.separator();
 
-        let actual_rate = shared.stats.effective_sample_rate;
+        let actual_rate = shared.topics.stats.effective_sample_rate;
         let rate_color = if actual_rate > 0.0 {
             Color32::from_rgb(100, 255, 100)
         } else {
@@ -302,6 +299,37 @@ fn render_toolbar_simple(
         ui.colored_label(rate_color, format!("{:.0} Hz", actual_rate));
 
         ui.separator();
+
+        // Time period presets
+        {
+            const SIMPLE_PRESETS: &[(f64, &str)] = &[
+                (1.0, "1s"),
+                (5.0, "5s"),
+                (10.0, "10s"),
+                (30.0, "30s"),
+                (60.0, "1m"),
+            ];
+            let current = shared.settings.display_time_window;
+            let label = SIMPLE_PRESETS.iter()
+                .find(|&&(s, _)| (s - current).abs() < 0.01)
+                .map(|&(_, l)| l.to_string())
+                .unwrap_or_else(|| format!("{:.1}s", current));
+            egui::ComboBox::from_id_salt("simple_time_period")
+                .selected_text(label)
+                .width(50.0)
+                .show_ui(ui, |ui| {
+                    for &(secs, label) in SIMPLE_PRESETS {
+                        if ui.selectable_value(
+                            &mut shared.settings.display_time_window,
+                            secs,
+                            label,
+                        ).clicked() {
+                            shared.settings.autoscale_x = true;
+                            shared.settings.follow_latest = true;
+                        }
+                    }
+                });
+        }
 
         if ui
             .selectable_label(shared.settings.autoscale_y, "Auto Y")
@@ -338,7 +366,7 @@ fn render_toolbar_advanced(
 ) {
     // Row 1: Collection controls and stats
     ui.horizontal(|ui| {
-        if shared.connection_status == ConnectionStatus::Connected {
+        if shared.topics.connection_status == ConnectionStatus::Connected {
             if shared.settings.collecting {
                 if ui.button("Stop").clicked() {
                     actions.push(AppAction::StopCollection);
@@ -373,7 +401,7 @@ fn render_toolbar_advanced(
 
         // Stats
         let target_rate = shared.config.collection.poll_rate_hz as f64;
-        let actual_rate = shared.stats.effective_sample_rate;
+        let actual_rate = shared.topics.stats.effective_sample_rate;
         let is_throttled = actual_rate > 0.0 && actual_rate < target_rate * 0.9;
         let rate_color = if is_throttled {
             Color32::from_rgb(255, 100, 100)
@@ -391,7 +419,7 @@ fn render_toolbar_advanced(
                 format!("(target: {} Hz)", shared.config.collection.poll_rate_hz),
             );
         }
-        ui.label(format!("| Success: {:.1}%", shared.stats.success_rate()));
+        ui.label(format!("| Success: {:.1}%", shared.topics.stats.success_rate()));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.checkbox(&mut state.advanced_mode, "Advanced");
@@ -401,6 +429,45 @@ fn render_toolbar_advanced(
     // Row 2: Axis controls
     ui.horizontal(|ui| {
         ui.label("X-Axis:");
+
+        // Time period presets dropdown
+        const TIME_PRESETS: &[(f64, &str)] = &[
+            (1.0, "1s"),
+            (5.0, "5s"),
+            (10.0, "10s"),
+            (30.0, "30s"),
+            (60.0, "1m"),
+            (300.0, "5m"),
+        ];
+
+        fn format_time_window(secs: f64) -> String {
+            for &(preset_secs, label) in TIME_PRESETS {
+                if (secs - preset_secs).abs() < 0.01 {
+                    return label.to_string();
+                }
+            }
+            if secs >= 60.0 {
+                format!("{:.0}m", secs / 60.0)
+            } else {
+                format!("{:.1}s", secs)
+            }
+        }
+
+        egui::ComboBox::from_id_salt("time_period")
+            .selected_text(format_time_window(shared.settings.display_time_window))
+            .width(60.0)
+            .show_ui(ui, |ui| {
+                for &(secs, label) in TIME_PRESETS {
+                    if ui.selectable_value(
+                        &mut shared.settings.display_time_window,
+                        secs,
+                        label,
+                    ).clicked() {
+                        shared.settings.autoscale_x = true;
+                        shared.settings.follow_latest = true;
+                    }
+                }
+            });
 
         let autoscale_x_text = if shared.settings.autoscale_x {
             "Auto"
@@ -428,21 +495,18 @@ fn render_toolbar_advanced(
 
         ui.separator();
 
-        ui.add_enabled_ui(!shared.settings.autoscale_x, |ui| {
-            ui.label("Time window:");
-            let max_window = shared.settings.max_time_window;
-            if ui
-                .add(
-                    egui::Slider::new(&mut shared.settings.display_time_window, 0.5..=max_window)
-                        .suffix("s")
-                        .logarithmic(true),
-                )
-                .changed()
-            {
-                shared.settings.display_time_window =
-                    shared.settings.display_time_window.clamp(0.1, max_window);
-            }
-        });
+        let max_window = shared.settings.max_time_window;
+        if ui
+            .add(
+                egui::Slider::new(&mut shared.settings.display_time_window, 0.5..=max_window)
+                    .suffix("s")
+                    .logarithmic(true),
+            )
+            .changed()
+        {
+            shared.settings.display_time_window =
+                shared.settings.display_time_window.clamp(0.1, max_window);
+        }
 
         ui.separator();
 
@@ -599,7 +663,7 @@ fn render_toolbar_advanced(
     ui.horizontal(|ui| {
         ui.label("Markers:");
 
-        let current_time = shared.start_time.elapsed();
+        let current_time = std::time::Duration::from_secs_f64(shared.display_time);
         if ui.button("Add").clicked() {
             let name = if state.new_marker_name.is_empty() {
                 format!("Marker {}", state.markers.len() + 1)
@@ -660,173 +724,6 @@ fn render_toolbar_advanced(
 
     });
 
-    // Row 5: Session recording and playback
-    ui.horizontal(|ui| {
-        ui.label("Session:");
-
-        let recorder_state = state.session_recorder.state();
-        let player_state = state.session_player.state();
-
-        if player_state == SessionState::Idle || player_state == SessionState::Stopped {
-            match recorder_state {
-                SessionState::Idle => {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut state.session_name)
-                            .hint_text("Session name...")
-                            .desired_width(100.0),
-                    );
-
-                    if ui.button("Record").clicked() {
-                        let name = if state.session_name.is_empty() {
-                            format!(
-                                "Session {}",
-                                chrono::Local::now().format("%Y-%m-%d %H:%M")
-                            )
-                        } else {
-                            std::mem::take(&mut state.session_name)
-                        };
-                        let mut metadata = SessionMetadata::new(name);
-                        metadata.poll_rate_hz = shared.config.collection.poll_rate_hz;
-                        state
-                            .session_recorder
-                            .set_variables(&shared.config.variables);
-                        state.session_recorder.start_recording(metadata);
-                    }
-                }
-                SessionState::Recording => {
-                    ui.colored_label(Color32::from_rgb(255, 100, 100), "REC");
-                    ui.label(format!(
-                        "{:.1}s ({} frames)",
-                        state.session_recorder.recording_duration().as_secs_f64(),
-                        state.session_recorder.frame_count()
-                    ));
-
-                    if ui.button("Stop").clicked() {
-                        state.session_recorder.stop_recording();
-                    }
-                    if ui.button("Cancel").clicked() {
-                        state.session_recorder.cancel_recording();
-                    }
-                }
-                SessionState::Stopped => {
-                    ui.label(format!(
-                        "Recorded: {:.1}s",
-                        state
-                            .session_recorder
-                            .recording()
-                            .duration()
-                            .as_secs_f64()
-                    ));
-
-                    if ui.button("Play").clicked() {
-                        let recording = state.session_recorder.take_recording();
-                        state.session_player.load(recording);
-                        state.session_player.play();
-                    }
-                    if ui.button("Save").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .set_title("Save Session Recording")
-                            .add_filter("JSON Session", &["json"])
-                            .save_file()
-                        {
-                            if let Err(e) = state.session_recorder.recording().save_to_file(&path)
-                            {
-                                tracing::error!("Failed to save session: {}", e);
-                            }
-                        }
-                    }
-                    if ui.button("Discard").clicked() {
-                        state.session_recorder.cancel_recording();
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        ui.separator();
-
-        // Playback controls
-        if state.session_player.has_recording() {
-            match player_state {
-                SessionState::Playing => {
-                    ui.colored_label(Color32::from_rgb(100, 255, 100), "PLAY");
-                    if ui.button("||").clicked() {
-                        state.session_player.pause();
-                    }
-                    if ui.button("Stop").clicked() {
-                        state.session_player.stop();
-                    }
-                }
-                SessionState::Paused => {
-                    ui.colored_label(Color32::from_rgb(255, 255, 100), "PAUSED");
-                    if ui.button(">").clicked() {
-                        state.session_player.play();
-                    }
-                    if ui.button("Stop").clicked() {
-                        state.session_player.stop();
-                    }
-                }
-                SessionState::Stopped => {
-                    if ui.button(">").clicked() {
-                        state.session_player.play();
-                    }
-                    if ui.button("Unload").clicked() {
-                        state.session_player.unload();
-                    }
-                }
-                _ => {}
-            }
-
-            let progress = state.session_player.progress();
-            let total = state.session_player.total_duration();
-            let current = state.session_player.current_time();
-
-            ui.label(format!(
-                "{:.1}s / {:.1}s",
-                current.as_secs_f64(),
-                total.as_secs_f64()
-            ));
-
-            let mut progress_slider = (progress * 100.0) as f32;
-            if ui
-                .add(egui::Slider::new(&mut progress_slider, 0.0..=100.0).show_value(false))
-                .changed()
-            {
-                state
-                    .session_player
-                    .seek_progress(progress_slider as f64 / 100.0);
-            }
-
-            ui.label("Speed:");
-            let mut speed = state.session_player.playback_speed() as f32;
-            if ui
-                .add(egui::Slider::new(&mut speed, 0.1..=4.0).suffix("x"))
-                .changed()
-            {
-                state.session_player.set_playback_speed(speed as f64);
-            }
-
-            let mut loop_enabled = state.session_player.loop_playback();
-            if ui.checkbox(&mut loop_enabled, "Loop").changed() {
-                state.session_player.set_loop_playback(loop_enabled);
-            }
-        } else if ui.button("Load").clicked() {
-            if let Some(path) = rfd::FileDialog::new()
-                .set_title("Load Session Recording")
-                .add_filter("JSON Session", &["json"])
-                .pick_file()
-            {
-                match crate::session::SessionRecording::load_from_file(&path) {
-                    Ok(recording) => {
-                        state.session_player.load(recording);
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to load session: {}", e);
-                    }
-                }
-            }
-        }
-    });
 }
 
 
@@ -837,7 +734,7 @@ fn render_toolbar_advanced(
 fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &mut Ui) {
     use egui_plot::{AxisHints, Line, Plot, PlotPoints, Points};
 
-    let current_time = shared.start_time.elapsed().as_secs_f64();
+    let current_time = shared.display_time;
 
     let (x_min, x_max) = if shared.settings.autoscale_x {
         let window = shared.settings.display_time_window;
@@ -866,37 +763,58 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
         plot = plot.custom_y_axes(y_axes);
     }
 
-    if !shared.settings.autoscale_x || shared.settings.lock_x {
-        plot = plot.include_x(x_min).include_x(x_max);
-    }
+    // Always apply X bounds — computed above for both auto and manual modes
+    plot = plot.include_x(x_min).include_x(x_max);
 
-    if !shared.settings.autoscale_y || shared.settings.lock_y {
+    // For Y: when manual, apply stored bounds. When auto, let egui_plot auto-fit.
+    if !shared.settings.autoscale_y {
         if let (Some(y_min), Some(y_max)) = (shared.settings.y_min, shared.settings.y_max) {
             plot = plot.include_y(y_min).include_y(y_max);
         }
     }
 
+    let allow_x_interact = !shared.settings.autoscale_x && !shared.settings.lock_x;
+    let allow_y_interact = !shared.settings.autoscale_y && !shared.settings.lock_y;
     plot = plot
-        .allow_drag(!shared.settings.lock_x && !shared.settings.lock_y)
-        .allow_zoom(!shared.settings.lock_x && !shared.settings.lock_y)
-        .allow_scroll(!shared.settings.lock_x && !shared.settings.lock_y);
+        .allow_drag(allow_x_interact || allow_y_interact)
+        .allow_zoom(allow_x_interact || allow_y_interact)
+        .allow_scroll(allow_x_interact || allow_y_interact);
 
     let cursor_enabled = state.cursor.enabled;
     let cursor_a = state.cursor.cursor_a;
     let cursor_b = state.cursor.cursor_b;
     let enable_secondary_axis = state.enable_secondary_axis;
+    let autoscale_x = shared.settings.autoscale_x;
+    let autoscale_y = shared.settings.autoscale_y;
 
     let response = plot.show(ui, |plot_ui| {
         use crate::types::{PlotStyle, MAX_RENDER_POINTS};
+
+        // Sync egui_plot's internal auto_bounds with our autoscale settings.
+        // Without this, user drag/zoom sets mem.auto_bounds=false which persists
+        // across frames, preventing auto-fit even after "Reset View" or "Auto Y" toggle.
+        plot_ui.set_auto_bounds(egui::Vec2b::new(autoscale_x, autoscale_y));
 
         for var in &shared.config.variables {
             if !var.enabled || !var.show_in_graph {
                 continue;
             }
 
-            if let Some(data) = shared.variable_data.get(&var.id) {
+            if let Some(data) = shared.topics.variable_data.get(&var.id) {
                 let raw_points = data.as_plot_points();
-                let points = decimate_points(&raw_points, MAX_RENDER_POINTS);
+                let points = if let Some((cached_len, cached)) = state.decimation_cache.get(&var.id) {
+                    if *cached_len == raw_points.len() {
+                        cached.clone()
+                    } else {
+                        let decimated = decimate_points(&raw_points, MAX_RENDER_POINTS);
+                        state.decimation_cache.insert(var.id, (raw_points.len(), decimated.clone()));
+                        decimated
+                    }
+                } else {
+                    let decimated = decimate_points(&raw_points, MAX_RENDER_POINTS);
+                    state.decimation_cache.insert(var.id, (raw_points.len(), decimated.clone()));
+                    decimated
+                };
 
                 if points.is_empty() {
                     continue;
@@ -1035,18 +953,31 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
             }
         }
 
-        // Capture bounds
-        if !shared.settings.lock_x {
+        // Only capture bounds back when in manual mode (preserves user zoom/pan)
+        if !shared.settings.autoscale_x && !shared.settings.lock_x {
             let bounds = plot_ui.plot_bounds();
             shared.settings.x_min = Some(bounds.min()[0]);
             shared.settings.x_max = Some(bounds.max()[0]);
         }
-        if !shared.settings.lock_y {
+        if !shared.settings.autoscale_y && !shared.settings.lock_y {
             let bounds = plot_ui.plot_bounds();
             shared.settings.y_min = Some(bounds.min()[1]);
             shared.settings.y_max = Some(bounds.max()[1]);
         }
     });
+
+    // If user interacted with the plot, disable autoscale for the affected axes
+    if response.response.dragged() {
+        shared.settings.autoscale_x = false;
+        shared.settings.autoscale_y = false;
+    }
+    if response.response.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta);
+        if scroll.x.abs() > 0.0 || scroll.y.abs() > 0.0 {
+            shared.settings.autoscale_x = false;
+            shared.settings.autoscale_y = false;
+        }
+    }
 
     // Handle cursor interactions
     if cursor_enabled {
@@ -1055,7 +986,7 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
             state
                 .cursor
                 .update_position(Some(PlotPoint::new(plot_pos.x, plot_pos.y)));
-            state.cursor.find_nearest(shared.variable_data);
+            state.cursor.find_nearest(&shared.topics.variable_data);
         } else {
             state.cursor.update_position(None);
         }
@@ -1105,7 +1036,7 @@ fn update_range_statistics(state: &mut TimeSeriesState, shared: &SharedState<'_>
             if !var.enabled || !var.show_in_graph {
                 continue;
             }
-            if let Some(data) = shared.variable_data.get(&var.id) {
+            if let Some(data) = shared.topics.variable_data.get(&var.id) {
                 let stats = PlotStatistics::from_data_range(data, t_start, t_end);
                 if stats.is_valid() {
                     state.variable_statistics.insert(var.id, stats);
@@ -1176,4 +1107,25 @@ fn create_area_polygon(points: &[[f64; 2]]) -> Vec<[f64; 2]> {
         polygon.push([first[0], 0.0]);
     }
     polygon
+}
+
+impl Pane for TimeSeriesState {
+    fn kind(&self) -> PaneKind { PaneKind::TimeSeries }
+
+    fn render(&mut self, shared: &mut SharedState, ui: &mut Ui) -> Vec<AppAction> {
+        render(self, shared, ui)
+    }
+
+    fn render_dialogs(
+        &mut self,
+        shared: &mut SharedState,
+        ctx: &egui::Context,
+    ) -> Vec<AppAction> {
+        let mut actions = Vec::new();
+        render_dialogs(self, shared, ctx, &mut actions);
+        actions
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }

@@ -1,44 +1,45 @@
 //! TabViewer implementation for the workspace
 //!
-//! Dispatches rendering to individual pane modules based on PaneKind.
+//! Dispatches rendering to individual pane modules via the Pane trait.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Instant;
 
 use egui::{Ui, WidgetText};
 
-use crate::backend::{ElfInfo, ElfSymbol, FrontendReceiver};
+use crate::backend::{ElfInfo, ElfSymbol};
 use crate::config::settings::RuntimeSettings;
 use crate::config::{AppConfig, AppState, DataPersistenceConfig};
-use crate::frontend::panes;
+use crate::frontend::pane_trait::Pane;
 use crate::frontend::state::{AppAction, SharedState};
-use crate::types::{CollectionStats, ConnectionStatus, VariableData};
+use crate::frontend::topics::Topics;
+use crate::pipeline::bridge::PipelineBridge;
 
-use super::{PaneEntry, PaneId, PaneKind, PaneState};
+use super::{PaneEntry, PaneId, PaneKind};
 
 /// Tab viewer that bridges egui_dock with our pane system.
 ///
 /// Holds mutable borrows to all shared state fields so that
 /// SharedState can be constructed per-frame inside ui().
 pub struct WorkspaceTabViewer<'a> {
-    pub frontend: &'a FrontendReceiver,
-    pub connection_status: ConnectionStatus,
+    pub frontend: &'a PipelineBridge,
     pub config: &'a mut AppConfig,
     pub settings: &'a mut RuntimeSettings,
     pub app_state: &'a mut AppState,
-    pub variable_data: &'a mut HashMap<u32, VariableData>,
-    pub stats: &'a CollectionStats,
     pub elf_info: Option<&'a ElfInfo>,
     pub elf_symbols: &'a [ElfSymbol],
     pub elf_file_path: Option<&'a PathBuf>,
     pub persistence_config: &'a mut DataPersistenceConfig,
     pub last_error: &'a mut Option<String>,
-    pub start_time: Instant,
+    pub display_time: f64,
+    pub topics: &'a mut Topics,
     // Workspace state
-    pub pane_states: &'a mut HashMap<PaneId, PaneState>,
+    pub pane_states: &'a mut HashMap<PaneId, Box<dyn Pane>>,
     pub pane_entries: &'a HashMap<PaneId, PaneEntry>,
     pub actions: Vec<AppAction>,
+    // Pane kind lists for the "+" popup
+    pub singleton_pane_kinds: Vec<(PaneKind, &'static str)>,
+    pub multi_pane_kinds: Vec<(PaneKind, &'static str)>,
 }
 
 impl egui_dock::TabViewer for WorkspaceTabViewer<'_> {
@@ -52,60 +53,28 @@ impl egui_dock::TabViewer for WorkspaceTabViewer<'_> {
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut PaneId) {
-        let Some(entry) = self.pane_entries.get(tab) else {
+        let Some(pane) = self.pane_states.get_mut(tab) else {
             ui.label("Pane not found");
-            return;
-        };
-        let kind = entry.kind;
-
-        let Some(state) = self.pane_states.get_mut(tab) else {
-            ui.label("Pane state not found");
             return;
         };
 
         // Construct SharedState from individual borrows
         let mut shared = SharedState {
             frontend: self.frontend,
-            connection_status: self.connection_status,
             config: self.config,
             settings: self.settings,
             app_state: self.app_state,
-            variable_data: self.variable_data,
-            stats: self.stats,
             elf_info: self.elf_info,
             elf_symbols: self.elf_symbols,
             elf_file_path: self.elf_file_path,
             persistence_config: self.persistence_config,
             last_error: self.last_error,
-            start_time: self.start_time,
+            display_time: self.display_time,
+            topics: self.topics,
         };
 
-        // Dispatch to the appropriate pane render function
-        let pane_actions = match (kind, state) {
-            (PaneKind::VariableBrowser, PaneState::VariableBrowser(s)) => {
-                panes::variable_browser::render(s, &mut shared, ui)
-            }
-            (PaneKind::VariableList, PaneState::VariableList(s)) => {
-                panes::variable_list::render(s, &mut shared, ui)
-            }
-            (PaneKind::Settings, PaneState::Settings(s)) => {
-                panes::settings::render(s, &mut shared, ui)
-            }
-            (PaneKind::TimeSeries, PaneState::TimeSeries(s)) => {
-                panes::time_series::render(s, &mut shared, ui)
-            }
-            (PaneKind::Watcher, PaneState::Watcher(s)) => {
-                panes::watcher::render(s, &mut shared, ui)
-            }
-            (PaneKind::FftView, PaneState::FftView(s)) => {
-                panes::fft_view::render(s, &mut shared, ui)
-            }
-            _ => {
-                ui.label("Mismatched pane kind/state");
-                Vec::new()
-            }
-        };
-
+        // Polymorphic dispatch via Pane trait
+        let pane_actions = pane.render(&mut shared, ui);
         self.actions.extend(pane_actions);
     }
 
@@ -115,7 +84,41 @@ impl egui_dock::TabViewer for WorkspaceTabViewer<'_> {
         egui_dock::widgets::tab_viewer::OnCloseResponse::Close
     }
 
-    fn closeable(&mut self, _tab: &mut PaneId) -> bool {
+    fn is_closeable(&self, _tab: &PaneId) -> bool {
         true
+    }
+
+    fn add_popup(
+        &mut self,
+        ui: &mut Ui,
+        _surface: egui_dock::SurfaceIndex,
+        _node: egui_dock::NodeIndex,
+    ) {
+        ui.set_min_width(150.0);
+        ui.label("Add Pane");
+        ui.separator();
+
+        // Multi-instance visualizers
+        for &(kind, name) in &self.multi_pane_kinds {
+            if ui.button(format!("New {}", name)).clicked() {
+                self.actions.push(AppAction::NewVisualizer(kind));
+                ui.close();
+            }
+        }
+
+        if !self.multi_pane_kinds.is_empty() && !self.singleton_pane_kinds.is_empty() {
+            ui.separator();
+        }
+
+        // Singletons (only show if not already open)
+        for &(kind, name) in &self.singleton_pane_kinds {
+            let already_open = self.pane_entries.values().any(|e| e.kind == kind);
+            ui.add_enabled_ui(!already_open, |ui| {
+                if ui.button(name).clicked() {
+                    self.actions.push(AppAction::OpenPane(kind));
+                    ui.close();
+                }
+            });
+        }
     }
 }

@@ -4,64 +4,57 @@
 //! the workspace-based architecture. Panes receive `SharedState` via borrowing
 //! and return `AppAction`s instead of mutating state directly.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::backend::{ElfInfo, ElfSymbol, FrontendReceiver};
-use crate::config::{AppConfig, AppState, DataPersistenceConfig};
+use crate::backend::{ElfInfo, ElfSymbol};
 use crate::config::settings::RuntimeSettings;
-use crate::types::{CollectionStats, ConnectionStatus, Variable, VariableData};
+use crate::config::{AppConfig, AppState, DataPersistenceConfig};
+use crate::frontend::topics::Topics;
+use crate::pipeline::bridge::PipelineBridge;
+use crate::pipeline::id::NodeId;
+use crate::pipeline::packet::ConfigValue;
+use crate::types::{Variable, VariableType};
 
 use super::workspace::{PaneId, PaneKind};
 
-/// Shared state accessible by all pages (borrowed, not owned)
+/// Specification for a child variable when adding a struct
+#[derive(Debug, Clone)]
+pub struct ChildVariableSpec {
+    pub name: String,
+    pub address: u64,
+    pub var_type: VariableType,
+}
+
+/// Shared state accessible by all panes (borrowed, not owned).
 ///
-/// This struct provides pages with access to shared application state
-/// through borrowed references. This design:
-/// - Maintains single ownership in `DataVisApp`
-/// - Avoids Arc/Mutex overhead for UI state
-/// - Works well with egui's immediate mode paradigm
-/// - Enables clear dependency injection
+/// This struct provides panes with access to shared application state
+/// through borrowed references. Published data (variables, stats, status,
+/// snapshots) is accessed via `topics`.
 pub struct SharedState<'a> {
     // Communication
-    /// Backend communication channel
-    pub frontend: &'a FrontendReceiver,
-    /// Current probe connection status
-    pub connection_status: ConnectionStatus,
+    pub frontend: &'a PipelineBridge,
 
-    // Configuration
-    /// Application configuration (variables, probe settings, UI settings)
+    // Configuration (read-write by panes)
     pub config: &'a mut AppConfig,
-    /// Runtime settings (collection state, plot settings)
     pub settings: &'a mut RuntimeSettings,
-    /// Persistent application state (recent projects, preferences)
     pub app_state: &'a mut AppState,
 
-    // Data
-    /// Collected variable data (time series)
-    pub variable_data: &'a mut HashMap<u32, VariableData>,
-    /// Collection statistics
-    pub stats: &'a CollectionStats,
-
-    // ELF (shared read-only across pages)
-    /// Parsed ELF information
+    // ELF (read-only)
     pub elf_info: Option<&'a ElfInfo>,
-    /// Symbols from ELF file
     pub elf_symbols: &'a [ElfSymbol],
-    /// Path to loaded ELF file
     pub elf_file_path: Option<&'a PathBuf>,
 
     // Persistence
-    /// Data persistence configuration
     pub persistence_config: &'a mut DataPersistenceConfig,
 
     // Error display
-    /// Last error message to display
     pub last_error: &'a mut Option<String>,
 
-    // Start time for timing
-    /// Application start time
-    pub start_time: std::time::Instant,
+    // Timing — current time in seconds (frozen when not collecting)
+    pub display_time: f64,
+
+    // All published data (variables, stats, status, snapshots)
+    pub topics: &'a mut Topics,
 }
 
 /// Actions that any page can emit
@@ -98,6 +91,11 @@ pub enum AppAction {
     // Variable management
     /// Add a new variable
     AddVariable(Variable),
+    /// Add a struct variable with auto-decomposed children
+    AddStructVariable {
+        parent: Variable,
+        children: Vec<ChildVariableSpec>,
+    },
     /// Remove a variable by ID
     RemoveVariable(u32),
     /// Update an existing variable
@@ -127,6 +125,16 @@ pub enum AppAction {
     /// Clear data for a specific variable
     ClearVariableData(u32),
 
+    // Pipeline node configuration
+    /// Send a config key/value to a specific pipeline node
+    NodeConfig {
+        node_id: NodeId,
+        key: String,
+        value: ConfigValue,
+    },
+    /// Request pipeline topology snapshot
+    RequestTopology,
+
     // Workspace actions
     /// Open/focus a singleton pane, or create if not exists
     OpenPane(PaneKind),
@@ -134,6 +142,8 @@ pub enum AppAction {
     NewVisualizer(PaneKind),
     /// Close a pane (remove from dock and clean up state)
     ClosePane(PaneId),
+    /// Rename a variable group (parent + propagate prefix to children)
+    RenameVariable { id: u32, new_name: String },
 }
 
 /// Dialog identifiers

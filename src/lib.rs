@@ -70,6 +70,7 @@ pub mod backend;
 pub mod config;
 pub mod error;
 pub mod frontend;
+pub mod pipeline;
 pub mod scripting;
 pub mod session;
 pub mod types;

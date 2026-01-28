@@ -2,28 +2,22 @@
 //!
 //! Extracted from the Settings page.
 
-use std::path::PathBuf;
-
 use egui::{Color32, Ui};
 
 use crate::backend::DetectedProbe;
 use crate::frontend::dialogs::DuplicateConfirmState;
+use crate::frontend::pane_trait::Pane;
 use crate::frontend::state::{AppAction, SharedState};
+use crate::frontend::workspace::PaneKind;
 use crate::types::ConnectionStatus;
 
 /// State for the Settings pane
 #[derive(Default)]
 pub struct SettingsPaneState {
-    /// Available probes list (cached from backend)
-    pub available_probes: Vec<DetectedProbe>,
     /// Selected probe index
     pub selected_probe_index: Option<usize>,
     /// Target chip input field
     pub target_chip_input: String,
-    /// Project name input
-    pub project_name: String,
-    /// Path to the current project file
-    pub project_file_path: Option<PathBuf>,
     /// Mock probe enabled (feature-gated)
     #[cfg(feature = "mock-probe")]
     pub use_mock_probe: bool,
@@ -44,7 +38,7 @@ pub fn render(
         ui.heading("Settings");
         ui.separator();
 
-        render_project_section(state, ui, &mut actions);
+        render_project_section(shared, ui, &mut actions);
         ui.separator();
 
         render_probe_section(state, shared, ui, &mut actions);
@@ -101,7 +95,7 @@ pub fn render_dialogs(
 }
 
 fn render_project_section(
-    state: &mut SettingsPaneState,
+    shared: &mut SharedState<'_>,
     ui: &mut Ui,
     actions: &mut Vec<AppAction>,
 ) {
@@ -110,13 +104,13 @@ fn render_project_section(
 
     ui.horizontal(|ui| {
         ui.label("Project Name:");
-        ui.text_edit_singleline(&mut state.project_name);
+        ui.text_edit_singleline(&mut shared.topics.project_name);
     });
 
     ui.add_space(8.0);
     ui.label("Project File (.datavisproj):");
     ui.horizontal(|ui| {
-        if let Some(ref path) = state.project_file_path {
+        if let Some(ref path) = shared.topics.project_file_path {
             ui.label(path.display().to_string());
         } else {
             ui.label("(no project file)");
@@ -125,7 +119,7 @@ fn render_project_section(
 
     ui.horizontal(|ui| {
         if ui.button("Save Project").clicked() {
-            if let Some(ref path) = state.project_file_path {
+            if let Some(ref path) = shared.topics.project_file_path {
                 actions.push(AppAction::SaveProject(path.clone()));
             } else if let Some(path) = rfd::FileDialog::new()
                 .add_filter(
@@ -260,13 +254,13 @@ fn render_probe_section(
             .selected_text(
                 state
                     .selected_probe_index
-                    .and_then(|i| state.available_probes.get(i))
+                    .and_then(|i| shared.topics.available_probes.get(i))
                     .map(|p| p.display_name())
                     .as_deref()
                     .unwrap_or("Select probe..."),
             )
             .show_ui(ui, |ui| {
-                for (i, probe) in state.available_probes.iter().enumerate() {
+                for (i, probe) in shared.topics.available_probes.iter().enumerate() {
                     let is_selected = state.selected_probe_index == Some(i);
                     if ui
                         .selectable_label(is_selected, probe.display_name())
@@ -286,7 +280,7 @@ fn render_probe_section(
     });
 
     ui.horizontal(|ui| {
-        match shared.connection_status {
+        match shared.topics.connection_status {
             ConnectionStatus::Connected => {
                 if ui.button("Disconnect").clicked() {
                     actions.push(AppAction::Disconnect);
@@ -305,7 +299,7 @@ fn render_probe_section(
                     actions.push(AppAction::UseMockProbe(state.use_mock_probe));
 
                     if let Some(idx) = state.selected_probe_index {
-                        let selector = match state.available_probes.get(idx) {
+                        let selector = match shared.topics.available_probes.get(idx) {
                             Some(DetectedProbe::Real(info)) => Some(format!(
                                 "{:04x}:{:04x}",
                                 info.vendor_id, info.product_id
@@ -459,4 +453,25 @@ fn render_display_section(shared: &mut SharedState<'_>, ui: &mut Ui) {
                 .suffix("s"),
         );
     });
+}
+
+impl Pane for SettingsPaneState {
+    fn kind(&self) -> PaneKind { PaneKind::Settings }
+
+    fn render(&mut self, shared: &mut SharedState, ui: &mut Ui) -> Vec<AppAction> {
+        render(self, shared, ui)
+    }
+
+    fn render_dialogs(
+        &mut self,
+        shared: &mut SharedState,
+        ctx: &egui::Context,
+    ) -> Vec<AppAction> {
+        let mut actions = Vec::new();
+        render_dialogs(self, shared, ctx, &mut actions);
+        actions
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }

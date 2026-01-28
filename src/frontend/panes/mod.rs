@@ -4,6 +4,8 @@
 //! Panes return Vec<AppAction> instead of mutating state directly.
 
 pub mod fft_view;
+pub mod pipeline_editor;
+pub mod recorder;
 pub mod settings;
 pub mod time_series;
 pub mod variable_browser;
@@ -11,6 +13,8 @@ pub mod variable_list;
 pub mod watcher;
 
 pub use fft_view::FftViewState;
+pub use pipeline_editor::PipelineEditorState;
+pub use recorder::RecorderPaneState;
 pub use settings::SettingsPaneState;
 pub use time_series::TimeSeriesState;
 pub use variable_browser::VariableBrowserState;
