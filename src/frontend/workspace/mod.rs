@@ -9,11 +9,13 @@ pub mod tab_viewer;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde::{Deserialize, Serialize};
+
 use crate::frontend::pane_registry::{self, PaneKindInfo};
 use crate::frontend::pane_trait::Pane;
 
 /// Unique identifier for a pane instance
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PaneId(pub u64);
 
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
@@ -25,12 +27,11 @@ impl PaneId {
 }
 
 /// Kind of pane (used for dispatch and menu display)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PaneKind {
     // Utility (singletons)
     VariableBrowser,
     VariableList,
-    Settings,
     Recorder,
     PipelineEditor,
     // Visualizers (multiple instances allowed)
@@ -137,5 +138,95 @@ impl Workspace {
     pub fn remove_pane(&mut self, id: PaneId) {
         self.pane_states.remove(&id);
         self.pane_entries.remove(&id);
+    }
+
+    /// Serialize the current workspace layout for session persistence.
+    ///
+    /// Returns None if serialization fails.
+    pub fn serialize_layout(&self) -> Option<crate::config::SerializedWorkspaceLayout> {
+        let dock_json = serde_json::to_string(&self.dock_state).ok()?;
+
+        let panes = self
+            .pane_entries
+            .values()
+            .map(|entry| crate::config::SerializedPane {
+                id: entry.id.0,
+                kind: format!("{:?}", entry.kind),
+                title: entry.title.clone(),
+            })
+            .collect();
+
+        Some(crate::config::SerializedWorkspaceLayout { dock_json, panes })
+    }
+
+    /// Restore workspace layout from serialized state.
+    ///
+    /// This reconstructs panes and dock state from the saved layout.
+    /// Returns true if restoration succeeded.
+    pub fn restore_layout(&mut self, layout: &crate::config::SerializedWorkspaceLayout) -> bool {
+        // First, parse the dock state
+        let dock_state: egui_dock::DockState<PaneId> =
+            match serde_json::from_str(&layout.dock_json) {
+                Ok(state) => state,
+                Err(e) => {
+                    tracing::warn!("Failed to deserialize dock state: {}", e);
+                    return false;
+                }
+            };
+
+        // Clear existing panes
+        self.pane_states.clear();
+        self.pane_entries.clear();
+
+        // Track the highest ID so we can update NEXT_PANE_ID
+        let mut max_id = 0u64;
+
+        // Reconstruct panes from serialized metadata
+        for pane_info in &layout.panes {
+            let pane_id = PaneId(pane_info.id);
+            max_id = max_id.max(pane_info.id);
+
+            // Parse the pane kind from string
+            let kind = match pane_info.kind.as_str() {
+                "VariableBrowser" => PaneKind::VariableBrowser,
+                "VariableList" => PaneKind::VariableList,
+                "Recorder" => PaneKind::Recorder,
+                "PipelineEditor" => PaneKind::PipelineEditor,
+                "TimeSeries" => PaneKind::TimeSeries,
+                "Watcher" => PaneKind::Watcher,
+                "FftView" => PaneKind::FftView,
+                _ => {
+                    tracing::warn!("Unknown pane kind: {}, skipping", pane_info.kind);
+                    continue;
+                }
+            };
+
+            // Create the pane state using the factory
+            let state = self
+                .registry
+                .get(&kind)
+                .map(|info| (info.factory)())
+                .expect("PaneKind not found in registry");
+
+            self.pane_states.insert(pane_id, state);
+            self.pane_entries.insert(
+                pane_id,
+                PaneEntry {
+                    id: pane_id,
+                    kind,
+                    title: pane_info.title.clone(),
+                },
+            );
+        }
+
+        // Update NEXT_PANE_ID to avoid collisions
+        use std::sync::atomic::Ordering;
+        NEXT_PANE_ID.fetch_max(max_id + 1, Ordering::SeqCst);
+
+        // Set the dock state
+        self.dock_state = dock_state;
+
+        tracing::info!("Restored workspace layout with {} panes", layout.panes.len());
+        true
     }
 }

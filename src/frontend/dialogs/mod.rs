@@ -312,17 +312,27 @@ pub fn show_dialog_with_title<D: Dialog>(
 }
 
 // Re-export dialog implementations
+pub mod collection_settings;
+pub mod connection_settings;
 pub mod converter_editor;
 pub mod duplicate_confirm;
 pub mod elf_symbols;
 pub mod export_config;
+pub mod persistence_settings;
+pub mod preferences;
 pub mod trigger_config;
 pub mod value_editor;
 pub mod variable_change;
 pub mod variable_detail;
-// pub mod variable_editor;
-// pub mod variable_selector;
 
+pub use collection_settings::{
+    CollectionSettingsAction, CollectionSettingsContext, CollectionSettingsDialog,
+    CollectionSettingsState,
+};
+pub use connection_settings::{
+    ConnectionSettingsAction, ConnectionSettingsContext, ConnectionSettingsDialog,
+    ConnectionSettingsState,
+};
 pub use converter_editor::{
     ConverterEditorAction, ConverterEditorContext, ConverterEditorDialog, ConverterEditorState,
 };
@@ -333,6 +343,13 @@ pub use elf_symbols::{ElfSymbolsAction, ElfSymbolsContext, ElfSymbolsDialog, Elf
 pub use export_config::{
     DownsampleMode, ExportConfigAction, ExportConfigContext, ExportConfigDialog, ExportConfigState,
     ExportFormat,
+};
+pub use persistence_settings::{
+    PersistenceSettingsAction, PersistenceSettingsContext, PersistenceSettingsDialog,
+    PersistenceSettingsState,
+};
+pub use preferences::{
+    PreferencesAction, PreferencesContext, PreferencesDialog, PreferencesState,
 };
 pub use trigger_config::{
     TriggerConfigAction, TriggerConfigContext, TriggerConfigDialog, TriggerConfigState,

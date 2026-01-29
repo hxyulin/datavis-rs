@@ -71,6 +71,7 @@ impl egui_dock::TabViewer for WorkspaceTabViewer<'_> {
             last_error: self.last_error,
             display_time: self.display_time,
             topics: self.topics,
+            current_pane_id: Some(*tab),
         };
 
         // Polymorphic dispatch via Pane trait

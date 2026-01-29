@@ -1,0 +1,162 @@
+# DataVis - English translations
+
+# Menu: Project
+menu_project: "Project"
+menu_project_rename: "Rename..."
+menu_project_save: "Save"
+menu_project_save_as: "Save As..."
+menu_project_recent: "Recent Projects"
+menu_project_no_recent: "No recent projects"
+
+# Menu: File
+menu_file: "File"
+menu_file_new_project: "New Project"
+menu_file_open_project: "Open Project..."
+menu_file_import_session: "Import Session..."
+menu_file_export_data: "Export Data..."
+menu_file_quit: "Quit"
+
+# Menu: View
+menu_view: "View"
+menu_view_toolbar: "Toolbar"
+menu_view_status_bar: "Status Bar"
+menu_view_variable_browser: "Variable Browser"
+menu_view_variable_list: "Variable List"
+menu_view_session_capture: "Session Capture"
+menu_view_pipeline_editor: "Pipeline Editor"
+menu_view_new_time_series: "New Time Series"
+menu_view_new_watcher: "New Watcher"
+menu_view_new_fft: "New FFT View"
+menu_view_reset_layout: "Reset Layout"
+
+# Menu: Tools
+menu_tools: "Tools"
+menu_tools_connection_settings: "Connection Settings..."
+menu_tools_load_elf: "Load ELF..."
+menu_tools_browse_symbols: "Browse ELF Symbols..."
+menu_tools_collection_settings: "Collection Settings..."
+menu_tools_persistence: "Data Persistence..."
+menu_tools_preferences: "Preferences..."
+
+# Menu: Help
+menu_help: "Help"
+menu_help_getting_started: "Getting Started"
+menu_help_shortcuts: "Keyboard Shortcuts"
+menu_help_about: "About DataVis"
+
+# Connection
+connection_connect: "Connect"
+connection_disconnect: "Disconnect"
+connection_connected: "Connected"
+connection_connecting: "Connecting"
+connection_disconnected: "Disconnected"
+connection_error: "Connection Error"
+connection_select_probe: "Select Probe"
+connection_no_probes: "No probes found"
+connection_refresh: "Refresh"
+connection_target_chip: "Target Chip"
+connection_probe: "Probe"
+connection_target: "Target"
+connection_apply: "Apply"
+connection_settings: "Settings..."
+
+# Collection
+collection_start: "Start"
+collection_stop: "Stop"
+collection_pause: "Pause"
+collection_resume: "Resume"
+collection_clear: "Clear Data"
+collection_recording: "Recording"
+collection_paused: "Paused"
+
+# Status bar
+status_rate: "Rate"
+status_samples: "Samples"
+status_errors: "Errors"
+status_buffer: "Buffer"
+status_avg: "Avg"
+status_data: "Data"
+
+# Dialogs
+dialog_ok: "OK"
+dialog_cancel: "Cancel"
+dialog_apply: "Apply"
+dialog_close: "Close"
+dialog_connect_to_probe: "Connect to Probe"
+dialog_debug_probe_connection: "Debug Probe Connection"
+
+# Preferences
+pref_title: "Preferences"
+pref_language: "Language"
+pref_theme: "Theme"
+pref_dark_mode: "Dark Mode"
+pref_font_scale: "Font Scale"
+pref_display: "Display"
+pref_appearance: "Appearance"
+pref_display_defaults: "Display Defaults"
+pref_grid: "Show Grid"
+pref_legend: "Show Legend"
+pref_auto_scale_y: "Auto-scale Y Axis"
+pref_line_width: "Line Width"
+pref_time_window: "Default Time Window"
+pref_show_raw_values: "Show Raw Values"
+
+# Connection settings
+conn_settings_title: "Connection Settings"
+conn_settings_speed: "Speed (kHz)"
+conn_settings_connect_under_reset: "Connect Under Reset"
+conn_settings_halt_on_connect: "Halt on Connect"
+conn_settings_memory_access_mode: "Memory Access Mode"
+conn_settings_usb_timeout: "USB Timeout (ms)"
+conn_settings_bulk_read_gap: "Bulk Read Gap Threshold"
+
+# Collection settings
+coll_settings_title: "Collection Settings"
+coll_settings_poll_rate: "Poll Rate (Hz)"
+coll_settings_max_points: "Max Data Points"
+coll_settings_timeout: "Timeout (ms)"
+
+# Persistence settings
+pers_settings_title: "Data Persistence"
+pers_settings_enable: "Enable Persistence"
+pers_settings_file_path: "File Path"
+pers_settings_format: "Format"
+pers_settings_max_size: "Max Size (MB)"
+
+# Panes
+pane_variable_browser: "Variable Browser"
+pane_variable_list: "Variable List"
+pane_time_series: "Time Series"
+pane_watcher: "Watcher"
+pane_fft_view: "FFT View"
+pane_session_capture: "Session Capture"
+pane_pipeline_editor: "Pipeline Editor"
+pane_empty_load_elf: "Load an ELF file to browse variables"
+pane_empty_add_variables: "Add variables from the browser to start plotting"
+
+# Toolbar
+toolbar_load_elf: "Load ELF"
+toolbar_clear: "Clear"
+toolbar_elf_loaded: "ELF"
+
+# Help dialog
+help_title: "Getting Started"
+help_intro: "A real-time variable visualization tool for embedded systems debugging."
+help_quick_start: "Quick Start"
+help_step1: "1. Click the 'Connect' button in the menu bar"
+help_step2: "2. Select your debug probe and target chip"
+help_step3: "3. Load an ELF file (Tools > Load ELF...)"
+help_step4: "4. Browse and add variables from the Variable Browser"
+help_step5: "5. Press Space to start/stop data collection"
+help_shortcuts_title: "Keyboard Shortcuts"
+help_shortcut_space: "Start/Stop collection"
+help_shortcut_save: "Save project"
+help_shortcut_clear: "Clear data"
+help_shortcut_pause: "Pause/Resume (while collecting)"
+
+# Units
+unit_hz: "Hz"
+unit_us: "μs"
+unit_kb: "KB"
+unit_mb: "MB"
+unit_seconds: "s"

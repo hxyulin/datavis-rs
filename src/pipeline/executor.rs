@@ -9,11 +9,14 @@
 
 use crate::config::{AppConfig, MemoryAccessMode, ProbeConfig};
 use crate::pipeline::bridge::{PipelineCommand, SinkMessage};
+use crate::pipeline::compiled_plan::CompiledPlan;
+use crate::pipeline::compiler::PipelineCompiler;
 use crate::pipeline::id::{EdgeId, NodeId};
 use crate::pipeline::node::{AnyNode, BuiltinNode, NodeContext};
+use crate::pipeline::node_type::NodeType;
 use crate::pipeline::nodes::{
-    ExporterSinkNode, ProbeSourceNode, RecorderSinkNode, ScriptTransformNode,
-    UiSinkNode,
+    ExporterSinkNode, FilterNode, GraphSinkNode, ProbeSourceNode, RecorderSinkNode,
+    RhaiScriptNode, ScriptTransformNode, UIBroadcastSinkNode,
 };
 use crate::pipeline::packet::{ConfigValue, DataPacket, PipelineEvent};
 use crate::pipeline::variable_tree::VariableTree;
@@ -38,6 +41,8 @@ pub struct NodeSlot {
     pub output_buf: DataPacket,
     pub input_events: Vec<PipelineEvent>,
     pub output_events: Vec<PipelineEvent>,
+    /// Whether this node has been deleted (slot is empty).
+    pub deleted: bool,
 }
 
 impl NodeSlot {
@@ -48,6 +53,7 @@ impl NodeSlot {
             output_buf: DataPacket::new(),
             input_events: Vec::new(),
             output_events: Vec::new(),
+            deleted: false,
         }
     }
 }
@@ -60,6 +66,12 @@ pub struct Pipeline {
     execution_order: Vec<usize>,
     /// True when execution_order needs recomputing (deferred topo sort).
     execution_order_dirty: bool,
+    /// Cached compiled execution plan
+    compiled_plan: CompiledPlan,
+    /// Generation counter for cache invalidation
+    graph_generation: u64,
+    /// Whether plan needs recompilation
+    compiled_plan_dirty: bool,
     var_tree: VariableTree,
     /// True when the variable tree snapshot cache is stale.
     var_tree_dirty: bool,
@@ -92,6 +104,9 @@ impl Pipeline {
             edges: Vec::new(),
             execution_order: Vec::new(),
             execution_order_dirty: false,
+            compiled_plan: CompiledPlan::new(),
+            graph_generation: 0,
+            compiled_plan_dirty: true,
             var_tree: VariableTree::new(),
             var_tree_dirty: false,
             cached_var_tree_snapshot: None,
@@ -126,7 +141,7 @@ impl Pipeline {
             from_node: from,
             to_node: to,
         });
-        self.execution_order_dirty = true;
+        self.invalidate_compiled_plan();
         id
     }
 
@@ -145,6 +160,44 @@ impl Pipeline {
         if self.execution_order_dirty {
             self.recompute_execution_order();
             self.execution_order_dirty = false;
+        }
+    }
+
+    /// Invalidate the compiled execution plan (called when graph topology changes).
+    fn invalidate_compiled_plan(&mut self) {
+        self.compiled_plan_dirty = true;
+        self.execution_order_dirty = true;
+        self.graph_generation += 1;
+    }
+
+    /// Recompile the execution plan if needed (lazy recompilation).
+    fn recompile_if_needed(&mut self) {
+        if self.compiled_plan_dirty {
+            self.compiled_plan = PipelineCompiler::compile(
+                &self.nodes,
+                &self.edges,
+                self.graph_generation,
+            );
+            self.compiled_plan_dirty = false;
+
+            tracing::info!(
+                "Pipeline recompiled: {} active / {} total (gen {})",
+                self.compiled_plan.stats.active_nodes,
+                self.compiled_plan.stats.total_nodes,
+                self.compiled_plan.generation,
+            );
+
+            // Log warnings for inactive sink nodes
+            if !self.compiled_plan.inactive_sink_nodes.is_empty() {
+                for &sink_idx in &self.compiled_plan.inactive_sink_nodes {
+                    let node_name = self.nodes[sink_idx].node.name();
+                    tracing::warn!(
+                        "Sink node '{}' (idx {}) is disconnected from data sources",
+                        node_name,
+                        sink_idx
+                    );
+                }
+            }
         }
     }
 
@@ -290,6 +343,18 @@ impl Pipeline {
                 PipelineCommand::RequestTopology => {
                     self.handle_request_topology();
                 }
+                PipelineCommand::AddNode { node_type, config } => {
+                    self.handle_add_node(node_type, config);
+                }
+                PipelineCommand::RemoveNode(node_id) => {
+                    self.handle_remove_node(node_id);
+                }
+                PipelineCommand::AddEdge { from_node, to_node } => {
+                    self.handle_add_edge(from_node, to_node);
+                }
+                PipelineCommand::RemoveEdge(edge_id) => {
+                    self.handle_remove_edge(edge_id);
+                }
                 PipelineCommand::Shutdown => {
                     self.running.store(false, Ordering::Relaxed);
                 }
@@ -300,10 +365,8 @@ impl Pipeline {
     // ── Tick execution ──
 
     fn tick(&mut self) {
-        if self.execution_order_dirty {
-            self.recompute_execution_order();
-            self.execution_order_dirty = false;
-        }
+        // Lazy recompilation (only when graph topology changes)
+        self.recompile_if_needed();
 
         let now = Instant::now();
         let timestamp = self
@@ -316,16 +379,15 @@ impl Pipeline {
             .unwrap_or(Duration::from_millis(1));
         self.last_tick_time = Some(now);
 
-        // 1. Clear all output buffers
-        for slot in &mut self.nodes {
+        // 1. Clear ACTIVE node outputs only (pre-filtered, no deleted check needed)
+        for &idx in &self.compiled_plan.active_nodes {
+            let slot = &mut self.nodes[idx];
             slot.output_buf.clear();
             slot.output_events.clear();
         }
 
-        // 2. Execute nodes in topological order
-        for &idx in &self.execution_order {
-            // We need to split borrows: extract node temporarily.
-            // Safety: we only access self.nodes[idx] and self.var_tree.
+        // 2. Execute ACTIVE nodes only in topological order (pre-sorted, no checks needed)
+        for &idx in &self.compiled_plan.active_nodes {
             let slot = &mut self.nodes[idx];
 
             let mut ctx = NodeContext {
@@ -342,29 +404,19 @@ impl Pipeline {
             slot.node.on_data(&mut ctx);
         }
 
-        // 3. Propagate outputs to connected inputs
-        // We need to copy output of src to input of dst for each edge.
-        // We must avoid aliasing, so we collect edge info first.
-        let edges: Vec<(usize, usize)> = self
-            .edges
-            .iter()
-            .map(|e| (e.from_node.index(), e.to_node.index()))
-            .collect();
-
-        for (from, to) in edges {
-            if from < self.nodes.len() && to < self.nodes.len() && from != to {
-                // We need to split the borrow. Use raw pointer trick (safe: from != to).
-                let ptr = self.nodes.as_mut_ptr();
-                unsafe {
-                    let src = &(*ptr.add(from)).output_buf;
-                    let dst = &mut (*ptr.add(to)).input_buf;
-                    dst.copy_from(src);
-                    dst.timestamp = timestamp;
-                }
-                // Also propagate events
-                let events: Vec<PipelineEvent> = self.nodes[from].output_events.clone();
-                self.nodes[to].input_events = events;
+        // 3. Propagate ACTIVE edges only (pre-computed, pre-validated indices)
+        let ptr = self.nodes.as_mut_ptr();
+        for &(from, to) in &self.compiled_plan.active_edges {
+            unsafe {
+                let src = &(*ptr.add(from)).output_buf;
+                let dst = &mut (*ptr.add(to)).input_buf;
+                dst.copy_from(src);
+                dst.timestamp = timestamp;
             }
+
+            // Also propagate events
+            let events: Vec<PipelineEvent> = self.nodes[from].output_events.clone();
+            self.nodes[to].input_events = events;
         }
 
         self.tick += 1;
@@ -387,6 +439,9 @@ impl Pipeline {
 
         for idx in 0..self.nodes.len() {
             let slot = &mut self.nodes[idx];
+            if slot.deleted {
+                continue;
+            }
             let mut ctx = NodeContext {
                 input: &slot.input_buf,
                 output: &mut slot.output_buf,
@@ -410,6 +465,9 @@ impl Pipeline {
 
         for idx in 0..self.nodes.len() {
             let slot = &mut self.nodes[idx];
+            if slot.deleted {
+                continue;
+            }
             let mut ctx = NodeContext {
                 input: &slot.input_buf,
                 output: &mut slot.output_buf,
@@ -704,10 +762,28 @@ impl Pipeline {
             .nodes
             .iter()
             .enumerate()
-            .map(|(i, slot)| NodeSnapshot {
-                id: NodeId(i as u32),
-                name: slot.node.name().to_string(),
-                ports: slot.node.ports().to_vec(),
+            .filter(|(_, slot)| !slot.deleted)
+            .map(|(i, slot)| {
+                // Determine node type from the node itself
+                let node_type = match &slot.node {
+                    AnyNode::Builtin(builtin) => match builtin {
+                        BuiltinNode::Filter(_) => Some(NodeType::Filter),
+                        BuiltinNode::RhaiScript(_) => Some(NodeType::RhaiScript),
+                        BuiltinNode::UIBroadcastSink(_) => Some(NodeType::UIBroadcastSink),
+                        BuiltinNode::RecorderSink(_) => Some(NodeType::RecorderSink),
+                        BuiltinNode::ExporterSink(_) => Some(NodeType::ExporterSink),
+                        BuiltinNode::GraphSink(_) => Some(NodeType::GraphSink),
+                        _ => None,
+                    },
+                    AnyNode::Plugin(_) => None,
+                };
+
+                NodeSnapshot {
+                    id: NodeId(i as u32),
+                    name: slot.node.name().to_string(),
+                    ports: slot.node.ports().to_vec(),
+                    node_type,
+                }
             })
             .collect();
 
@@ -725,6 +801,222 @@ impl Pipeline {
             .msg_tx
             .send(SinkMessage::Topology(TopologySnapshot { nodes, edges }));
     }
+
+    // ── Dynamic graph mutation handlers ──
+
+    fn handle_add_node(&mut self, node_type: NodeType, config: Option<ConfigValue>) {
+        let factory = NodeFactory::new(self.msg_tx.clone());
+        let node = factory.create(node_type, config);
+        let node_id = self.add_node(node);
+        self.invalidate_compiled_plan();
+
+        let _ = self.msg_tx.send(SinkMessage::NodeAdded(node_id));
+        let _ = self.msg_tx.send(SinkMessage::TopologyChanged);
+
+        // Auto-create panes for nodes with UI representations
+        use crate::frontend::workspace::PaneKind;
+        let pane_kind = match node_type {
+            NodeType::GraphSink => Some(PaneKind::TimeSeries),
+            NodeType::RecorderSink => Some(PaneKind::Recorder),
+            _ => None,
+        };
+
+        if let Some(kind) = pane_kind {
+            let _ = self.msg_tx.send(SinkMessage::CreatePaneForNode {
+                node_id,
+                pane_kind: kind,
+            });
+        }
+
+        tracing::info!("Added node {:?} of type {:?}", node_id, node_type);
+    }
+
+    fn handle_remove_node(&mut self, node_id: NodeId) {
+        let idx = node_id.index();
+        if idx >= self.nodes.len() {
+            let _ = self.msg_tx.send(SinkMessage::GraphError(format!(
+                "Invalid node ID: {:?}",
+                node_id
+            )));
+            return;
+        }
+
+        // Check if this is a protected node (ProbeSource only - UIBroadcastSink can be removed)
+        let node_name = self.nodes[idx].node.name().to_string();
+        if node_name == "ProbeSource" {
+            let _ = self.msg_tx.send(SinkMessage::GraphError(format!(
+                "Cannot remove protected node: {}",
+                node_name
+            )));
+            return;
+        }
+
+        // Check if this node has a linked pane that should be closed
+        let pane_id = match &self.nodes[idx].node {
+            AnyNode::Builtin(BuiltinNode::GraphSink(sink)) => {
+                // Try to get pane_id from GraphSink
+                sink.pane_id()
+            }
+            AnyNode::Builtin(BuiltinNode::RecorderSink(sink)) => {
+                // Try to get pane_id from RecorderSink
+                sink.pane_id()
+            }
+            _ => None,
+        };
+
+        // Remove all edges connected to this node
+        self.edges
+            .retain(|e| e.from_node != node_id && e.to_node != node_id);
+
+        // Mark the node as deleted
+        self.nodes[idx].deleted = true;
+        self.invalidate_compiled_plan();
+
+        let _ = self.msg_tx.send(SinkMessage::NodeRemoved(node_id));
+        let _ = self.msg_tx.send(SinkMessage::TopologyChanged);
+
+        // If this node had a linked pane, tell frontend to close it
+        if let Some(pane_id) = pane_id {
+            let _ = self.msg_tx.send(SinkMessage::ClosePaneForNode { pane_id });
+        }
+
+        tracing::info!("Removed node {:?}", node_id);
+    }
+
+    fn handle_add_edge(&mut self, from_node: NodeId, to_node: NodeId) {
+        // Validate nodes exist and are not deleted
+        let from_idx = from_node.index();
+        let to_idx = to_node.index();
+
+        if from_idx >= self.nodes.len() || self.nodes[from_idx].deleted {
+            let _ = self.msg_tx.send(SinkMessage::GraphError(format!(
+                "Invalid source node: {:?}",
+                from_node
+            )));
+            return;
+        }
+        if to_idx >= self.nodes.len() || self.nodes[to_idx].deleted {
+            let _ = self.msg_tx.send(SinkMessage::GraphError(format!(
+                "Invalid target node: {:?}",
+                to_node
+            )));
+            return;
+        }
+        if from_node == to_node {
+            let _ = self
+                .msg_tx
+                .send(SinkMessage::GraphError("Cannot connect node to itself".to_string()));
+            return;
+        }
+
+        // Check for cycles (simple check: if adding this edge would create a back-edge)
+        if self.would_create_cycle(from_node, to_node) {
+            let _ = self.msg_tx.send(SinkMessage::GraphError(
+                "Adding this edge would create a cycle".to_string(),
+            ));
+            return;
+        }
+
+        let edge_id = self.add_edge(from_node, to_node);
+        let _ = self.msg_tx.send(SinkMessage::EdgeAdded(edge_id));
+        let _ = self.msg_tx.send(SinkMessage::TopologyChanged);
+        tracing::info!(
+            "Added edge {:?}: {:?} -> {:?}",
+            edge_id,
+            from_node,
+            to_node
+        );
+    }
+
+    fn handle_remove_edge(&mut self, edge_id: EdgeId) {
+        let idx = edge_id.index();
+        if idx >= self.edges.len() {
+            let _ = self.msg_tx.send(SinkMessage::GraphError(format!(
+                "Invalid edge ID: {:?}",
+                edge_id
+            )));
+            return;
+        }
+
+        self.edges.remove(idx);
+        self.invalidate_compiled_plan();
+
+        let _ = self.msg_tx.send(SinkMessage::EdgeRemoved(edge_id));
+        let _ = self.msg_tx.send(SinkMessage::TopologyChanged);
+        tracing::info!("Removed edge {:?}", edge_id);
+    }
+
+    /// Check if adding an edge from `from` to `to` would create a cycle.
+    fn would_create_cycle(&self, from: NodeId, to: NodeId) -> bool {
+        // If `to` can reach `from` through existing edges, adding from->to creates a cycle.
+        let mut visited = vec![false; self.nodes.len()];
+        let mut stack = vec![to];
+
+        while let Some(current) = stack.pop() {
+            if current == from {
+                return true;
+            }
+            let idx = current.index();
+            if idx >= self.nodes.len() || visited[idx] {
+                continue;
+            }
+            visited[idx] = true;
+
+            // Find all nodes reachable from current
+            for edge in &self.edges {
+                if edge.from_node == current && !self.nodes[edge.to_node.index()].deleted {
+                    stack.push(edge.to_node);
+                }
+            }
+        }
+        false
+    }
+}
+
+/// Factory for creating nodes dynamically.
+///
+/// Sink nodes require access to the msg_tx channel, so this factory
+/// encapsulates the creation logic with access to the channel.
+pub struct NodeFactory {
+    msg_tx: Sender<SinkMessage>,
+}
+
+impl NodeFactory {
+    pub fn new(msg_tx: Sender<SinkMessage>) -> Self {
+        Self { msg_tx }
+    }
+
+    /// Create a node based on the NodeType and optional config.
+    pub fn create(&self, node_type: NodeType, config: Option<ConfigValue>) -> AnyNode {
+        match node_type {
+            NodeType::Filter => AnyNode::Builtin(BuiltinNode::Filter(FilterNode::new())),
+            NodeType::RhaiScript => {
+                let mut node = RhaiScriptNode::new();
+                if let Some(ConfigValue::String(script)) = config {
+                    node.set_script(&script);
+                }
+                AnyNode::Builtin(BuiltinNode::RhaiScript(node))
+            }
+            NodeType::UIBroadcastSink => {
+                AnyNode::Builtin(BuiltinNode::UIBroadcastSink(UIBroadcastSinkNode::new(
+                    self.msg_tx.clone(),
+                )))
+            }
+            NodeType::RecorderSink => {
+                AnyNode::Builtin(BuiltinNode::RecorderSink(RecorderSinkNode::new()))
+            }
+            NodeType::ExporterSink => {
+                AnyNode::Builtin(BuiltinNode::ExporterSink(ExporterSinkNode::new()))
+            }
+            NodeType::GraphSink => {
+                let pane_id = config.and_then(|c| c.as_int()).map(|id| id as u64);
+                AnyNode::Builtin(BuiltinNode::GraphSink(GraphSinkNode::new(
+                    self.msg_tx.clone(),
+                    pane_id,
+                )))
+            }
+        }
+    }
 }
 
 /// Node IDs for the default pipeline graph, so the UI can address specific nodes.
@@ -732,7 +1024,7 @@ impl Pipeline {
 pub struct PipelineNodeIds {
     pub probe_source: NodeId,
     pub script_transform: NodeId,
-    pub ui_sink: NodeId,
+    pub variable_sink: NodeId,
     pub recorder_sink: NodeId,
     pub exporter_sink: NodeId,
 }
@@ -749,10 +1041,9 @@ impl PipelineBuilder {
 
     /// Build the default pipeline matching current app behavior:
     /// ```text
-    /// ProbeSource → ScriptTransform → UiSink
-    ///                              ├→ RecorderSink
-    ///                              └→ ExporterSink
+    /// ProbeSource → ScriptTransform → VariableSink
     /// ```
+    /// RecorderSink and ExporterSink are added dynamically via UI.
     pub fn build_default(
         self,
         cmd_rx: Receiver<PipelineCommand>,
@@ -764,26 +1055,24 @@ impl PipelineBuilder {
         // Create nodes
         let probe_source = ProbeSourceNode::new(self.config.clone());
         let script_transform = ScriptTransformNode::new();
-        let ui_sink = UiSinkNode::new(msg_tx.clone());
+        let ui_sink = UIBroadcastSinkNode::new(msg_tx.clone());
         let recorder_sink = RecorderSinkNode::new();
         let exporter_sink = ExporterSinkNode::new();
 
         let source_id = pipeline.add_node(AnyNode::Builtin(BuiltinNode::ProbeSource(probe_source)));
         let transform_id =
             pipeline.add_node(AnyNode::Builtin(BuiltinNode::ScriptTransform(script_transform)));
-        let ui_id = pipeline.add_node(AnyNode::Builtin(BuiltinNode::UiSink(ui_sink)));
+        let ui_id = pipeline.add_node(AnyNode::Builtin(BuiltinNode::UIBroadcastSink(ui_sink)));
         let recorder_id =
             pipeline.add_node(AnyNode::Builtin(BuiltinNode::RecorderSink(recorder_sink)));
         let exporter_id =
             pipeline.add_node(AnyNode::Builtin(BuiltinNode::ExporterSink(exporter_sink)));
 
-        // Wire: ProbeSource → ScriptTransform → UiSink
+        // Wire: ProbeSource → ScriptTransform → VariableSink
+        // This is the minimal default pipeline. RecorderSink and ExporterSink
+        // exist but are not connected - they can be wired dynamically via UI.
         pipeline.add_edge(source_id, transform_id);
         pipeline.add_edge(transform_id, ui_id);
-        // Wire: ScriptTransform → RecorderSink
-        pipeline.add_edge(transform_id, recorder_id);
-        // Wire: ScriptTransform → ExporterSink
-        pipeline.add_edge(transform_id, exporter_id);
 
         // Add configured variables
         for var in &self.config.variables {
@@ -793,7 +1082,7 @@ impl PipelineBuilder {
         let node_ids = PipelineNodeIds {
             probe_source: source_id,
             script_transform: transform_id,
-            ui_sink: ui_id,
+            variable_sink: ui_id,
             recorder_sink: recorder_id,
             exporter_sink: exporter_id,
         };

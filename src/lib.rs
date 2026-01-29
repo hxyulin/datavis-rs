@@ -64,12 +64,17 @@
 //! }
 //! ```
 
+// Initialize i18n at the crate root
+rust_i18n::i18n!("locales", fallback = "en");
+
 pub mod analysis;
 pub mod app;
 pub mod backend;
 pub mod config;
 pub mod error;
 pub mod frontend;
+pub mod i18n;
+pub mod menu;
 pub mod pipeline;
 pub mod scripting;
 pub mod session;

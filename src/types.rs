@@ -1,4 +1,4 @@
-//! Core data types for the SWD Data Visualizer
+//! Core data types for DataVis-RS
 //!
 //! This module contains the fundamental data structures used throughout
 //! the application for representing variables, data points, and their types.
@@ -230,6 +230,23 @@ impl DataPoint {
             raw_value,
             converted_value,
         }
+    }
+
+    /// Create a gap marker (NaN values) to break line continuity in plots
+    ///
+    /// Used when resuming from pause to prevent drawing a line across
+    /// the time gap when data wasn't being collected.
+    pub fn gap_marker(timestamp: Duration) -> Self {
+        Self {
+            timestamp,
+            raw_value: f64::NAN,
+            converted_value: f64::NAN,
+        }
+    }
+
+    /// Check if this data point is a gap marker
+    pub fn is_gap(&self) -> bool {
+        self.raw_value.is_nan() || self.converted_value.is_nan()
     }
 }
 

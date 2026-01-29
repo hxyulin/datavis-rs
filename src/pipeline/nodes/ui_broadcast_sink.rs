@@ -1,6 +1,6 @@
-//! UiSink node — sends data batches to the UI thread via crossbeam channel.
+//! UIBroadcastSink node — broadcasts data batches to all UI panes via crossbeam channel.
 //!
-//! Replaces the `BackendMessage::DataBatch` sending in the old worker.
+//! Publishes data samples to the frontend for visualization across all graph panes and UI components.
 
 use crate::pipeline::bridge::SinkMessage;
 use crate::pipeline::node::NodeContext;
@@ -14,19 +14,19 @@ static PORTS: &[PortDescriptor] = &[PortDescriptor {
     kind: PortKind::DataStream,
 }];
 
-/// UiSink: converts data packets to SinkMessage::DataBatch and sends to UI.
-pub struct UiSinkNode {
+/// UIBroadcastSink: converts data packets to SinkMessage::DataBatch and broadcasts to all UI.
+pub struct UIBroadcastSinkNode {
     tx: Sender<SinkMessage>,
     dropped: u64,
 }
 
-impl UiSinkNode {
+impl UIBroadcastSinkNode {
     pub fn new(tx: Sender<SinkMessage>) -> Self {
         Self { tx, dropped: 0 }
     }
 
     pub fn name(&self) -> &str {
-        "UiSink"
+        "UIBroadcastSink"
     }
 
     pub fn ports(&self) -> &[PortDescriptor] {
@@ -68,7 +68,7 @@ impl UiSinkNode {
 
     pub fn on_deactivate(&mut self, _ctx: &mut NodeContext) {
         if self.dropped > 0 {
-            tracing::warn!("UiSink dropped {} messages due to backpressure", self.dropped);
+            tracing::warn!("UIBroadcastSink dropped {} messages due to backpressure", self.dropped);
         }
     }
 

@@ -579,7 +579,8 @@ impl DebugProbe for MockProbeBackend {
     fn read_variable(&mut self, variable: &Variable) -> Result<f64> {
         let start = Instant::now();
         let result = MockProbeBackend::read_variable(self, variable);
-        let elapsed = start.elapsed().as_micros() as u64;
+        // Ensure minimum 1μs to avoid division by zero in rate calculations
+        let elapsed = start.elapsed().as_micros().max(1) as u64;
 
         match &result {
             Ok(_) => self

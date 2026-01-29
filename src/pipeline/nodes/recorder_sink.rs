@@ -24,6 +24,7 @@ pub struct RecorderSinkNode {
     max_frames: usize,
     sample_interval: Duration,
     last_recorded: HashMap<u32, Duration>,
+    pane_id: Option<u64>,
 }
 
 impl RecorderSinkNode {
@@ -34,6 +35,7 @@ impl RecorderSinkNode {
             max_frames: 0,
             sample_interval: Duration::from_millis(10),
             last_recorded: HashMap::new(),
+            pane_id: None,
         }
     }
 
@@ -43,6 +45,10 @@ impl RecorderSinkNode {
 
     pub fn ports(&self) -> &[PortDescriptor] {
         PORTS
+    }
+
+    pub fn pane_id(&self) -> Option<u64> {
+        self.pane_id
     }
 
     pub fn on_activate(&mut self, _ctx: &mut NodeContext) {
@@ -119,6 +125,11 @@ impl RecorderSinkNode {
             "max_frames" => {
                 if let Some(n) = value.as_int() {
                     self.max_frames = n.max(0) as usize;
+                }
+            }
+            "pane_id" => {
+                if let Some(id) = value.as_int() {
+                    self.pane_id = Some(id as u64);
                 }
             }
             _ => {}

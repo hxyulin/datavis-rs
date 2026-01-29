@@ -55,8 +55,8 @@ pub trait NodePlugin: Send {
 
 // Forward-declare built-in node types (defined in nodes/ submodule).
 use crate::pipeline::nodes::{
-    ExporterSinkNode, FilterNode, ProbeSourceNode, RecorderSinkNode, ScriptTransformNode,
-    UiSinkNode,
+    ExporterSinkNode, FilterNode, GraphSinkNode, ProbeSourceNode, RecorderSinkNode, RhaiScriptNode,
+    ScriptTransformNode, UIBroadcastSinkNode,
 };
 
 /// Enum dispatch for built-in nodes — zero dynamic dispatch overhead.
@@ -64,9 +64,11 @@ pub enum BuiltinNode {
     ProbeSource(ProbeSourceNode),
     ScriptTransform(ScriptTransformNode),
     Filter(FilterNode),
-    UiSink(UiSinkNode),
+    UIBroadcastSink(UIBroadcastSinkNode),
     RecorderSink(RecorderSinkNode),
     ExporterSink(ExporterSinkNode),
+    RhaiScript(RhaiScriptNode),
+    GraphSink(GraphSinkNode),
 }
 
 impl BuiltinNode {
@@ -75,9 +77,11 @@ impl BuiltinNode {
             BuiltinNode::ProbeSource(n) => n.name(),
             BuiltinNode::ScriptTransform(n) => n.name(),
             BuiltinNode::Filter(n) => n.name(),
-            BuiltinNode::UiSink(n) => n.name(),
+            BuiltinNode::UIBroadcastSink(n) => n.name(),
             BuiltinNode::RecorderSink(n) => n.name(),
             BuiltinNode::ExporterSink(n) => n.name(),
+            BuiltinNode::RhaiScript(n) => n.name(),
+            BuiltinNode::GraphSink(n) => n.name(),
         }
     }
 
@@ -86,9 +90,11 @@ impl BuiltinNode {
             BuiltinNode::ProbeSource(n) => n.ports(),
             BuiltinNode::ScriptTransform(n) => n.ports(),
             BuiltinNode::Filter(n) => n.ports(),
-            BuiltinNode::UiSink(n) => n.ports(),
+            BuiltinNode::UIBroadcastSink(n) => n.ports(),
             BuiltinNode::RecorderSink(n) => n.ports(),
             BuiltinNode::ExporterSink(n) => n.ports(),
+            BuiltinNode::RhaiScript(n) => n.ports(),
+            BuiltinNode::GraphSink(n) => n.ports(),
         }
     }
 
@@ -97,9 +103,11 @@ impl BuiltinNode {
             BuiltinNode::ProbeSource(n) => n.on_activate(ctx),
             BuiltinNode::ScriptTransform(n) => n.on_activate(ctx),
             BuiltinNode::Filter(n) => n.on_activate(ctx),
-            BuiltinNode::UiSink(n) => n.on_activate(ctx),
+            BuiltinNode::UIBroadcastSink(n) => n.on_activate(ctx),
             BuiltinNode::RecorderSink(n) => n.on_activate(ctx),
             BuiltinNode::ExporterSink(n) => n.on_activate(ctx),
+            BuiltinNode::RhaiScript(n) => n.on_activate(ctx),
+            BuiltinNode::GraphSink(n) => n.on_activate(ctx),
         }
     }
 
@@ -108,9 +116,11 @@ impl BuiltinNode {
             BuiltinNode::ProbeSource(n) => n.on_data(ctx),
             BuiltinNode::ScriptTransform(n) => n.on_data(ctx),
             BuiltinNode::Filter(n) => n.on_data(ctx),
-            BuiltinNode::UiSink(n) => n.on_data(ctx),
+            BuiltinNode::UIBroadcastSink(n) => n.on_data(ctx),
             BuiltinNode::RecorderSink(n) => n.on_data(ctx),
             BuiltinNode::ExporterSink(n) => n.on_data(ctx),
+            BuiltinNode::RhaiScript(n) => n.on_data(ctx),
+            BuiltinNode::GraphSink(n) => n.on_data(ctx),
         }
     }
 
@@ -119,9 +129,11 @@ impl BuiltinNode {
             BuiltinNode::ProbeSource(n) => n.on_deactivate(ctx),
             BuiltinNode::ScriptTransform(n) => n.on_deactivate(ctx),
             BuiltinNode::Filter(n) => n.on_deactivate(ctx),
-            BuiltinNode::UiSink(n) => n.on_deactivate(ctx),
+            BuiltinNode::UIBroadcastSink(n) => n.on_deactivate(ctx),
             BuiltinNode::RecorderSink(n) => n.on_deactivate(ctx),
             BuiltinNode::ExporterSink(n) => n.on_deactivate(ctx),
+            BuiltinNode::RhaiScript(n) => n.on_deactivate(ctx),
+            BuiltinNode::GraphSink(n) => n.on_deactivate(ctx),
         }
     }
 
@@ -130,9 +142,11 @@ impl BuiltinNode {
             BuiltinNode::ProbeSource(n) => n.on_config_change(key, value, ctx),
             BuiltinNode::ScriptTransform(n) => n.on_config_change(key, value, ctx),
             BuiltinNode::Filter(n) => n.on_config_change(key, value, ctx),
-            BuiltinNode::UiSink(n) => n.on_config_change(key, value, ctx),
+            BuiltinNode::UIBroadcastSink(n) => n.on_config_change(key, value, ctx),
             BuiltinNode::RecorderSink(n) => n.on_config_change(key, value, ctx),
             BuiltinNode::ExporterSink(n) => n.on_config_change(key, value, ctx),
+            BuiltinNode::RhaiScript(n) => n.on_config_change(key, value, ctx),
+            BuiltinNode::GraphSink(n) => n.on_config_change(key, value, ctx),
         }
     }
 }

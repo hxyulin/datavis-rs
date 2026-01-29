@@ -6,11 +6,12 @@
 //!
 //! # Architecture
 //!
+//! Default minimal pipeline:
 //! ```text
-//! [ProbeSource] ──► [ScriptTransform] ──► [UiSink]
-//!                                    ├──► [RecorderSink]
-//!                                    └──► [ExporterSink]
+//! [ProbeSource] ──► [ScriptTransform] ──► [UIBroadcastSink]
 //! ```
+//!
+//! Sinks like RecorderSink, ExporterSink, GraphSink can be added dynamically.
 //!
 //! # Design
 //!
@@ -21,10 +22,13 @@
 //! - **Backward compatible** — `PipelineBridge` has same API as `FrontendReceiver`.
 
 pub mod bridge;
+pub mod compiled_plan;
+pub mod compiler;
 pub mod error;
 pub mod executor;
 pub mod id;
 pub mod node;
+pub mod node_type;
 pub mod nodes;
 pub mod packet;
 pub mod port;
@@ -34,10 +38,13 @@ pub use bridge::{
     EdgeSnapshot, NodeSnapshot, PipelineBridge, PipelineCommand, SinkMessage, TopologySnapshot,
     VariableNodeSnapshot,
 };
+pub use compiled_plan::{CompiledPlan, PlanStats};
+pub use compiler::PipelineCompiler;
 pub use error::{PipelineError, PipelineResult};
 pub use executor::{Pipeline, PipelineBuilder, PipelineNodeIds};
 pub use id::{EdgeId, NodeId, PortId, VarId};
 pub use node::{AnyNode, BuiltinNode, NodeContext, NodePlugin};
+pub use node_type::NodeType;
 pub use packet::{ConfigValue, DataPacket, PipelineEvent, Sample, MAX_PACKET_VARS};
 pub use port::{PortDescriptor, PortDirection, PortKind};
 pub use variable_tree::{VariableNode, VariableTree};

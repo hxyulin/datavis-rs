@@ -1,0 +1,41 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1e3c72;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#2a5298;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#7e22ce;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Shine Radial Gradient -->
+    <radialGradient id="shine-grad" cx="25%" cy="25%" r="50%">
+      <stop offset="0%" style="stop-color:#ffffff;stop-opacity:0.15" />
+      <stop offset="100%" style="stop-color:#ffffff;stop-opacity:0" />
+    </radialGradient>
+
+    <!-- Inner Glow Gradient -->
+    <linearGradient id="glow-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#764ba2;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Hexagon Path -->
+    <!-- Calculated as a vertical hexagon centered at 512,512 -->
+    <!-- Radius is approx 230 (45% of 1024 total width / 2) -->
+    <polygon id="hex-shape" points="512,282 711,397 711,627 512,742 313,627 313,397" />
+  </defs>
+
+  <!-- Main Background Square with iOS-style rounded corners -->
+  <rect x="0" y="0" width="1024" height="1024" rx="220" ry="220" fill="url(#bg-grad)" />
+
+  <!-- Subtle Shine Overlay -->
+  <rect x="0" y="0" width="1024" height="1024" rx="220" ry="220" fill="url(#shine-grad)" />
+
+  <!-- The Prism Shape (White Base) -->
+  <use href="#hex-shape" fill="rgba(255,255,255,0.95)" />
+
+  <!-- The Inner Glow Prism (Scaled slightly smaller) -->
+  <g transform="translate(512, 512) scale(0.77) translate(-512, -512)">
+    <use href="#hex-shape" fill="url(#glow-grad)" opacity="0.9" />
+  </g>
+</svg>

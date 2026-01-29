@@ -5,6 +5,7 @@
 
 use crate::config::{MemoryAccessMode, ProbeConfig};
 use crate::pipeline::id::{EdgeId, NodeId, VarId};
+use crate::pipeline::node_type::NodeType;
 use crate::pipeline::packet::ConfigValue;
 use crate::pipeline::port::PortDescriptor;
 use crate::session::types::{SessionRecording, SessionState};
@@ -17,6 +18,14 @@ use std::time::Duration;
 pub enum SinkMessage {
     /// Batch of data samples: (VarId, timestamp, raw, converted).
     DataBatch(Vec<(VarId, Duration, f64, f64)>),
+
+    /// Batch of data samples for a specific graph pane.
+    GraphDataBatch {
+        /// Which pane this data is for. None means broadcast to all.
+        pane_id: Option<u64>,
+        /// Data samples: (VarId, timestamp, raw, converted).
+        data: Vec<(VarId, Duration, f64, f64)>,
+    },
 
     /// Periodic collection statistics.
     Stats(CollectionStats),
@@ -69,6 +78,33 @@ pub enum SinkMessage {
     /// Pipeline topology snapshot for the pipeline editor.
     Topology(TopologySnapshot),
 
+    /// Node was added (includes the new ID).
+    NodeAdded(NodeId),
+
+    /// Node was removed.
+    NodeRemoved(NodeId),
+
+    /// Edge was added.
+    EdgeAdded(EdgeId),
+
+    /// Edge was removed.
+    EdgeRemoved(EdgeId),
+
+    /// Topology has changed (triggers UI refresh).
+    TopologyChanged,
+
+    /// Error during graph mutation.
+    GraphError(String),
+
+    /// Request to create a pane for a newly added node.
+    CreatePaneForNode {
+        node_id: NodeId,
+        pane_kind: crate::frontend::workspace::PaneKind,
+    },
+
+    /// Request to close a pane when its linked node is deleted.
+    ClosePaneForNode { pane_id: u64 },
+
     /// Pipeline is shutting down.
     Shutdown,
 }
@@ -95,6 +131,7 @@ pub struct NodeSnapshot {
     pub id: NodeId,
     pub name: String,
     pub ports: Vec<PortDescriptor>,
+    pub node_type: Option<crate::pipeline::node_type::NodeType>,
 }
 
 /// Snapshot of a single pipeline edge.
@@ -158,6 +195,17 @@ pub enum PipelineCommand {
     RequestVariableTree,
     /// Request a pipeline topology snapshot.
     RequestTopology,
+    /// Add a new node to the pipeline (returns NodeId via message).
+    AddNode {
+        node_type: NodeType,
+        config: Option<ConfigValue>,
+    },
+    /// Remove a node by ID.
+    RemoveNode(NodeId),
+    /// Add an edge connecting two nodes.
+    AddEdge { from_node: NodeId, to_node: NodeId },
+    /// Remove an edge by ID.
+    RemoveEdge(EdgeId),
     /// Shut down the pipeline thread.
     Shutdown,
 }

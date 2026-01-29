@@ -7,8 +7,31 @@ description = "SWD-based data visualizer with live variable observation"
 license = "MIT"
 repository = "https://github.com/hxyulin/datavis-rs"
 
+[package.metadata.packager]
+product_name = "Data Visualizer"
+identifier = "dev.hxyulin.datavis"
+version = "0.1.0-alpha.1"
+before-packaging-command = "cargo build --release"
+icons = [
+    "assets/icons/icon.icns",
+    "assets/icons/icon.ico",
+    "assets/icons/png/icon-16x16.png",
+    "assets/icons/png/icon-32x32.png",
+    "assets/icons/png/icon-48x48.png",
+    "assets/icons/png/icon-64x64.png",
+    "assets/icons/png/icon-128x128.png",
+    "assets/icons/png/icon-256x256.png",
+    "assets/icons/png/icon-512x512.png",
+    "assets/icons/png/icon-1024x1024.png",
+]
+
+[package.metadata.packager.macos]
+signing_identity = "-"
+entitlements = "assets/Entitlements.plist"
+
+[package.metadata.packager.windows]
+
 [dependencies]
-# UI Framework
 eframe = { version = "0.33", default-features = false, features = [
     "default_fonts",
     "glow",
@@ -16,7 +39,7 @@ eframe = { version = "0.33", default-features = false, features = [
     "x11",
 ] }
 egui = "0.33"
-egui_dock = "0.18"
+egui_dock = { version = "0.18", features = ["serde"] }
 egui_plot = "0.34"
 
 # SWD/Debug Probe Interface
@@ -53,16 +76,32 @@ dirs-next = "2.0"
 # Native file dialogs
 rfd = "0.15"
 
+# Native OS menus
+muda = "0.17"
+
+# Internationalization
+rust-i18n = "3"
+
 # Async runtime for probe-rs operations
 tokio = { version = "1.0", features = ["rt-multi-thread", "sync", "time"] }
 
 # ELF parsing and DWARF debug info
-object = { version = "0.38", default-features = false, features = ["read", "elf", "std"] }
-gimli = { version = "0.32", default-features = false, features = ["read", "std"] }
+object = { version = "0.38", default-features = false, features = [
+    "read",
+    "elf",
+    "std",
+] }
+gimli = { version = "0.32", default-features = false, features = [
+    "read",
+    "std",
+] }
 
 # C++ symbol demangling
 cpp_demangle = "0.4"
 rustc-demangle = "0.1"
+
+[build-dependencies]
+winres = "0.1"
 
 [dev-dependencies]
 criterion = "0.5"
@@ -78,4 +117,4 @@ codegen-units = 1
 
 [features]
 default = []
-mock-probe = []  # For testing without real hardware
+mock-probe = [] # For testing without real hardware

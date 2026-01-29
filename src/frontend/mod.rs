@@ -34,6 +34,8 @@ mod panels;
 mod plot;
 pub mod script_editor;
 pub mod state;
+pub mod status_bar;
+pub mod toolbar;
 pub mod topics;
 pub mod widgets;
 pub mod workspace;
@@ -46,17 +48,22 @@ pub use topics::Topics;
 pub use widgets::*;
 
 use dialogs::{
-    show_dialog, DuplicateConfirmState, ElfSymbolsAction, ElfSymbolsContext, ElfSymbolsDialog,
-    ElfSymbolsState, VariableChangeAction, VariableChangeContext, VariableChangeDialog,
-    VariableChangeState,
+    show_dialog, CollectionSettingsAction, CollectionSettingsContext, CollectionSettingsDialog,
+    CollectionSettingsState, ConnectionSettingsAction, ConnectionSettingsContext,
+    ConnectionSettingsDialog, ConnectionSettingsState, DuplicateConfirmState, ElfSymbolsAction,
+    ElfSymbolsContext, ElfSymbolsDialog, ElfSymbolsState, PersistenceSettingsAction,
+    PersistenceSettingsContext, PersistenceSettingsDialog, PersistenceSettingsState,
+    PreferencesAction, PreferencesContext, PreferencesDialog, PreferencesState,
+    VariableChangeAction, VariableChangeContext, VariableChangeDialog, VariableChangeState,
 };
 use workspace::tab_viewer::WorkspaceTabViewer;
-use panes::SettingsPaneState;
 use workspace::{PaneId, PaneKind, Workspace};
 
 use crate::backend::{parse_elf, ElfInfo, ElfSymbol};
 use crate::pipeline::bridge::{PipelineBridge, PipelineCommand, SinkMessage};
 use crate::pipeline::executor::PipelineNodeIds;
+use crate::pipeline::node_type::NodeType;
+use crate::pipeline::packet::ConfigValue;
 use crate::config::{settings::RuntimeSettings, AppConfig, AppState};
 use crate::types::{CollectionStats, ConnectionStatus, DataPoint, VariableData, VariableType};
 use egui::Color32;
@@ -125,6 +132,24 @@ pub struct DataVisApp {
     // === Workspace (replaces page navigation) ===
     workspace: Workspace,
 
+    // === Node-Pane Linkage ===
+    /// Maps NodeId → PaneId for auto-created panes
+    node_to_pane: std::collections::HashMap<crate::pipeline::id::NodeId, workspace::PaneId>,
+    /// Maps PaneId → NodeId for auto-created panes
+    pane_to_node: std::collections::HashMap<workspace::PaneId, crate::pipeline::id::NodeId>,
+
+    // === Native menu bar (None on platforms without native menu support) ===
+    #[allow(dead_code)]
+    native_menu: Option<muda::Menu>,
+
+    // === UI chrome visibility ===
+    show_toolbar: bool,
+    show_status_bar: bool,
+
+    // === Connection state (shared between toolbar and quick-connect) ===
+    selected_probe_index: Option<usize>,
+    target_chip_input: String,
+
     // === Global Dialogs ===
     variable_change_open: bool,
     variable_change_state: VariableChangeState,
@@ -132,6 +157,25 @@ pub struct DataVisApp {
     elf_symbols_state: ElfSymbolsState,
     duplicate_confirm_open: bool,
     duplicate_confirm_state: DuplicateConfirmState,
+
+    // === Connection dialog ===
+    connection_dialog_open: bool,
+
+    // === Settings dialogs (Phase 3) ===
+    connection_settings_open: bool,
+    connection_settings_state: ConnectionSettingsState,
+    collection_settings_open: bool,
+    collection_settings_state: CollectionSettingsState,
+    persistence_settings_open: bool,
+    persistence_settings_state: PersistenceSettingsState,
+    preferences_open: bool,
+    preferences_state: PreferencesState,
+
+    // === Help dialog ===
+    help_open: bool,
+
+    // === UI Session State (for automatic persistence) ===
+    ui_session: crate::config::UiSessionState,
 }
 
 /// State for variable autocomplete/selector (kept for compatibility)
@@ -256,10 +300,12 @@ impl DataVisApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         frontend: PipelineBridge,
-        config: AppConfig,
+        mut config: AppConfig,
         app_state: AppState,
         project_path: Option<PathBuf>,
         node_ids: PipelineNodeIds,
+        native_menu: Option<muda::Menu>,
+        ui_session: crate::config::UiSessionState,
     ) -> Self {
         // Configure fonts and styles
         let fonts = egui::FontDefinitions::default();
@@ -270,6 +316,42 @@ impl DataVisApp {
             font_id.size *= app_state.ui_preferences.font_scale;
         });
         cc.egui_ctx.set_style(style);
+
+        // If no project is loaded but session has variables, restore them
+        // This allows one-off debugging sessions to persist across app restarts
+        if project_path.is_none() && !ui_session.variables.is_empty() {
+            tracing::info!(
+                "Restoring {} variables from UI session",
+                ui_session.variables.len()
+            );
+            config.variables = ui_session.variables.clone();
+        }
+
+        // Restore ELF path from session and load if it exists
+        let (elf_file_path, elf_info, elf_symbols) = if let Some(ref path) = ui_session.elf_file_path {
+            if path.exists() {
+                match crate::backend::parse_elf(path) {
+                    Ok(info) => {
+                        tracing::info!(
+                            "Restored ELF from session: {} variables, {} functions",
+                            info.variable_count(),
+                            info.function_count()
+                        );
+                        let symbols: Vec<_> = info.get_variables().into_iter().cloned().collect();
+                        (Some(path.clone()), Some(info), symbols)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load ELF from session path {:?}: {}", path, e);
+                        (None, None, Vec::new())
+                    }
+                }
+            } else {
+                tracing::warn!("ELF path from session no longer exists: {:?}", path);
+                (None, None, Vec::new())
+            }
+        } else {
+            (None, None, Vec::new())
+        };
 
         let project_name = if let Some(ref path) = project_path {
             path.file_stem()
@@ -291,24 +373,27 @@ impl DataVisApp {
             frontend.add_variable(var.clone());
         }
 
-        let target_chip_input = config.probe.target_chip.clone();
+        // Use target chip from UI session if available, otherwise from config
+        let target_chip_input = if !ui_session.target_chip_input.is_empty() {
+            ui_session.target_chip_input.clone()
+        } else {
+            config.probe.target_chip.clone()
+        };
 
         frontend.send_command(PipelineCommand::RefreshProbes);
 
-        // Build workspace with default layout
+        // Build workspace - restore from session if available, otherwise use default layout
         let mut workspace = Workspace::new();
-        let dock_state = workspace::default_layout::build_default_layout(&mut workspace);
-        workspace.dock_state = dock_state;
+        let layout_restored = if let Some(ref layout) = ui_session.workspace_layout {
+            workspace.restore_layout(layout)
+        } else {
+            false
+        };
 
-        // Initialize settings pane state with target chip
-        if let Some(settings_pane_id) = workspace.find_singleton(PaneKind::Settings) {
-            if let Some(settings_state) = workspace
-                .pane_states
-                .get_mut(&settings_pane_id)
-                .and_then(|p| p.as_any_mut().downcast_mut::<SettingsPaneState>())
-            {
-                settings_state.target_chip_input = target_chip_input;
-            }
+        if !layout_restored {
+            tracing::info!("Using default workspace layout");
+            let dock_state = workspace::default_layout::build_default_layout(&mut workspace);
+            workspace.dock_state = dock_state;
         }
 
         let topics = Topics {
@@ -319,6 +404,11 @@ impl DataVisApp {
             project_file_path: project_path.clone(),
             ..Topics::default()
         };
+
+        // Use UI session values for chrome visibility
+        let show_toolbar = ui_session.show_toolbar;
+        let show_status_bar = ui_session.show_status_bar;
+        let selected_probe_index = ui_session.selected_probe_index;
 
         Self {
             frontend,
@@ -331,16 +421,34 @@ impl DataVisApp {
             last_error: None,
             persistence_config: crate::config::DataPersistenceConfig::default(),
             topics,
-            elf_file_path: None,
-            elf_info: None,
-            elf_symbols: Vec::new(),
+            elf_file_path,
+            elf_info,
+            elf_symbols,
             workspace,
+            node_to_pane: std::collections::HashMap::new(),
+            pane_to_node: std::collections::HashMap::new(),
+            native_menu,
+            show_toolbar,
+            show_status_bar,
+            selected_probe_index,
+            target_chip_input,
             variable_change_open: false,
             variable_change_state: VariableChangeState::default(),
             elf_symbols_open: false,
             elf_symbols_state: ElfSymbolsState::default(),
             duplicate_confirm_open: false,
             duplicate_confirm_state: DuplicateConfirmState::default(),
+            connection_dialog_open: false,
+            connection_settings_open: false,
+            connection_settings_state: ConnectionSettingsState::default(),
+            collection_settings_open: false,
+            collection_settings_state: CollectionSettingsState::default(),
+            persistence_settings_open: false,
+            persistence_settings_state: PersistenceSettingsState::default(),
+            preferences_open: false,
+            preferences_state: PreferencesState::default(),
+            help_open: false,
+            ui_session,
         }
     }
 
@@ -361,14 +469,69 @@ impl DataVisApp {
                     self.topics.connection_status = ConnectionStatus::Error;
                 }
                 SinkMessage::DataBatch(batch) => {
-                    for (var_id, timestamp, raw_value, converted_value) in batch {
-                        let variable_id = var_id.0;
-                        if let Some(data) = self.topics.variable_data.get_mut(&variable_id) {
-                            data.push(DataPoint::with_conversion(
-                                timestamp,
-                                raw_value,
-                                converted_value,
-                            ));
+                    // Skip adding data when paused - this effectively freezes the graph
+                    if !self.settings.paused {
+                        for (var_id, timestamp, raw_value, converted_value) in batch {
+                            let variable_id = var_id.0;
+                            if let Some(data) = self.topics.variable_data.get_mut(&variable_id) {
+                                data.push(DataPoint::with_conversion(
+                                    timestamp,
+                                    raw_value,
+                                    converted_value,
+                                ));
+                            }
+                        }
+                        // Record timestamp for global data freshness
+                        self.topics.global_data_freshness = Some(std::time::Instant::now());
+                    }
+                }
+                SinkMessage::GraphDataBatch { pane_id, data } => {
+                    // Skip adding data when paused
+                    if !self.settings.paused {
+                        match pane_id {
+                            Some(id) => {
+                                // Route to specific pane's data store
+                                let pane_data = self.topics.graph_pane_data.entry(id).or_default();
+                                for (var_id, timestamp, raw_value, converted_value) in data {
+                                    let variable_id = var_id.0;
+                                    let var_data = pane_data.entry(variable_id).or_insert_with(|| {
+                                        // Create a new VariableData for this variable in this pane
+                                        if let Some(original) = self.topics.variable_data.get(&variable_id) {
+                                            VariableData::new(original.variable.clone())
+                                        } else {
+                                            // Fallback: create a basic variable
+                                            let var = crate::types::Variable::new(
+                                                &format!("var_{}", variable_id),
+                                                0,
+                                                crate::types::VariableType::F32,
+                                            );
+                                            VariableData::new(var)
+                                        }
+                                    });
+                                    var_data.push(DataPoint::with_conversion(
+                                        timestamp,
+                                        raw_value,
+                                        converted_value,
+                                    ));
+                                }
+                                // Record timestamp for pane-specific data freshness
+                                self.topics.pane_data_freshness.insert(id, std::time::Instant::now());
+                            }
+                            None => {
+                                // Broadcast to all panes - add to global variable_data
+                                for (var_id, timestamp, raw_value, converted_value) in data {
+                                    let variable_id = var_id.0;
+                                    if let Some(data) = self.topics.variable_data.get_mut(&variable_id) {
+                                        data.push(DataPoint::with_conversion(
+                                            timestamp,
+                                            raw_value,
+                                            converted_value,
+                                        ));
+                                    }
+                                }
+                                // Record timestamp for global data freshness
+                                self.topics.global_data_freshness = Some(std::time::Instant::now());
+                            }
                         }
                     }
                 }
@@ -389,7 +552,55 @@ impl DataVisApp {
                 }
                 SinkMessage::ProbeList(probes) => {
                     tracing::info!("Received {} probes", probes.len());
+                    // Reset selected index if it's now out of bounds
+                    if let Some(idx) = self.selected_probe_index {
+                        if idx >= probes.len() {
+                            self.selected_probe_index = None;
+                        }
+                    }
+                    // Auto-select the only probe if exactly one is available
+                    if probes.len() == 1 && self.selected_probe_index.is_none() {
+                        self.selected_probe_index = Some(0);
+                    }
                     self.topics.available_probes = probes;
+                }
+                SinkMessage::CreatePaneForNode { node_id, pane_kind } => {
+                    // Create the pane
+                    let title = match pane_kind {
+                        workspace::PaneKind::TimeSeries => format!("Time Series {}", node_id.0),
+                        workspace::PaneKind::Recorder => "Recorder".to_string(),
+                        _ => continue,
+                    };
+
+                    let pane_id = self.workspace.register_pane(pane_kind, title);
+                    self.workspace.dock_state.push_to_first_leaf(pane_id);
+
+                    // Link back: configure node with pane_id
+                    let config_key = match pane_kind {
+                        workspace::PaneKind::TimeSeries => "pane_id",
+                        workspace::PaneKind::Recorder => "pane_id",
+                        _ => continue,
+                    };
+
+                    self.frontend.send_command(PipelineCommand::NodeConfig {
+                        node_id,
+                        key: config_key.to_string(),
+                        value: crate::pipeline::packet::ConfigValue::Int(pane_id.0 as i64),
+                    });
+
+                    // Store linkage for tracking
+                    self.node_to_pane.insert(node_id, pane_id);
+                    self.pane_to_node.insert(pane_id, node_id);
+                }
+                SinkMessage::ClosePaneForNode { pane_id } => {
+                    let pane_id = workspace::PaneId(pane_id);
+                    // Clean up tracking
+                    if let Some(node_id) = self.pane_to_node.remove(&pane_id) {
+                        self.node_to_pane.remove(&node_id);
+                    }
+
+                    // Close the pane
+                    self.workspace.remove_pane(pane_id);
                 }
                 SinkMessage::Shutdown => {
                     tracing::info!("Backend shutdown received");
@@ -422,6 +633,28 @@ impl DataVisApp {
                     tracing::info!("Recording complete: {} frames", recording.frames.len());
                     self.topics.completed_recordings.push(recording);
                 }
+                SinkMessage::NodeAdded(node_id) => {
+                    tracing::info!("Node added: {:?}", node_id);
+                }
+                SinkMessage::NodeRemoved(node_id) => {
+                    tracing::info!("Node removed: {:?}", node_id);
+                }
+                SinkMessage::EdgeAdded(edge_id) => {
+                    tracing::info!("Edge added: {:?}", edge_id);
+                }
+                SinkMessage::EdgeRemoved(edge_id) => {
+                    tracing::info!("Edge removed: {:?}", edge_id);
+                }
+                SinkMessage::TopologyChanged => {
+                    // Clear cached topology to force refresh
+                    self.topics.topology = None;
+                    // Request fresh topology
+                    self.frontend.send_command(PipelineCommand::RequestTopology);
+                }
+                SinkMessage::GraphError(msg) => {
+                    tracing::error!("Graph mutation error: {}", msg);
+                    self.last_error = Some(msg);
+                }
             }
         }
 
@@ -451,7 +684,15 @@ impl DataVisApp {
                 self.frontend.send_command(PipelineCommand::Disconnect);
             }
             AppAction::StartCollection => {
+                // Clear data on start to avoid timestamp discontinuity
+                // (backend resets timestamps to 0 on each start)
+                for data in self.topics.variable_data.values_mut() {
+                    data.clear();
+                }
+                // Reset accumulated time since we're clearing the data
+                self.accumulated_time = Duration::ZERO;
                 self.settings.collecting = true;
+                self.settings.paused = false; // Ensure not paused when starting
                 self.collection_start = Some(Instant::now());
                 self.frontend.send_command(PipelineCommand::Start);
             }
@@ -464,6 +705,7 @@ impl DataVisApp {
                 self.frontend.send_command(PipelineCommand::Stop);
             }
             AppAction::RefreshProbes => {
+                tracing::debug!("Refreshing probe list...");
                 self.frontend.send_command(PipelineCommand::RefreshProbes);
             }
             AppAction::SetMemoryAccessMode(mode) => {
@@ -569,6 +811,17 @@ impl DataVisApp {
                 let title = format!("{} {}", display, count + 1);
                 let id = self.workspace.register_pane(kind, title);
                 self.workspace.dock_state.push_to_first_leaf(id);
+
+                // For TimeSeries panes, create a linked GraphSink node
+                if kind == PaneKind::TimeSeries {
+                    self.frontend.send_command(PipelineCommand::AddNode {
+                        node_type: NodeType::GraphSink,
+                        config: Some(ConfigValue::Int(id.0 as i64)),
+                    });
+                    // The GraphSink will be created but not connected.
+                    // User can connect it via Pipeline Editor if desired.
+                    // Data will flow once connected.
+                }
             }
             AppAction::NodeConfig { node_id, key, value } => {
                 self.frontend.send_command(PipelineCommand::NodeConfig {
@@ -581,7 +834,50 @@ impl DataVisApp {
                 self.frontend.send_command(PipelineCommand::RequestTopology);
             }
             AppAction::ClosePane(id) => {
+                // If this pane has a linked node, delete it
+                if let Some(node_id) = self.pane_to_node.remove(&id) {
+                    self.node_to_pane.remove(&node_id);
+                    self.frontend.send_command(PipelineCommand::RemoveNode(node_id));
+                }
+
+                // Continue with normal pane cleanup
                 self.workspace.remove_pane(id);
+            }
+            AppAction::NewProject => {
+                // Reset to a fresh project
+                self.config = crate::config::AppConfig::default();
+                self.topics.project_name = "Untitled Project".to_string();
+                self.topics.project_file_path = None;
+                self.target_chip_input = self.config.probe.target_chip.clone();
+                self.elf_file_path = None;
+                self.elf_info = None;
+                self.elf_symbols.clear();
+                self.topics.variable_data.clear();
+                self.topics.stats = CollectionStats::default();
+                self.last_error = None;
+                self.persistence_config = crate::config::DataPersistenceConfig::default();
+            }
+            AppAction::ResetLayout => {
+                // Rebuild workspace with default layout
+                let mut workspace = Workspace::new();
+                let dock_state =
+                    workspace::default_layout::build_default_layout(&mut workspace);
+                workspace.dock_state = dock_state;
+                self.workspace = workspace;
+            }
+            AppAction::TogglePause => {
+                let was_paused = self.settings.paused;
+                self.settings.toggle_pause();
+
+                // When resuming from pause, insert a NaN point to break the line
+                // This prevents drawing a line across the time gap
+                if was_paused && !self.settings.paused {
+                    // Get the current display time for the gap marker
+                    let gap_time = self.display_time();
+                    for data in self.topics.variable_data.values_mut() {
+                        data.push(crate::types::DataPoint::gap_marker(gap_time));
+                    }
+                }
             }
             AppAction::RenameVariable { id, new_name } => {
                 let old_name = self.config.find_variable(id).map(|v| v.name.clone());
@@ -612,6 +908,27 @@ impl DataVisApp {
                         }
                     }
                 }
+            }
+            AppAction::AddPipelineNode(node_type) => {
+                self.frontend.send_command(PipelineCommand::AddNode {
+                    node_type,
+                    config: None,
+                });
+            }
+            AppAction::AddPipelineNodeWithConfig { node_type, config } => {
+                self.frontend.send_command(PipelineCommand::AddNode {
+                    node_type,
+                    config,
+                });
+            }
+            AppAction::RemovePipelineNode(node_id) => {
+                self.frontend.send_command(PipelineCommand::RemoveNode(node_id));
+            }
+            AppAction::AddPipelineEdge { from_node, to_node } => {
+                self.frontend.send_command(PipelineCommand::AddEdge { from_node, to_node });
+            }
+            AppAction::RemovePipelineEdge(edge_id) => {
+                self.frontend.send_command(PipelineCommand::RemoveEdge(edge_id));
             }
         }
     }
@@ -766,17 +1083,8 @@ impl DataVisApp {
                 self.topics.project_name = project.name.clone();
                 self.topics.project_file_path = Some(path.clone());
 
-                // Update settings pane target chip
-                if let Some(settings_id) = self.workspace.find_singleton(PaneKind::Settings) {
-                    if let Some(s) = self
-                        .workspace
-                        .pane_states
-                        .get_mut(&settings_id)
-                        .and_then(|p| p.as_any_mut().downcast_mut::<SettingsPaneState>())
-                    {
-                        s.target_chip_input = self.config.probe.target_chip.clone();
-                    }
-                }
+                // Update target chip input field (now on DataVisApp directly)
+                self.target_chip_input = self.config.probe.target_chip.clone();
 
                 self.app_state.add_recent_project(
                     &path,
@@ -1041,6 +1349,779 @@ impl DataVisApp {
         }
     }
 
+    /// Process native menu events from muda
+    fn process_native_menu_events(&mut self) {
+        use crate::menu::{MenuEvent, MenuId};
+
+        // Poll for menu events
+        while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
+            if let Some(menu_id) = MenuId::from_muda_id(&event.id) {
+                if let Some(menu_event) = MenuEvent::from_menu_id(&menu_id) {
+                    self.handle_menu_event(menu_event);
+                }
+            }
+        }
+    }
+
+    /// Handle a menu event
+    fn handle_menu_event(&mut self, event: crate::menu::MenuEvent) {
+        use crate::menu::MenuEvent;
+
+        match event {
+            MenuEvent::Action(action) => {
+                self.handle_action(action);
+            }
+            MenuEvent::ToggleToolbar => {
+                self.show_toolbar = !self.show_toolbar;
+            }
+            MenuEvent::ToggleStatusBar => {
+                self.show_status_bar = !self.show_status_bar;
+            }
+            MenuEvent::OpenConnectionSettings => {
+                self.connection_settings_state =
+                    ConnectionSettingsState::from_config(&self.config.probe);
+                self.connection_settings_open = true;
+            }
+            MenuEvent::OpenCollectionSettings => {
+                self.collection_settings_state =
+                    CollectionSettingsState::from_config(&self.config.collection);
+                self.collection_settings_open = true;
+            }
+            MenuEvent::OpenPersistenceSettings => {
+                self.persistence_settings_state =
+                    PersistenceSettingsState::from_config(&self.persistence_config);
+                self.persistence_settings_open = true;
+            }
+            MenuEvent::OpenPreferences => {
+                self.preferences_state = PreferencesState::from_config(
+                    &self.config.ui,
+                    &self.app_state.ui_preferences,
+                );
+                self.preferences_open = true;
+            }
+            MenuEvent::OpenElfSymbols => {
+                self.elf_symbols_state = ElfSymbolsState::default();
+                self.elf_symbols_open = true;
+            }
+            MenuEvent::OpenHelp => {
+                self.help_open = true;
+            }
+            MenuEvent::OpenShortcuts => {
+                // TODO: Implement shortcuts dialog
+                self.help_open = true;
+            }
+            MenuEvent::OpenAbout => {
+                // TODO: Implement about dialog
+                self.help_open = true;
+            }
+            MenuEvent::LoadElf => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Load ELF Binary")
+                    .add_filter("ELF files", &["elf", "axf", "out", "bin"])
+                    .pick_file()
+                {
+                    self.handle_action(AppAction::LoadElf(path));
+                }
+            }
+            MenuEvent::OpenProject => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Open Project")
+                    .add_filter("DataVis Project", &["dvproj", "json"])
+                    .pick_file()
+                {
+                    self.handle_action(AppAction::LoadProject(path));
+                }
+            }
+            MenuEvent::SaveProject => {
+                if let Some(ref path) = self.topics.project_file_path {
+                    self.save_project_to_path(path.clone());
+                } else {
+                    // Save As if no path
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Save Project")
+                        .add_filter("DataVis Project", &["dvproj", "json"])
+                        .save_file()
+                    {
+                        self.save_project_to_path(path);
+                    }
+                }
+            }
+            MenuEvent::SaveProjectAs => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Save Project As")
+                    .add_filter("DataVis Project", &["dvproj", "json"])
+                    .save_file()
+                {
+                    self.save_project_to_path(path);
+                }
+            }
+            MenuEvent::LoadRecentProject(idx) => {
+                if let Some(recent) = self.app_state.recent_projects.get(idx) {
+                    let path = recent.path.clone();
+                    self.handle_action(AppAction::LoadProject(path));
+                }
+            }
+            MenuEvent::Quit => {
+                std::process::exit(0);
+            }
+        }
+    }
+
+    /// Render the menu bar (Phase 2: restructured)
+    fn render_menu_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                // === Project button ===
+                let project_name = self.topics.project_name.clone();
+                ui.menu_button(&project_name, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.text_edit_singleline(&mut self.topics.project_name);
+                    });
+                    ui.separator();
+                    if ui.button("Save (Ctrl+S)").clicked() {
+                        if let Some(ref path) = self.topics.project_file_path {
+                            let p = path.clone();
+                            self.handle_action(AppAction::SaveProject(p));
+                        } else if let Some(path) = rfd::FileDialog::new()
+                            .add_filter(
+                                "DataVis Project",
+                                &[crate::config::PROJECT_FILE_EXTENSION],
+                            )
+                            .set_file_name("project.datavisproj")
+                            .save_file()
+                        {
+                            self.handle_action(AppAction::SaveProject(path));
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Save As...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter(
+                                "DataVis Project",
+                                &[crate::config::PROJECT_FILE_EXTENSION],
+                            )
+                            .set_file_name("project.datavisproj")
+                            .save_file()
+                        {
+                            self.handle_action(AppAction::SaveProject(path));
+                        }
+                        ui.close();
+                    }
+                    ui.separator();
+                    // Recent projects submenu
+                    let recents: Vec<_> = self
+                        .app_state
+                        .recent_projects
+                        .iter()
+                        .map(|r| (r.path.clone(), r.name.clone()))
+                        .collect();
+                    if !recents.is_empty() {
+                        ui.menu_button("Recent Projects", |ui| {
+                            for (path, name) in &recents {
+                                if ui.button(name).clicked() {
+                                    self.handle_action(AppAction::LoadProject(path.clone()));
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                });
+
+                // === File menu ===
+                ui.menu_button("File", |ui| {
+                    if ui.button("New Project").clicked() {
+                        self.handle_action(AppAction::NewProject);
+                        ui.close();
+                    }
+                    if ui.button("Open Project...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter(
+                                "DataVis Project",
+                                &[crate::config::PROJECT_FILE_EXTENSION],
+                            )
+                            .pick_file()
+                        {
+                            self.handle_action(AppAction::LoadProject(path));
+                        }
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Save Project (Ctrl+S)").clicked() {
+                        if let Some(ref path) = self.topics.project_file_path {
+                            let p = path.clone();
+                            self.handle_action(AppAction::SaveProject(p));
+                        } else if let Some(path) = rfd::FileDialog::new()
+                            .add_filter(
+                                "DataVis Project",
+                                &[crate::config::PROJECT_FILE_EXTENSION],
+                            )
+                            .set_file_name("project.datavisproj")
+                            .save_file()
+                        {
+                            self.handle_action(AppAction::SaveProject(path));
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Save As...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter(
+                                "DataVis Project",
+                                &[crate::config::PROJECT_FILE_EXTENSION],
+                            )
+                            .set_file_name("project.datavisproj")
+                            .save_file()
+                        {
+                            self.handle_action(AppAction::SaveProject(path));
+                        }
+                        ui.close();
+                    }
+                });
+
+                // === View menu ===
+                ui.menu_button("View", |ui| {
+                    // Chrome toggles
+                    if ui.checkbox(&mut self.show_toolbar, "Toolbar").changed() {
+                        // Just toggling the bool
+                    }
+                    if ui.checkbox(&mut self.show_status_bar, "Status Bar").changed() {
+                        // Just toggling the bool
+                    }
+
+                    ui.separator();
+
+                    // Singleton panes (open/focus)
+                    let singletons: Vec<_> = self
+                        .workspace
+                        .registry_singletons()
+                        .map(|info| (info.kind, info.display_name))
+                        .collect();
+                    for (kind, name) in singletons {
+                        if ui.button(name).clicked() {
+                            self.handle_action(AppAction::OpenPane(kind));
+                            ui.close();
+                        }
+                    }
+
+                    ui.separator();
+
+                    // Multi-instance visualizers
+                    let multi: Vec<_> = self
+                        .workspace
+                        .registry_multi()
+                        .map(|info| (info.kind, info.display_name))
+                        .collect();
+                    for (kind, name) in multi {
+                        if ui.button(format!("New {}", name)).clicked() {
+                            self.handle_action(AppAction::NewVisualizer(kind));
+                            ui.close();
+                        }
+                    }
+
+                    ui.separator();
+
+                    if ui.button("Reset Layout").clicked() {
+                        self.handle_action(AppAction::ResetLayout);
+                        ui.close();
+                    }
+                });
+
+                // === Tools menu ===
+                ui.menu_button("Tools", |ui| {
+                    if ui.button("Connection Settings...").clicked() {
+                        self.connection_settings_state =
+                            ConnectionSettingsState::from_config(&self.config.probe);
+                        self.connection_settings_open = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Load ELF...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Load ELF Binary")
+                            .add_filter("ELF files", &["elf", "axf", "out", "bin"])
+                            .pick_file()
+                        {
+                            self.handle_action(AppAction::LoadElf(path));
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Browse ELF Symbols...").clicked() {
+                        self.elf_symbols_open = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Collection Settings...").clicked() {
+                        self.collection_settings_state =
+                            CollectionSettingsState::from_config(&self.config.collection);
+                        self.collection_settings_open = true;
+                        ui.close();
+                    }
+                    if ui.button("Data Persistence...").clicked() {
+                        self.persistence_settings_state =
+                            PersistenceSettingsState::from_config(&self.persistence_config);
+                        self.persistence_settings_open = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Preferences...").clicked() {
+                        self.preferences_state = PreferencesState::from_config(
+                            &self.config.ui,
+                            &self.app_state.ui_preferences,
+                        );
+                        self.preferences_open = true;
+                        ui.close();
+                    }
+                });
+
+                // === Help menu ===
+                ui.menu_button("Help", |ui| {
+                    if ui.button("Getting Started").clicked() {
+                        self.help_open = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Keyboard Shortcuts").clicked() {
+                        // TODO: Show keyboard shortcuts dialog
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("About DataVis").clicked() {
+                        // TODO: Show about dialog
+                        ui.close();
+                    }
+                });
+
+                // === Right-aligned: Quick Connect dropdown ===
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        self.render_quick_connect(ui);
+                    },
+                );
+            });
+        });
+    }
+
+    /// Render the quick-connect area in the menu bar
+    fn render_quick_connect(&mut self, ui: &mut egui::Ui) {
+        let status = self.topics.connection_status;
+
+        // When disconnected, show a prominent Connect button
+        match status {
+            ConnectionStatus::Disconnected | ConnectionStatus::Error => {
+                // Show a real Button for connecting
+                let btn = egui::Button::new(
+                    egui::RichText::new("Connect").strong()
+                ).fill(egui::Color32::from_rgb(0, 100, 180));
+
+                if ui.add(btn).on_hover_text("Click to connect to a debug probe").clicked() {
+                    self.connection_dialog_open = true;
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        // When connected/connecting, show status dropdown
+        let (btn_text, status_color) = match status {
+            ConnectionStatus::Connected => ("Connected", Color32::GREEN),
+            ConnectionStatus::Connecting => ("Connecting...", Color32::YELLOW),
+            _ => ("Disconnected", Color32::GRAY),
+        };
+
+        let response = ui.menu_button(
+            egui::RichText::new(btn_text).color(status_color),
+            |ui| {
+                ui.set_min_width(250.0);
+
+                // Target chip
+                ui.horizontal(|ui| {
+                    ui.label("Target:");
+                    ui.text_edit_singleline(&mut self.target_chip_input);
+                    if ui.button("Apply").clicked() {
+                        self.config.probe.target_chip = self.target_chip_input.clone();
+                    }
+                });
+
+                // Probe selector (use submenu instead of ComboBox to avoid nested popup issues)
+                ui.horizontal(|ui| {
+                    ui.label("Probe:");
+                    let probes = &self.topics.available_probes;
+                    let selected_text = self
+                        .selected_probe_index
+                        .and_then(|i| probes.get(i))
+                        .map(|p| p.display_name())
+                        .unwrap_or_else(|| "Select probe...".to_string());
+
+                    ui.menu_button(selected_text, |ui| {
+                        if probes.is_empty() {
+                            ui.label("No probes detected");
+                        } else {
+                            for (i, probe) in probes.iter().enumerate() {
+                                let is_selected = self.selected_probe_index == Some(i);
+                                if ui
+                                    .selectable_label(is_selected, probe.display_name())
+                                    .clicked()
+                                {
+                                    self.selected_probe_index = Some(i);
+                                    ui.close();
+                                }
+                            }
+                        }
+                    });
+
+                    if ui.button("Refresh").clicked() {
+                        self.handle_action(AppAction::RefreshProbes);
+                    }
+                });
+
+                ui.separator();
+
+                // Connect / Disconnect
+                match status {
+                    ConnectionStatus::Connected => {
+                        if ui.button("Disconnect").clicked() {
+                            self.handle_action(AppAction::Disconnect);
+                            ui.close();
+                        }
+                    }
+                    ConnectionStatus::Connecting => {
+                        ui.add_enabled(false, egui::Button::new("Connecting..."));
+                    }
+                    _ => {
+                        let can_connect = self.selected_probe_index.is_some();
+                        if ui
+                            .add_enabled(can_connect, egui::Button::new("Connect"))
+                            .clicked()
+                        {
+                            self.config.probe.target_chip = self.target_chip_input.clone();
+
+                            #[cfg(feature = "mock-probe")]
+                            if let Some(idx) = self.selected_probe_index {
+                                if let Some(crate::backend::DetectedProbe::Mock(_)) =
+                                    self.topics.available_probes.get(idx)
+                                {
+                                    self.handle_action(AppAction::UseMockProbe(true));
+                                }
+                            }
+
+                            if let Some(idx) = self.selected_probe_index {
+                                let selector =
+                                    match self.topics.available_probes.get(idx) {
+                                        Some(crate::backend::DetectedProbe::Real(info)) => {
+                                            Some(format!(
+                                                "{:04x}:{:04x}",
+                                                info.vendor_id, info.product_id
+                                            ))
+                                        }
+                                        #[cfg(feature = "mock-probe")]
+                                        Some(crate::backend::DetectedProbe::Mock(_)) => None,
+                                        _ => None,
+                                    };
+                                self.handle_action(AppAction::Connect {
+                                    probe_selector: selector,
+                                    target: self.target_chip_input.clone(),
+                                });
+                            }
+                            ui.close();
+                        }
+                    }
+                }
+
+                ui.separator();
+                if ui
+                    .small_button("Connection Settings...")
+                    .clicked()
+                {
+                    self.connection_settings_state =
+                        ConnectionSettingsState::from_config(&self.config.probe);
+                    self.connection_settings_open = true;
+                    ui.close();
+                }
+            },
+        );
+        let _ = response;
+    }
+
+    /// Render the settings dialogs (connection, collection, persistence, preferences)
+    fn render_settings_dialogs(&mut self, ctx: &egui::Context) {
+        // Connection dialog (main connect UI)
+        if self.connection_dialog_open {
+            let mut should_close = false;
+            egui::Window::new("Connect to Probe")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_min_width(300.0);
+
+                    ui.heading("Debug Probe Connection");
+                    ui.add_space(8.0);
+
+                    // Target chip
+                    ui.horizontal(|ui| {
+                        ui.label("Target Chip:");
+                        ui.text_edit_singleline(&mut self.target_chip_input);
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Probe selector
+                    ui.horizontal(|ui| {
+                        ui.label("Probe:");
+                        let probes = &self.topics.available_probes;
+                        let selected_text = self
+                            .selected_probe_index
+                            .and_then(|i| probes.get(i))
+                            .map(|p| p.display_name())
+                            .unwrap_or_else(|| "-- Select --".to_string());
+
+                        egui::ComboBox::from_id_salt("connection_dialog_probe")
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                if probes.is_empty() {
+                                    ui.label("No probes detected");
+                                } else {
+                                    for (i, probe) in probes.iter().enumerate() {
+                                        let is_selected = self.selected_probe_index == Some(i);
+                                        if ui.selectable_label(is_selected, probe.display_name()).clicked() {
+                                            self.selected_probe_index = Some(i);
+                                        }
+                                    }
+                                }
+                            });
+
+                        if ui.button("Refresh").clicked() {
+                            self.handle_action(AppAction::RefreshProbes);
+                        }
+                    });
+
+                    if self.topics.available_probes.is_empty() {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("No probes found. Click Refresh or connect a probe.")
+                            .color(Color32::GRAY)
+                            .italics());
+                    }
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    // Buttons
+                    ui.horizontal(|ui| {
+                        let can_connect = self.selected_probe_index.is_some();
+
+                        if ui.add_enabled(can_connect, egui::Button::new("Connect")).clicked() {
+                            self.config.probe.target_chip = self.target_chip_input.clone();
+
+                            #[cfg(feature = "mock-probe")]
+                            if let Some(idx) = self.selected_probe_index {
+                                if let Some(crate::backend::DetectedProbe::Mock(_)) =
+                                    self.topics.available_probes.get(idx)
+                                {
+                                    self.handle_action(AppAction::UseMockProbe(true));
+                                }
+                            }
+
+                            if let Some(idx) = self.selected_probe_index {
+                                let selector = match self.topics.available_probes.get(idx) {
+                                    Some(crate::backend::DetectedProbe::Real(info)) => {
+                                        Some(format!("{:04x}:{:04x}", info.vendor_id, info.product_id))
+                                    }
+                                    #[cfg(feature = "mock-probe")]
+                                    Some(crate::backend::DetectedProbe::Mock(_)) => None,
+                                    _ => None,
+                                };
+                                self.handle_action(AppAction::Connect {
+                                    probe_selector: selector,
+                                    target: self.target_chip_input.clone(),
+                                });
+                            }
+                            should_close = true;
+                        }
+
+                        if ui.button("Cancel").clicked() {
+                            should_close = true;
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Settings...").clicked() {
+                                self.connection_settings_state =
+                                    ConnectionSettingsState::from_config(&self.config.probe);
+                                self.connection_settings_open = true;
+                            }
+                        });
+                    });
+                });
+
+            if should_close {
+                self.connection_dialog_open = false;
+            }
+        }
+
+        // Connection settings dialog
+        if self.connection_settings_open {
+            // Sync state from config when opening
+            let dialog_ctx = ConnectionSettingsContext;
+            if let Some(action) = show_dialog::<ConnectionSettingsDialog>(
+                ctx,
+                &mut self.connection_settings_open,
+                &mut self.connection_settings_state,
+                dialog_ctx,
+            ) {
+                match action {
+                    ConnectionSettingsAction::Apply(state) => {
+                        self.config.probe.speed_khz = state.speed_khz;
+                        self.config.probe.connect_under_reset = state.connect_under_reset;
+                        self.config.probe.halt_on_connect = state.halt_on_connect;
+                        let old_mode = self.config.probe.memory_access_mode;
+                        self.config.probe.memory_access_mode = state.memory_access_mode;
+                        self.config.probe.usb_timeout_ms = state.usb_timeout_ms;
+                        self.config.probe.bulk_read_gap_threshold = state.bulk_read_gap_threshold;
+                        if self.config.probe.memory_access_mode != old_mode {
+                            self.handle_action(AppAction::SetMemoryAccessMode(
+                                self.config.probe.memory_access_mode,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Collection settings dialog
+        if self.collection_settings_open {
+            let dialog_ctx = CollectionSettingsContext;
+            if let Some(action) = show_dialog::<CollectionSettingsDialog>(
+                ctx,
+                &mut self.collection_settings_open,
+                &mut self.collection_settings_state,
+                dialog_ctx,
+            ) {
+                match action {
+                    CollectionSettingsAction::Apply(state) => {
+                        let old_rate = self.config.collection.poll_rate_hz;
+                        self.config.collection.poll_rate_hz = state.poll_rate_hz;
+                        self.config.collection.max_data_points = state.max_data_points;
+                        self.config.collection.timeout_ms = state.timeout_ms;
+                        if self.config.collection.poll_rate_hz != old_rate {
+                            self.handle_action(AppAction::SetPollRate(
+                                self.config.collection.poll_rate_hz,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Persistence settings dialog
+        if self.persistence_settings_open {
+            let dialog_ctx = PersistenceSettingsContext;
+            if let Some(action) = show_dialog::<PersistenceSettingsDialog>(
+                ctx,
+                &mut self.persistence_settings_open,
+                &mut self.persistence_settings_state,
+                dialog_ctx,
+            ) {
+                match action {
+                    PersistenceSettingsAction::Apply(state) => {
+                        self.persistence_config = state.to_config();
+                    }
+                }
+            }
+        }
+
+        // Preferences dialog
+        if self.preferences_open {
+            let dialog_ctx = PreferencesContext;
+            if let Some(action) = show_dialog::<PreferencesDialog>(
+                ctx,
+                &mut self.preferences_open,
+                &mut self.preferences_state,
+                dialog_ctx,
+            ) {
+                match action {
+                    PreferencesAction::Apply(state) => {
+                        self.app_state.ui_preferences.dark_mode = state.dark_mode;
+                        self.app_state.ui_preferences.font_scale = state.font_scale;
+                        self.app_state.ui_preferences.language = state.language;
+                        self.config.ui.show_grid = state.show_grid;
+                        self.config.ui.show_legend = state.show_legend;
+                        self.config.ui.auto_scale_y = state.auto_scale_y;
+                        self.config.ui.line_width = state.line_width;
+                        self.config.ui.time_window_seconds = state.time_window_seconds;
+                        self.config.ui.show_raw_values = state.show_raw_values;
+                        // Sync runtime settings with config
+                        self.settings.display_time_window = state.time_window_seconds;
+                        // Apply language change
+                        crate::i18n::set_language(state.language);
+                    }
+                }
+            }
+        }
+
+        // Help dialog
+        if self.help_open {
+            egui::Window::new("Getting Started")
+                .collapsible(true)
+                .resizable(true)
+                .default_width(450.0)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.heading("DataVis - SWD Data Visualizer");
+                        ui.add_space(8.0);
+
+                        ui.label("A real-time variable visualization tool for embedded systems debugging.");
+                        ui.add_space(12.0);
+
+                        ui.heading("Quick Start");
+                        ui.add_space(4.0);
+                        ui.label("1. Click the 'Connect' button in the menu bar");
+                        ui.label("2. Select your debug probe and target chip");
+                        ui.label("3. Load an ELF file (Tools > Load ELF...)");
+                        ui.label("4. Browse and add variables from the Variable Browser");
+                        ui.label("5. Press Space to start/stop data collection");
+                        ui.add_space(12.0);
+
+                        ui.heading("Keyboard Shortcuts");
+                        ui.add_space(4.0);
+                        egui::Grid::new("shortcuts_grid").show(ui, |ui| {
+                            ui.label("Space");
+                            ui.label("Start/Stop collection");
+                            ui.end_row();
+
+                            ui.label("Ctrl+S");
+                            ui.label("Save project");
+                            ui.end_row();
+
+                            ui.label("Ctrl+L");
+                            ui.label("Clear data");
+                            ui.end_row();
+
+                            ui.label("P");
+                            ui.label("Pause/Resume (while collecting)");
+                            ui.end_row();
+                        });
+                        ui.add_space(12.0);
+
+                        ui.heading("Panes");
+                        ui.add_space(4.0);
+                        ui.label("- Variable Browser: Browse and add variables from ELF");
+                        ui.label("- Variable List: Manage added variables");
+                        ui.label("- Time Series: Real-time data plot");
+                        ui.label("- FFT View: Frequency analysis");
+                        ui.label("- Watcher: Monitor variable values");
+                        ui.add_space(12.0);
+
+                        ui.separator();
+                        ui.add_space(4.0);
+                        if ui.button("Close").clicked() {
+                            self.help_open = false;
+                        }
+                    });
+                });
+        }
+    }
+
     /// Render pane dialogs that need &Context (called after dock area renders)
     fn render_pane_dialogs(&mut self, ctx: &egui::Context) {
         let mut actions = Vec::new();
@@ -1063,6 +2144,7 @@ impl DataVisApp {
                     last_error: &mut self.last_error,
                     display_time,
                     topics: &mut self.topics,
+                    current_pane_id: Some(pane_id),
                 };
 
                 let pane_actions = pane.render_dialogs(&mut shared, ctx);
@@ -1078,8 +2160,14 @@ impl DataVisApp {
 
 impl eframe::App for DataVisApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Capture window state for session persistence
+        self.capture_window_state(ctx);
+
         let had_messages = self.process_backend_messages();
         self.handle_keyboard_shortcuts(ctx);
+
+        // Process native menu events (if using native menus)
+        self.process_native_menu_events();
 
         if (self.settings.collecting && !self.settings.paused)
             || self.topics.connection_status == ConnectionStatus::Connected
@@ -1088,76 +2176,51 @@ impl eframe::App for DataVisApp {
             ctx.request_repaint();
         }
 
-        // Menu bar
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("Save Project").clicked() {
-                        self.handle_action(AppAction::SaveProject(PathBuf::new()));
-                        ui.close();
-                    }
-                    if ui.button("Load Project...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter(
-                                "DataVis Project",
-                                &[crate::config::PROJECT_FILE_EXTENSION],
-                            )
-                            .pick_file()
-                        {
-                            self.handle_action(AppAction::LoadProject(path));
-                        }
-                        ui.close();
-                    }
-                });
+        // 1. Menu bar (only render egui menu on Linux where native menus aren't supported)
+        #[cfg(target_os = "linux")]
+        self.render_menu_bar(ctx);
 
-                ui.menu_button("View", |ui| {
-                    // Singleton panes (open/focus) — auto-generated from registry
-                    let singletons: Vec<_> = self.workspace.registry_singletons()
-                        .map(|info| (info.kind, info.display_name))
-                        .collect();
-                    for (kind, name) in singletons {
-                        if ui.button(name).clicked() {
-                            self.handle_action(AppAction::OpenPane(kind));
-                            ui.close();
-                        }
-                    }
+        // 2. Toolbar (if visible)
+        if self.show_toolbar {
+            let toolbar_result = egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+                let toolbar_ctx = toolbar::ToolbarContext {
+                    topics: &self.topics,
+                    config: &self.config,
+                    settings: &self.settings,
+                    elf_file_path: self.elf_file_path.as_ref(),
+                    selected_probe_index: self.selected_probe_index,
+                    target_chip_input: self.target_chip_input.clone(),
+                };
+                toolbar::render_toolbar(ui, &toolbar_ctx)
+            }).inner;
 
-                    ui.separator();
+            // Apply state changes from toolbar
+            if let Some(idx) = toolbar_result.state_changes.selected_probe_index {
+                self.selected_probe_index = idx;
+            }
+            if let Some(target) = toolbar_result.state_changes.target_chip_input {
+                self.target_chip_input = target;
+            }
 
-                    // Multi-instance visualizers — auto-generated from registry
-                    let multi: Vec<_> = self.workspace.registry_multi()
-                        .map(|info| (info.kind, info.display_name))
-                        .collect();
-                    for (kind, name) in multi {
-                        if ui.button(format!("New {}", name)).clicked() {
-                            self.handle_action(AppAction::NewVisualizer(kind));
-                            ui.close();
-                        }
-                    }
-                });
+            // Handle actions
+            for action in toolbar_result.actions {
+                self.handle_action(action);
+            }
+        }
 
-                // Right-aligned: connection status, collection controls
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (status_color, status_text) = match self.topics.connection_status {
-                        ConnectionStatus::Connected => (Color32::GREEN, "Connected"),
-                        ConnectionStatus::Connecting => (Color32::YELLOW, "Connecting..."),
-                        ConnectionStatus::Disconnected => (Color32::GRAY, "Disconnected"),
-                        ConnectionStatus::Error => (Color32::RED, "Error"),
-                    };
-                    ui.colored_label(status_color, status_text);
-
-                    if self.settings.collecting {
-                        if self.settings.paused {
-                            ui.colored_label(Color32::YELLOW, "Paused");
-                        } else {
-                            ui.colored_label(Color32::GREEN, "Recording");
-                        }
-                    }
-                });
+        // 3. Status bar (if visible)
+        if self.show_status_bar {
+            egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+                let status_ctx = status_bar::StatusBarContext {
+                    topics: &self.topics,
+                    target_chip: &self.config.probe.target_chip,
+                    last_error: self.last_error.as_deref(),
+                };
+                status_bar::render_status_bar(ui, &status_ctx);
             });
-        });
+        }
 
-        // Dock workspace
+        // 4. Dock workspace
         {
             let display_time = self.display_time().as_secs_f64();
             let singleton_pane_kinds: Vec<_> = self.workspace.registry_singletons()
@@ -1204,6 +2267,9 @@ impl eframe::App for DataVisApp {
         // Global dialogs
         self.render_variable_change_with_context(ctx);
         self.render_elf_symbols_with_context(ctx);
+
+        // Settings dialogs
+        self.render_settings_dialogs(ctx);
 
         // Duplicate confirm dialog
         if self.duplicate_confirm_open {
@@ -1258,6 +2324,48 @@ impl eframe::App for DataVisApp {
             if let Err(e) = project.save(&path) {
                 tracing::warn!("Failed to auto-save project on exit: {}", e);
             }
+        }
+
+        // Save UI session state
+        self.save_ui_session();
+    }
+}
+
+impl DataVisApp {
+    /// Capture current window state from egui context
+    fn capture_window_state(&mut self, ctx: &egui::Context) {
+        ctx.input(|i| {
+            if let Some(rect) = i.viewport().outer_rect {
+                self.ui_session.window.position = Some((rect.min.x as i32, rect.min.y as i32));
+                self.ui_session.window.size = (rect.width() as u32, rect.height() as u32);
+            }
+            if let Some(maximized) = i.viewport().maximized {
+                self.ui_session.window.maximized = maximized;
+            }
+        });
+    }
+
+    /// Save the current UI session state for restoration on next launch
+    fn save_ui_session(&mut self) {
+        // Update session state with current values
+        self.ui_session.show_toolbar = self.show_toolbar;
+        self.ui_session.show_status_bar = self.show_status_bar;
+        self.ui_session.selected_probe_index = self.selected_probe_index;
+        self.ui_session.target_chip_input = self.target_chip_input.clone();
+        self.ui_session.last_project_path = self.topics.project_file_path.clone();
+
+        // Save ELF file path
+        self.ui_session.elf_file_path = self.elf_file_path.clone();
+
+        // Save variables (for one-off sessions without explicit project save)
+        self.ui_session.variables = self.config.variables.clone();
+
+        // Serialize workspace layout
+        self.ui_session.workspace_layout = self.workspace.serialize_layout();
+
+        // Save to disk
+        if let Err(e) = self.ui_session.save() {
+            tracing::warn!("Failed to save UI session state: {}", e);
         }
     }
 }

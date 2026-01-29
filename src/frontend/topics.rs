@@ -5,6 +5,7 @@
 //! Panes read from it via `shared.topics`.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crate::backend::DetectedProbe;
 use crate::pipeline::bridge::{TopologySnapshot, VariableNodeSnapshot};
@@ -16,7 +17,6 @@ use crate::types::{CollectionStats, ConnectionStatus, VariableData};
 ///
 /// This is a plain struct — direct field access, zero overhead.
 /// No `HashMap` lookup, no `TypeId` hashing, no `Box<dyn Any>` downcasting.
-#[derive(Default)]
 pub struct Topics {
     // --- Pipeline infrastructure ---
     /// Node ID for recorder sink (set once at startup)
@@ -28,6 +28,10 @@ pub struct Topics {
     /// Collected variable time-series data, keyed by variable ID.
     /// This is the primary data sink for all visualizer panes.
     pub variable_data: HashMap<u32, VariableData>,
+
+    /// Per-graph-pane data storage. Keyed by pane ID, then variable ID.
+    /// Used when GraphSink nodes route data to specific panes.
+    pub graph_pane_data: HashMap<u64, HashMap<u32, VariableData>>,
 
     /// Collection statistics (updated ~2Hz from pipeline)
     pub stats: CollectionStats,
@@ -68,4 +72,41 @@ pub struct Topics {
     /// ELF reload generation — incremented when ELF is loaded.
     /// Panes compare against their last-seen value to react.
     pub elf_generation: u64,
+
+    // --- Staleness tracking (for warning when sinks disconnect) ---
+    /// Track when each pane last received data (keyed by pane ID)
+    pub pane_data_freshness: HashMap<u64, Instant>,
+
+    /// Track when global data was last updated
+    pub global_data_freshness: Option<Instant>,
+
+    /// Staleness threshold (default 3 seconds)
+    pub staleness_threshold: Duration,
+}
+
+impl Default for Topics {
+    fn default() -> Self {
+        Self {
+            recorder_node_id: NodeId(0),
+            exporter_node_id: NodeId(0),
+            variable_data: HashMap::new(),
+            graph_pane_data: HashMap::new(),
+            stats: CollectionStats::default(),
+            connection_status: ConnectionStatus::Disconnected,
+            recorder_state: SessionState::Idle,
+            recorder_frame_count: 0,
+            exporter_active: false,
+            exporter_rows_written: 0,
+            topology: None,
+            available_probes: Vec::new(),
+            completed_recordings: Vec::new(),
+            variable_tree: Vec::new(),
+            project_name: String::new(),
+            project_file_path: None,
+            elf_generation: 0,
+            pane_data_freshness: HashMap::new(),
+            global_data_freshness: None,
+            staleness_threshold: Duration::from_secs(3),
+        }
+    }
 }

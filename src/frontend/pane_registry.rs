@@ -6,7 +6,7 @@
 
 use crate::frontend::pane_trait::Pane;
 use crate::frontend::panes::{
-    FftViewState, PipelineEditorState, RecorderPaneState, SettingsPaneState,
+    FftViewState, PipelineEditorState, RecorderPaneState,
     TimeSeriesState, VariableBrowserState, VariableListState, WatcherState,
 };
 use crate::frontend::workspace::PaneKind;
@@ -34,12 +34,6 @@ pub fn build_registry() -> Vec<PaneKindInfo> {
             display_name: "Variables",
             is_singleton: true,
             factory: || Box::new(VariableListState::default()),
-        },
-        PaneKindInfo {
-            kind: PaneKind::Settings,
-            display_name: "Settings",
-            is_singleton: true,
-            factory: || Box::new(SettingsPaneState::default()),
         },
         PaneKindInfo {
             kind: PaneKind::Recorder,

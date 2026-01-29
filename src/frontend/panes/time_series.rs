@@ -15,6 +15,7 @@ use crate::frontend::pane_trait::Pane;
 use crate::frontend::plot::{PlotCursor, PlotStatistics};
 use crate::frontend::state::{AppAction, SharedState};
 use crate::frontend::workspace::PaneKind;
+use crate::pipeline::id::NodeId;
 use crate::types::ConnectionStatus;
 
 /// A horizontal threshold/reference line
@@ -65,6 +66,8 @@ pub struct TimeSeriesState {
     pub threshold_lines: Vec<ThresholdLine>,
     /// Decimation cache: var_id -> (source_point_count, decimated_points)
     pub decimation_cache: HashMap<u32, (usize, Vec<[f64; 2]>)>,
+    /// Linked GraphSink node ID (if any). When set, this pane uses per-pane data.
+    pub linked_graph_sink: Option<NodeId>,
 }
 
 impl Default for TimeSeriesState {
@@ -88,11 +91,62 @@ impl Default for TimeSeriesState {
             secondary_autoscale_y: true,
             threshold_lines: Vec::new(),
             decimation_cache: HashMap::new(),
+            linked_graph_sink: None,
         }
     }
 }
 
 /// Render the time series pane (inside &mut Ui, not &Context)
+/// Render a warning banner when data is stale (no updates received)
+fn render_stale_warning(ui: &mut Ui, shared: &SharedState<'_>, pane_id: Option<u64>) {
+    use std::time::Instant;
+
+    // Calculate stale duration
+    let stale_duration = if let Some(pid) = pane_id {
+        shared
+            .topics
+            .pane_data_freshness
+            .get(&pid)
+            .map(|t| Instant::now().duration_since(*t))
+            .unwrap_or_default()
+    } else {
+        shared
+            .topics
+            .global_data_freshness
+            .map(|t| Instant::now().duration_since(t))
+            .unwrap_or_default()
+    };
+
+    // Warning banner
+    egui::Frame::new()
+        .fill(Color32::from_rgb(255, 200, 100)) // Orange/yellow background
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                // Warning icon
+                ui.label(egui::RichText::new("⚠").size(20.0).color(Color32::BLACK));
+
+                // Warning message
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "No data received for {:.1} seconds",
+                            stale_duration.as_secs_f32()
+                        ))
+                        .strong()
+                        .color(Color32::BLACK),
+                    );
+                    ui.label(
+                        egui::RichText::new("The data sink may be disconnected from the pipeline.")
+                            .color(Color32::from_gray(40)),
+                    );
+                });
+            });
+        });
+
+    ui.add_space(4.0);
+}
+
 pub fn render(
     state: &mut TimeSeriesState,
     shared: &mut SharedState<'_>,
@@ -103,6 +157,12 @@ pub fn render(
     // Toolbar at the top
     render_toolbar(state, shared, ui, &mut actions);
     ui.separator();
+
+    // Check for stale data and show warning if needed
+    let pane_id = state.linked_graph_sink.map(|id| id.0 as u64); // Extract and cast u32 to u64
+    if shared.is_pane_data_stale(pane_id) {
+        render_stale_warning(ui, shared, pane_id);
+    }
 
     // Main content: plot fills all remaining space
     render_plot(state, shared, ui);
@@ -763,9 +823,6 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
         plot = plot.custom_y_axes(y_axes);
     }
 
-    // Always apply X bounds — computed above for both auto and manual modes
-    plot = plot.include_x(x_min).include_x(x_max);
-
     // For Y: when manual, apply stored bounds. When auto, let egui_plot auto-fit.
     if !shared.settings.autoscale_y {
         if let (Some(y_min), Some(y_max)) = (shared.settings.y_min, shared.settings.y_max) {
@@ -784,23 +841,40 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
     let cursor_a = state.cursor.cursor_a;
     let cursor_b = state.cursor.cursor_b;
     let enable_secondary_axis = state.enable_secondary_axis;
-    let autoscale_x = shared.settings.autoscale_x;
     let autoscale_y = shared.settings.autoscale_y;
 
     let response = plot.show(ui, |plot_ui| {
         use crate::types::{PlotStyle, MAX_RENDER_POINTS};
 
-        // Sync egui_plot's internal auto_bounds with our autoscale settings.
-        // Without this, user drag/zoom sets mem.auto_bounds=false which persists
-        // across frames, preventing auto-fit even after "Reset View" or "Auto Y" toggle.
-        plot_ui.set_auto_bounds(egui::Vec2b::new(autoscale_x, autoscale_y));
+        // Set explicit X bounds based on time window - don't auto-fit X axis
+        // Y axis can auto-fit if autoscale_y is true
+        plot_ui.set_plot_bounds(egui_plot::PlotBounds::from_min_max(
+            [x_min, f64::NEG_INFINITY],
+            [x_max, f64::INFINITY],
+        ));
+        plot_ui.set_auto_bounds(egui::Vec2b::new(false, autoscale_y));
+
+        // Determine data source: use per-pane data if available, otherwise global
+        let pane_id = shared.current_pane_id.map(|id| id.0);
+        let use_pane_data = pane_id
+            .and_then(|id| shared.topics.graph_pane_data.get(&id))
+            .is_some();
 
         for var in &shared.config.variables {
             if !var.enabled || !var.show_in_graph {
                 continue;
             }
 
-            if let Some(data) = shared.topics.variable_data.get(&var.id) {
+            // Get data from per-pane store or global store
+            let data = if use_pane_data {
+                pane_id
+                    .and_then(|id| shared.topics.graph_pane_data.get(&id))
+                    .and_then(|pane_data| pane_data.get(&var.id))
+            } else {
+                shared.topics.variable_data.get(&var.id)
+            };
+
+            if let Some(data) = data {
                 let raw_points = data.as_plot_points();
                 let points = if let Some((cached_len, cached)) = state.decimation_cache.get(&var.id) {
                     if *cached_len == raw_points.len() {

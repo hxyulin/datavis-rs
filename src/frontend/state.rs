@@ -5,13 +5,15 @@
 //! and return `AppAction`s instead of mutating state directly.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::backend::{ElfInfo, ElfSymbol};
 use crate::config::settings::RuntimeSettings;
 use crate::config::{AppConfig, AppState, DataPersistenceConfig};
 use crate::frontend::topics::Topics;
 use crate::pipeline::bridge::PipelineBridge;
-use crate::pipeline::id::NodeId;
+use crate::pipeline::id::{EdgeId, NodeId};
+use crate::pipeline::node_type::NodeType;
 use crate::pipeline::packet::ConfigValue;
 use crate::types::{Variable, VariableType};
 
@@ -55,6 +57,9 @@ pub struct SharedState<'a> {
 
     // All published data (variables, stats, status, snapshots)
     pub topics: &'a mut Topics,
+
+    // Current pane being rendered (for per-pane data access)
+    pub current_pane_id: Option<PaneId>,
 }
 
 /// Actions that any page can emit
@@ -135,6 +140,21 @@ pub enum AppAction {
     /// Request pipeline topology snapshot
     RequestTopology,
 
+    // Pipeline graph mutations
+    /// Add a new node to the pipeline
+    AddPipelineNode(NodeType),
+    /// Add a new node to the pipeline with optional configuration
+    AddPipelineNodeWithConfig {
+        node_type: NodeType,
+        config: Option<ConfigValue>,
+    },
+    /// Remove a node from the pipeline
+    RemovePipelineNode(NodeId),
+    /// Add an edge connecting two pipeline nodes
+    AddPipelineEdge { from_node: NodeId, to_node: NodeId },
+    /// Remove an edge from the pipeline
+    RemovePipelineEdge(EdgeId),
+
     // Workspace actions
     /// Open/focus a singleton pane, or create if not exists
     OpenPane(PaneKind),
@@ -144,6 +164,16 @@ pub enum AppAction {
     ClosePane(PaneId),
     /// Rename a variable group (parent + propagate prefix to children)
     RenameVariable { id: u32, new_name: String },
+
+    // Project management
+    /// Create a new project (reset config to defaults)
+    NewProject,
+    /// Reset the workspace layout to defaults
+    ResetLayout,
+
+    // Toolbar
+    /// Toggle collection pause state
+    TogglePause,
 }
 
 /// Dialog identifiers
@@ -167,5 +197,44 @@ pub enum DialogId {
     VariableChange,
     /// Duplicate variable confirmation
     DuplicateConfirm,
+}
+
+impl<'a> SharedState<'a> {
+    /// Check if pane data is stale (no updates for staleness_threshold duration).
+    ///
+    /// Returns `false` if collection is stopped, otherwise checks if data has not
+    /// been received for longer than the configured staleness threshold.
+    ///
+    /// # Arguments
+    /// * `pane_id` - Optional pane ID. If provided, checks pane-specific data freshness.
+    ///               If None, checks global data freshness.
+    ///
+    /// # Returns
+    /// * `true` if data is stale (no updates within threshold while collecting)
+    /// * `false` if data is fresh, collection stopped, or no data received yet
+    pub fn is_pane_data_stale(&self, pane_id: Option<u64>) -> bool {
+        // Don't warn if collection stopped
+        if !self.settings.collecting {
+            return false;
+        }
+
+        let threshold = self.topics.staleness_threshold;
+        let now = Instant::now();
+
+        if let Some(pid) = pane_id {
+            // Check pane-specific data first
+            if let Some(last_update) = self.topics.pane_data_freshness.get(&pid) {
+                return now.duration_since(*last_update) > threshold;
+            }
+        }
+
+        // Fall back to global data check
+        if let Some(global_update) = self.topics.global_data_freshness {
+            return now.duration_since(global_update) > threshold;
+        }
+
+        // No data received yet - not stale, just empty
+        false
+    }
 }
 

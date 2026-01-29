@@ -1,0 +1,162 @@
+# DataVis - Simplified Chinese translations
+
+# Menu: Project
+menu_project: "项目"
+menu_project_rename: "重命名..."
+menu_project_save: "保存"
+menu_project_save_as: "另存为..."
+menu_project_recent: "最近的项目"
+menu_project_no_recent: "没有最近的项目"
+
+# Menu: File
+menu_file: "文件"
+menu_file_new_project: "新建项目"
+menu_file_open_project: "打开项目..."
+menu_file_import_session: "导入会话..."
+menu_file_export_data: "导出数据..."
+menu_file_quit: "退出"
+
+# Menu: View
+menu_view: "视图"
+menu_view_toolbar: "工具栏"
+menu_view_status_bar: "状态栏"
+menu_view_variable_browser: "变量浏览器"
+menu_view_variable_list: "变量列表"
+menu_view_session_capture: "会话捕获"
+menu_view_pipeline_editor: "管道编辑器"
+menu_view_new_time_series: "新建时间序列"
+menu_view_new_watcher: "新建监视器"
+menu_view_new_fft: "新建FFT视图"
+menu_view_reset_layout: "重置布局"
+
+# Menu: Tools
+menu_tools: "工具"
+menu_tools_connection_settings: "连接设置..."
+menu_tools_load_elf: "加载ELF..."
+menu_tools_browse_symbols: "浏览ELF符号..."
+menu_tools_collection_settings: "采集设置..."
+menu_tools_persistence: "数据持久化..."
+menu_tools_preferences: "偏好设置..."
+
+# Menu: Help
+menu_help: "帮助"
+menu_help_getting_started: "快速入门"
+menu_help_shortcuts: "键盘快捷键"
+menu_help_about: "关于DataVis"
+
+# Connection
+connection_connect: "连接"
+connection_disconnect: "断开连接"
+connection_connected: "已连接"
+connection_connecting: "正在连接"
+connection_disconnected: "未连接"
+connection_error: "连接错误"
+connection_select_probe: "选择探针"
+connection_no_probes: "未找到探针"
+connection_refresh: "刷新"
+connection_target_chip: "目标芯片"
+connection_probe: "探针"
+connection_target: "目标"
+connection_apply: "应用"
+connection_settings: "设置..."
+
+# Collection
+collection_start: "开始"
+collection_stop: "停止"
+collection_pause: "暂停"
+collection_resume: "继续"
+collection_clear: "清除数据"
+collection_recording: "录制中"
+collection_paused: "已暂停"
+
+# Status bar
+status_rate: "速率"
+status_samples: "采样数"
+status_errors: "错误"
+status_buffer: "缓冲区"
+status_avg: "平均"
+status_data: "数据"
+
+# Dialogs
+dialog_ok: "确定"
+dialog_cancel: "取消"
+dialog_apply: "应用"
+dialog_close: "关闭"
+dialog_connect_to_probe: "连接到探针"
+dialog_debug_probe_connection: "调试探针连接"
+
+# Preferences
+pref_title: "偏好设置"
+pref_language: "语言"
+pref_theme: "主题"
+pref_dark_mode: "深色模式"
+pref_font_scale: "字体大小"
+pref_display: "显示"
+pref_appearance: "外观"
+pref_display_defaults: "显示默认值"
+pref_grid: "显示网格"
+pref_legend: "显示图例"
+pref_auto_scale_y: "自动缩放Y轴"
+pref_line_width: "线宽"
+pref_time_window: "默认时间窗口"
+pref_show_raw_values: "显示原始值"
+
+# Connection settings
+conn_settings_title: "连接设置"
+conn_settings_speed: "速度 (kHz)"
+conn_settings_connect_under_reset: "复位下连接"
+conn_settings_halt_on_connect: "连接时暂停"
+conn_settings_memory_access_mode: "内存访问模式"
+conn_settings_usb_timeout: "USB超时 (ms)"
+conn_settings_bulk_read_gap: "批量读取间隔阈值"
+
+# Collection settings
+coll_settings_title: "采集设置"
+coll_settings_poll_rate: "轮询频率 (Hz)"
+coll_settings_max_points: "最大数据点数"
+coll_settings_timeout: "超时 (ms)"
+
+# Persistence settings
+pers_settings_title: "数据持久化"
+pers_settings_enable: "启用持久化"
+pers_settings_file_path: "文件路径"
+pers_settings_format: "格式"
+pers_settings_max_size: "最大大小 (MB)"
+
+# Panes
+pane_variable_browser: "变量浏览器"
+pane_variable_list: "变量列表"
+pane_time_series: "时间序列"
+pane_watcher: "监视器"
+pane_fft_view: "FFT视图"
+pane_session_capture: "会话捕获"
+pane_pipeline_editor: "管道编辑器"
+pane_empty_load_elf: "加载ELF文件以浏览变量"
+pane_empty_add_variables: "从浏览器添加变量以开始绘图"
+
+# Toolbar
+toolbar_load_elf: "加载ELF"
+toolbar_clear: "清除"
+toolbar_elf_loaded: "ELF"
+
+# Help dialog
+help_title: "快速入门"
+help_intro: "用于嵌入式系统调试的实时变量可视化工具。"
+help_quick_start: "快速入门"
+help_step1: "1. 点击菜单栏中的'连接'按钮"
+help_step2: "2. 选择调试探针和目标芯片"
+help_step3: "3. 加载ELF文件（工具 > 加载ELF...）"
+help_step4: "4. 从变量浏览器浏览并添加变量"
+help_step5: "5. 按空格键开始/停止数据采集"
+help_shortcuts_title: "键盘快捷键"
+help_shortcut_space: "开始/停止采集"
+help_shortcut_save: "保存项目"
+help_shortcut_clear: "清除数据"
+help_shortcut_pause: "暂停/继续（采集时）"
+
+# Units
+unit_hz: "Hz"
+unit_us: "μs"
+unit_kb: "KB"
+unit_mb: "MB"
+unit_seconds: "秒"

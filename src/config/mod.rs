@@ -37,8 +37,10 @@
 //! ```
 
 pub mod settings;
+pub mod ui_session;
 
 pub use settings::*;
+pub use ui_session::{SerializedPane, SerializedWorkspaceLayout, UiSessionState, WindowState};
 
 use crate::error::{DataVisError, Result};
 use crate::types::{Variable, VariableType};
@@ -310,6 +312,10 @@ pub struct UiPreferences {
     /// Show welcome screen on startup
     #[serde(default = "default_true")]
     pub show_welcome: bool,
+
+    /// UI language
+    #[serde(default)]
+    pub language: crate::i18n::Language,
 }
 
 fn default_true() -> bool {
@@ -327,6 +333,7 @@ impl Default for UiPreferences {
             font_scale: 1.0,
             remember_window_state: true,
             show_welcome: true,
+            language: crate::i18n::Language::default(),
         }
     }
 }
