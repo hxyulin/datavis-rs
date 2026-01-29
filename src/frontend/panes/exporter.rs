@@ -168,3 +168,59 @@ impl Pane for ExporterPaneState {
     fn as_any(&self) -> &dyn std::any::Any { self }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_exporter_pane_state_default() {
+        let state = ExporterPaneState::default();
+
+        assert_eq!(state.export_path, "");
+        assert_eq!(state.format, ExportFormat::Csv);
+    }
+
+    #[test]
+    fn test_export_format_display_names() {
+        assert_eq!(ExportFormat::Csv.display_name(), "CSV");
+        assert_eq!(ExportFormat::Json.display_name(), "JSON");
+    }
+
+    #[test]
+    fn test_export_format_extensions() {
+        assert_eq!(ExportFormat::Csv.extension(), "csv");
+        assert_eq!(ExportFormat::Json.extension(), "json");
+    }
+
+    #[test]
+    fn test_export_path_update() {
+        let mut state = ExporterPaneState::default();
+
+        state.export_path = "/tmp/test.csv".to_string();
+        assert_eq!(state.export_path, "/tmp/test.csv");
+
+        state.export_path = "/data/output.json".to_string();
+        assert_eq!(state.export_path, "/data/output.json");
+    }
+
+    #[test]
+    fn test_format_switching() {
+        let mut state = ExporterPaneState::default();
+
+        assert_eq!(state.format, ExportFormat::Csv);
+
+        state.format = ExportFormat::Json;
+        assert_eq!(state.format, ExportFormat::Json);
+
+        state.format = ExportFormat::Csv;
+        assert_eq!(state.format, ExportFormat::Csv);
+    }
+
+    #[test]
+    fn test_export_format_equality() {
+        assert_eq!(ExportFormat::Csv, ExportFormat::Csv);
+        assert_eq!(ExportFormat::Json, ExportFormat::Json);
+        assert_ne!(ExportFormat::Csv, ExportFormat::Json);
+    }
+}

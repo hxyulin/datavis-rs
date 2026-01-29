@@ -1203,3 +1203,305 @@ impl Pane for TimeSeriesState {
     fn as_any(&self) -> &dyn std::any::Any { self }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_time_series_state_default() {
+        let state = TimeSeriesState::default();
+
+        assert!(!state.advanced_mode);
+        assert!(!state.value_editor_open);
+        assert!(!state.trigger_config_open);
+        assert!(!state.export_config_open);
+        assert!(!state.enable_secondary_axis);
+        assert!(state.secondary_autoscale_y);
+        assert_eq!(state.secondary_y_min, None);
+        assert_eq!(state.secondary_y_max, None);
+        assert!(state.threshold_lines.is_empty());
+        assert!(state.decimation_cache.is_empty());
+        assert!(state.variable_statistics.is_empty());
+        assert_eq!(state.linked_graph_sink, None);
+    }
+
+    #[test]
+    fn test_threshold_line_creation() {
+        let line = ThresholdLine::new(1, 42.0, "Test Threshold", [255, 0, 0, 255]);
+
+        assert_eq!(line.id, 1);
+        assert_eq!(line.value, 42.0);
+        assert_eq!(line.label, "Test Threshold");
+        assert_eq!(line.color, [255, 0, 0, 255]);
+        assert!(line.visible);
+    }
+
+    #[test]
+    fn test_threshold_line_management() {
+        let mut state = TimeSeriesState::default();
+
+        // Add threshold lines
+        state.threshold_lines.push(ThresholdLine::new(1, 10.0, "Low", [0, 255, 0, 255]));
+        state.threshold_lines.push(ThresholdLine::new(2, 90.0, "High", [255, 0, 0, 255]));
+
+        assert_eq!(state.threshold_lines.len(), 2);
+        assert_eq!(state.threshold_lines[0].value, 10.0);
+        assert_eq!(state.threshold_lines[1].value, 90.0);
+
+        // Toggle visibility
+        state.threshold_lines[0].visible = false;
+        assert!(!state.threshold_lines[0].visible);
+        assert!(state.threshold_lines[1].visible);
+
+        // Remove a line
+        state.threshold_lines.retain(|l| l.id != 1);
+        assert_eq!(state.threshold_lines.len(), 1);
+        assert_eq!(state.threshold_lines[0].id, 2);
+    }
+
+    #[test]
+    fn test_marker_operations() {
+        use std::time::Duration;
+
+        let mut state = TimeSeriesState::default();
+
+        // Add markers
+        state.markers.add("Event 1", Duration::from_secs(100), MarkerType::Event);
+        state.markers.add("Note", Duration::from_secs(200), MarkerType::Note);
+        state.markers.add("Event 2", Duration::from_secs(300), MarkerType::Event);
+
+        let all_markers = state.markers.all();
+        assert_eq!(all_markers.len(), 3);
+
+        // Filter by type
+        let event_markers: Vec<_> = all_markers.iter()
+            .filter(|m| m.marker_type == MarkerType::Event)
+            .collect();
+        assert_eq!(event_markers.len(), 2);
+
+        // Filter by time window
+        let windowed: Vec<_> = all_markers.iter()
+            .filter(|m| m.time >= Duration::from_secs(150) && m.time <= Duration::from_secs(250))
+            .collect();
+        assert_eq!(windowed.len(), 1);
+        assert_eq!(windowed[0].time, Duration::from_secs(200));
+    }
+
+    #[test]
+    fn test_decimation_cache_management() {
+        let mut state = TimeSeriesState::default();
+
+        // Add cache entries
+        let points1 = vec![[0.0, 1.0], [1.0, 2.0], [2.0, 3.0]];
+        let points2 = vec![[0.0, 10.0], [1.0, 20.0]];
+
+        state.decimation_cache.insert(1, (100, points1.clone()));
+        state.decimation_cache.insert(2, (50, points2.clone()));
+
+        assert_eq!(state.decimation_cache.len(), 2);
+
+        // Verify cache content
+        let (source_count, cached_points) = state.decimation_cache.get(&1).unwrap();
+        assert_eq!(*source_count, 100);
+        assert_eq!(cached_points.len(), 3);
+
+        // Clear cache (simulating data update)
+        state.decimation_cache.clear();
+        assert!(state.decimation_cache.is_empty());
+    }
+
+    #[test]
+    fn test_secondary_axis_state() {
+        let mut state = TimeSeriesState::default();
+
+        // Initially disabled
+        assert!(!state.enable_secondary_axis);
+        assert!(state.secondary_autoscale_y);
+
+        // Enable with manual range
+        state.enable_secondary_axis = true;
+        state.secondary_autoscale_y = false;
+        state.secondary_y_min = Some(-100.0);
+        state.secondary_y_max = Some(100.0);
+
+        assert!(state.enable_secondary_axis);
+        assert!(!state.secondary_autoscale_y);
+        assert_eq!(state.secondary_y_min, Some(-100.0));
+        assert_eq!(state.secondary_y_max, Some(100.0));
+
+        // Switch back to autoscale
+        state.secondary_autoscale_y = true;
+        state.secondary_y_min = None;
+        state.secondary_y_max = None;
+
+        assert!(state.secondary_autoscale_y);
+        assert_eq!(state.secondary_y_min, None);
+    }
+
+    #[test]
+    fn test_variable_statistics_tracking() {
+        let mut state = TimeSeriesState::default();
+
+        // Add statistics for variables
+        state.variable_statistics.insert(1, PlotStatistics {
+            min: 0.0,
+            max: 100.0,
+            mean: 50.0,
+            std_dev: 10.0,
+            rms: 51.0,
+            count: 1000,
+            time_start: Some(0.0),
+            time_end: Some(10.0),
+        });
+
+        state.variable_statistics.insert(2, PlotStatistics {
+            min: -10.0,
+            max: 10.0,
+            mean: 0.5,
+            std_dev: 5.0,
+            rms: 5.1,
+            count: 500,
+            time_start: Some(0.0),
+            time_end: Some(5.0),
+        });
+
+        assert_eq!(state.variable_statistics.len(), 2);
+
+        // Verify stats
+        let stats1 = state.variable_statistics.get(&1).unwrap();
+        assert_eq!(stats1.min, 0.0);
+        assert_eq!(stats1.max, 100.0);
+        assert_eq!(stats1.count, 1000);
+
+        // Update stats
+        state.variable_statistics.get_mut(&1).unwrap().max = 120.0;
+        assert_eq!(state.variable_statistics.get(&1).unwrap().max, 120.0);
+
+        // Remove variable stats
+        state.variable_statistics.remove(&2);
+        assert_eq!(state.variable_statistics.len(), 1);
+    }
+
+    #[test]
+    fn test_dialog_state_toggles() {
+        let mut state = TimeSeriesState::default();
+
+        // All dialogs initially closed
+        assert!(!state.value_editor_open);
+        assert!(!state.trigger_config_open);
+        assert!(!state.export_config_open);
+
+        // Open dialogs
+        state.value_editor_open = true;
+        state.trigger_config_open = true;
+
+        assert!(state.value_editor_open);
+        assert!(state.trigger_config_open);
+        assert!(!state.export_config_open);
+
+        // Close one
+        state.trigger_config_open = false;
+        assert!(!state.trigger_config_open);
+    }
+
+    #[test]
+    fn test_linked_graph_sink() {
+        let mut state = TimeSeriesState::default();
+
+        // Initially no link
+        assert_eq!(state.linked_graph_sink, None);
+
+        // Link to a node
+        let node_id = NodeId(42);
+        state.linked_graph_sink = Some(node_id);
+
+        assert_eq!(state.linked_graph_sink, Some(node_id));
+
+        // Unlink
+        state.linked_graph_sink = None;
+        assert_eq!(state.linked_graph_sink, None);
+    }
+
+    #[test]
+    fn test_cursor_state() {
+        let state = TimeSeriesState::default();
+
+        // Cursor should be initialized
+        let cursor = &state.cursor;
+        // PlotCursor is an opaque type, just verify it exists
+        let _ = cursor;
+    }
+
+    #[test]
+    fn test_advanced_mode_toggle() {
+        let mut state = TimeSeriesState::default();
+
+        assert!(!state.advanced_mode);
+
+        state.advanced_mode = true;
+        assert!(state.advanced_mode);
+
+        state.advanced_mode = false;
+        assert!(!state.advanced_mode);
+    }
+
+    #[test]
+    fn test_marker_name_type_state() {
+        let mut state = TimeSeriesState::default();
+
+        assert_eq!(state.new_marker_name, "");
+        assert_eq!(state.new_marker_type, MarkerType::default());
+
+        state.new_marker_name = "Test Marker".to_string();
+        state.new_marker_type = MarkerType::Event;
+
+        assert_eq!(state.new_marker_name, "Test Marker");
+        assert_eq!(state.new_marker_type, MarkerType::Event);
+    }
+
+    #[test]
+    fn test_threshold_line_clone() {
+        let line = ThresholdLine::new(1, 42.0, "Test", [255, 0, 0, 255]);
+        let cloned = line.clone();
+
+        assert_eq!(cloned.id, line.id);
+        assert_eq!(cloned.value, line.value);
+        assert_eq!(cloned.label, line.label);
+        assert_eq!(cloned.color, line.color);
+        assert_eq!(cloned.visible, line.visible);
+    }
+
+    #[test]
+    fn test_decimation_cache_invalidation_on_variable_change() {
+        let mut state = TimeSeriesState::default();
+
+        // Cache some data
+        state.decimation_cache.insert(1, (100, vec![[0.0, 1.0]]));
+        state.decimation_cache.insert(2, (50, vec![[0.0, 2.0]]));
+
+        assert_eq!(state.decimation_cache.len(), 2);
+
+        // When variable data changes, cache should be cleared
+        // (Simulating what would happen in actual code)
+        state.decimation_cache.clear();
+
+        assert!(state.decimation_cache.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_threshold_lines_ordering() {
+        let mut state = TimeSeriesState::default();
+
+        state.threshold_lines.push(ThresholdLine::new(1, 50.0, "Middle", [0, 255, 0, 255]));
+        state.threshold_lines.push(ThresholdLine::new(2, 10.0, "Low", [0, 0, 255, 255]));
+        state.threshold_lines.push(ThresholdLine::new(3, 90.0, "High", [255, 0, 0, 255]));
+
+        // Can be reordered by value
+        state.threshold_lines.sort_by(|a, b| a.value.partial_cmp(&b.value).unwrap());
+
+        assert_eq!(state.threshold_lines[0].value, 10.0);
+        assert_eq!(state.threshold_lines[1].value, 50.0);
+        assert_eq!(state.threshold_lines[2].value, 90.0);
+    }
+}

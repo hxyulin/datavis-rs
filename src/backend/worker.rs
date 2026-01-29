@@ -770,4 +770,240 @@ mod tests {
         #[cfg(feature = "mock-probe")]
         assert!(!worker.is_using_mock()); // defaults to false
     }
+
+    #[test]
+    fn test_command_processing_order() {
+        let (mut worker, msg_rx, cmd_tx) = create_test_worker();
+
+        // Send multiple commands
+        cmd_tx.send(BackendCommand::SetPollRate(200)).unwrap();
+        cmd_tx.send(BackendCommand::SetPollRate(300)).unwrap();
+        cmd_tx.send(BackendCommand::SetPollRate(500)).unwrap();
+
+        // Process all commands
+        worker.process_commands();
+
+        // Should process in FIFO order, so final rate should be 500
+        assert_eq!(worker.poll_rate_hz, 500);
+
+        // Drain any messages
+        while msg_rx.try_recv().is_ok() {}
+    }
+
+    #[test]
+    fn test_poll_rate_bounds() {
+        let (mut worker, msg_rx, cmd_tx) = create_test_worker();
+
+        // Try to set poll rate to 0 - should clamp to minimum of 1
+        cmd_tx.send(BackendCommand::SetPollRate(0)).unwrap();
+        worker.process_commands();
+        assert!(worker.poll_rate_hz >= 1);
+
+        // Drain any messages
+        while msg_rx.try_recv().is_ok() {}
+    }
+
+    #[test]
+    fn test_variable_add_remove_during_collection() {
+        let (mut worker, msg_rx, _) = create_test_worker();
+
+        // Simulate connected and collecting state
+        worker.connection_status = ConnectionStatus::Connected;
+        worker.collecting = true;
+
+        // Add variable during collection
+        let var1 = Variable::new("test1", 0x20000000, VariableType::U32);
+        worker.add_variable(var1.clone());
+        assert!(worker.variables.contains_key(&var1.id));
+
+        // Add another variable
+        let var2 = Variable::new("test2", 0x20000004, VariableType::F32);
+        worker.add_variable(var2.clone());
+        assert!(worker.variables.contains_key(&var2.id));
+        assert_eq!(worker.variables.len(), 2);
+
+        // Remove first variable
+        worker.remove_variable(var1.id);
+        assert!(!worker.variables.contains_key(&var1.id));
+        assert!(worker.variables.contains_key(&var2.id));
+        assert_eq!(worker.variables.len(), 1);
+
+        // Drain any messages
+        while msg_rx.try_recv().is_ok() {}
+    }
+
+    #[test]
+    fn test_disconnect_stops_collection() {
+        let (mut worker, msg_rx, _) = create_test_worker();
+
+        // Start collection (requires connected state)
+        worker.connection_status = ConnectionStatus::Connected;
+        worker.start_collection();
+        assert!(worker.collecting);
+
+        // Disconnect should stop collection
+        worker.handle_disconnect();
+        assert!(!worker.collecting);
+        assert_eq!(worker.connection_status, ConnectionStatus::Disconnected);
+
+        // Drain any messages
+        while msg_rx.try_recv().is_ok() {}
+    }
+
+    #[test]
+    fn test_stats_initialization() {
+        let (worker, _, _) = create_test_worker();
+
+        assert_eq!(worker.stats.successful_reads, 0);
+        assert_eq!(worker.stats.failed_reads, 0);
+        assert_eq!(worker.stats.total_bytes_read, 0);
+    }
+
+    #[test]
+    fn test_update_variable() {
+        let (mut worker, msg_rx, _) = create_test_worker();
+
+        // Add a variable
+        let var = Variable::new("test", 0x20000000, VariableType::U32);
+        worker.add_variable(var.clone());
+
+        // Update it
+        let mut updated_var = var.clone();
+        updated_var.address = 0x20000100;
+        updated_var.var_type = VariableType::F32;
+        worker.update_variable(updated_var.clone());
+
+        // Verify update
+        let stored_var = worker.variables.get(&var.id).unwrap();
+        assert_eq!(stored_var.address, 0x20000100);
+        assert_eq!(stored_var.var_type, VariableType::F32);
+
+        // Drain any messages
+        while msg_rx.try_recv().is_ok() {}
+    }
+
+    #[test]
+    fn test_clear_data_resets_start_time() {
+        let (mut worker, msg_rx, _) = create_test_worker();
+
+        let initial_time = worker.start_time;
+        std::thread::sleep(Duration::from_millis(10));
+
+        worker.clear_data();
+
+        // Start time should be updated
+        assert!(worker.start_time > initial_time);
+
+        // Drain any messages
+        while msg_rx.try_recv().is_ok() {}
+    }
+
+    #[test]
+    #[cfg(feature = "mock-probe")]
+    fn test_switch_to_mock_probe() {
+        let (mut worker, msg_rx, cmd_tx) = create_test_worker();
+
+        // Initially should not be using mock
+        assert!(!worker.is_mock_probe);
+
+        // Switch to mock probe
+        cmd_tx
+            .send(BackendCommand::UseMockProbe(true))
+            .unwrap();
+        worker.process_commands();
+
+        assert!(worker.is_mock_probe);
+        assert!(worker.is_using_mock());
+
+        // Switch back to real probe
+        cmd_tx
+            .send(BackendCommand::UseMockProbe(false))
+            .unwrap();
+        worker.process_commands();
+
+        assert!(!worker.is_mock_probe);
+        assert!(!worker.is_using_mock());
+
+        // Drain any messages
+        while msg_rx.try_recv().is_ok() {}
+    }
+
+    #[test]
+    fn test_converter_update() {
+        let (mut worker, msg_rx, _) = create_test_worker();
+
+        // Add a variable
+        let var = Variable::new("test", 0x20000000, VariableType::U32);
+        let var_id = var.id;
+        worker.add_variable(var);
+
+        // Update converter script
+        let script = Some("value * 2.0".to_string());
+        worker.handle_command(BackendCommand::UpdateConverter {
+            var_id,
+            var_name: "test".to_string(),
+            script: script.clone(),
+        });
+
+        // Verify variable has the script
+        let stored_var = worker.variables.get(&var_id).unwrap();
+        assert_eq!(stored_var.converter_script, script);
+
+        // Drain any messages
+        while msg_rx.try_recv().is_ok() {}
+    }
+
+    #[test]
+    fn test_multiple_commands_sequential_processing() {
+        let (mut worker, msg_rx, cmd_tx) = create_test_worker();
+
+        // Send multiple different commands
+        let var1 = Variable::new("var1", 0x20000000, VariableType::U32);
+        let var2 = Variable::new("var2", 0x20000004, VariableType::F32);
+
+        cmd_tx
+            .send(BackendCommand::AddVariable(var1.clone()))
+            .unwrap();
+        cmd_tx
+            .send(BackendCommand::AddVariable(var2.clone()))
+            .unwrap();
+        cmd_tx.send(BackendCommand::SetPollRate(250)).unwrap();
+
+        // Process all
+        worker.process_commands();
+
+        // Verify all were processed
+        assert!(worker.variables.contains_key(&var1.id));
+        assert!(worker.variables.contains_key(&var2.id));
+        assert_eq!(worker.poll_rate_hz, 250);
+
+        // Drain any messages
+        while msg_rx.try_recv().is_ok() {}
+    }
+
+    #[test]
+    fn test_data_router_pane_subscription() {
+        let (mut worker, msg_rx, _) = create_test_worker();
+
+        let var1 = Variable::new("var1", 0x20000000, VariableType::U32);
+        let var2 = Variable::new("var2", 0x20000004, VariableType::F32);
+
+        let pane_id = 1;
+        let mut var_ids = std::collections::HashSet::new();
+        var_ids.insert(var1.id);
+        var_ids.insert(var2.id);
+
+        worker.handle_command(BackendCommand::SubscribePane {
+            pane_id,
+            var_ids: var_ids.clone(),
+        });
+
+        // Verify subscription was recorded (data_router is private, so we just
+        // verify the command doesn't panic)
+        // In a real test with access to data_router internals, we'd verify:
+        // assert_eq!(worker.data_router.pane_subscriptions.get(&pane_id), Some(&var_ids));
+
+        // Drain any messages
+        while msg_rx.try_recv().is_ok() {}
+    }
 }

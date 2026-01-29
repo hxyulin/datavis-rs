@@ -153,3 +153,55 @@ impl Pane for WatcherState {
     fn as_any(&self) -> &dyn std::any::Any { self }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_watcher_state_default() {
+        let state = WatcherState::default();
+
+        assert!(!state.show_stats);
+        assert!(!state.show_raw);
+    }
+
+    #[test]
+    fn test_watcher_state_toggles() {
+        let mut state = WatcherState::default();
+
+        // Toggle stats
+        state.show_stats = true;
+        assert!(state.show_stats);
+        assert!(!state.show_raw);
+
+        // Toggle raw
+        state.show_raw = true;
+        assert!(state.show_stats);
+        assert!(state.show_raw);
+
+        // Turn off stats
+        state.show_stats = false;
+        assert!(!state.show_stats);
+        assert!(state.show_raw);
+
+        // Turn off both
+        state.show_raw = false;
+        assert!(!state.show_stats);
+        assert!(!state.show_raw);
+    }
+
+    #[test]
+    fn test_watcher_state_independent_flags() {
+        let mut state = WatcherState::default();
+
+        // Stats and raw are independent
+        state.show_stats = true;
+        state.show_raw = false;
+        assert!(state.show_stats && !state.show_raw);
+
+        state.show_stats = false;
+        state.show_raw = true;
+        assert!(!state.show_stats && state.show_raw);
+    }
+}

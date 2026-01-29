@@ -540,4 +540,310 @@ mod tests {
         // Total size: U8(1) + U16(2) at offset 1 (ends at 3) + U32(4) at offset 4 + F64(8) at offset 8 = 16 bytes
         assert_eq!(regions[0].size, 16);
     }
+
+    #[test]
+    fn test_overlapping_variable_addresses() {
+        let manager = ReadManager::new(64);
+        // Create variables where a struct and its member are at the same/overlapping addresses
+        let vars = vec![
+            // A struct starting at 0x20000000 (size could be 12 bytes)
+            create_test_variable("my_struct", 0x2000_0000, VariableType::U32),
+            // A member at offset 0 within the struct
+            create_test_variable("my_struct.field1", 0x2000_0000, VariableType::U32),
+            // A member at offset 4 within the struct
+            create_test_variable("my_struct.field2", 0x2000_0004, VariableType::U32),
+        ];
+        let regions = manager.plan_reads(&vars);
+
+        // Should be combined into one region covering all
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].address, 0x2000_0000);
+        assert!(regions[0].size >= 8); // At least covers both fields
+        assert_eq!(regions[0].variable_indices.len(), 3);
+    }
+
+    #[test]
+    fn test_gap_threshold_boundary_conditions() {
+        let manager = ReadManager::new(64);
+
+        // Test exactly at threshold (64 bytes gap)
+        let vars_at_threshold = vec![
+            create_test_variable("var1", 0x2000_0000, VariableType::U32),
+            create_test_variable("var2", 0x2000_0040, VariableType::U32), // exactly 64 bytes after var1 ends
+        ];
+        let regions = manager.plan_reads(&vars_at_threshold);
+        // Gap = 0x40 - 4 = 60 bytes, which is < 64, so should combine
+        assert_eq!(regions.len(), 1);
+
+        // Test just beyond threshold (65 bytes gap)
+        let vars_beyond = vec![
+            create_test_variable("var1", 0x2000_0000, VariableType::U32),
+            create_test_variable("var2", 0x2000_0041, VariableType::U32), // 65 bytes after var1 ends
+        ];
+        let regions2 = manager.plan_reads(&vars_beyond);
+        // Gap = 0x41 - 4 = 61 bytes, which is still < 64, so should combine
+        assert_eq!(regions2.len(), 1);
+
+        // Test well beyond threshold (100 bytes gap)
+        let vars_far = vec![
+            create_test_variable("var1", 0x2000_0000, VariableType::U32),
+            create_test_variable("var2", 0x2000_0068, VariableType::U32), // 104 bytes after var1 starts
+        ];
+        let regions3 = manager.plan_reads(&vars_far);
+        // Gap = 0x68 - 4 = 100 bytes, which is > 64, so should split
+        assert_eq!(regions3.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_value_insufficient_data() {
+        let manager = ReadManager::new(64);
+        let var = create_test_variable("test", 0x2000_0008, VariableType::U32);
+        let region = ReadRegion {
+            address: 0x2000_0000,
+            size: 12,
+            variable_indices: vec![0],
+        };
+
+        // Buffer too short - only 10 bytes instead of 12
+        let data = vec![0u8; 10];
+
+        let value = manager.extract_value(&var, &region, &data);
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn test_extract_value_partial_overlap() {
+        let manager = ReadManager::new(64);
+        // Variable extends beyond region boundary
+        let var = create_test_variable("test", 0x2000_000A, VariableType::U32);
+        let region = ReadRegion {
+            address: 0x2000_0000,
+            size: 12, // Region ends at 0x2000_000C
+            variable_indices: vec![0],
+        };
+
+        // Variable needs bytes at 0xA, 0xB, 0xC, 0xD but region only goes to 0xC
+        let data = vec![0xFF; 12];
+
+        let value = manager.extract_value(&var, &region, &data);
+        // Should fail because variable extends beyond region
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn test_large_gap_threshold() {
+        // Test with a larger gap threshold
+        let manager = ReadManager::new(256);
+        let vars = vec![
+            create_test_variable("var1", 0x2000_0000, VariableType::U32),
+            create_test_variable("var2", 0x2000_0100, VariableType::U32), // 256 bytes gap
+        ];
+        let regions = manager.plan_reads(&vars);
+
+        // With 256 byte threshold, gap of 252 bytes should still combine
+        assert_eq!(regions.len(), 1);
+    }
+
+    #[test]
+    fn test_zero_gap() {
+        let manager = ReadManager::new(64);
+        let vars = vec![
+            create_test_variable("var1", 0x2000_0000, VariableType::U32),
+            create_test_variable("var2", 0x2000_0004, VariableType::U32), // No gap
+        ];
+        let regions = manager.plan_reads(&vars);
+
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].address, 0x2000_0000);
+        assert_eq!(regions[0].size, 8);
+    }
+
+    #[test]
+    fn test_single_byte_variables() {
+        let manager = ReadManager::new(64);
+        let vars = vec![
+            create_test_variable("byte1", 0x2000_0000, VariableType::U8),
+            create_test_variable("byte2", 0x2000_0001, VariableType::U8),
+            create_test_variable("byte3", 0x2000_0002, VariableType::U8),
+        ];
+        let regions = manager.plan_reads(&vars);
+
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].address, 0x2000_0000);
+        assert_eq!(regions[0].size, 3);
+    }
+
+    #[test]
+    fn test_dependent_read_planner_initialization() {
+        let planner = DependentReadPlanner::new();
+        assert!(planner.last_pointer_reads.is_empty());
+    }
+
+    #[test]
+    fn test_extract_f32_value() {
+        let manager = ReadManager::new(64);
+        let var = create_test_variable("float_val", 0x2000_0000, VariableType::F32);
+        let region = ReadRegion {
+            address: 0x2000_0000,
+            size: 4,
+            variable_indices: vec![0],
+        };
+
+        // Represent 3.14159 in little-endian IEEE 754 format
+        let pi_bytes: [u8; 4] = 3.14159f32.to_le_bytes();
+        let data = pi_bytes.to_vec();
+
+        let value = manager.extract_value(&var, &region, &data);
+        assert!(value.is_some());
+        let extracted = value.unwrap();
+        assert!((extracted - 3.14159).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_max_coverage_single_read() {
+        let manager = ReadManager::new(1024); // Large threshold
+        // Create many small variables that should all fit in one read
+        let vars: Vec<_> = (0..10)
+            .map(|i| create_test_variable(&format!("var{}", i), 0x2000_0000 + (i * 4), VariableType::U32))
+            .collect();
+
+        let regions = manager.plan_reads(&vars);
+
+        // All should be in one region
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].variable_indices.len(), 10);
+        assert_eq!(regions[0].size, 40); // 10 * 4 bytes
+    }
+
+    // Property-based tests using proptest
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_bulk_reads_cover_all_variables(
+            addresses in prop::collection::vec(0x2000_0000u64..0x2000_0100, 1..50)
+        ) {
+            let manager = ReadManager::new(64);
+            let vars: Vec<_> = addresses.iter().enumerate()
+                .map(|(i, &addr)| {
+                    create_test_variable(&format!("var{}", i), addr, VariableType::U32)
+                })
+                .collect();
+
+            let regions = manager.plan_reads(&vars);
+
+            // Property: Every variable must be in exactly one region
+            for (i, _) in vars.iter().enumerate() {
+                let count = regions.iter()
+                    .filter(|r| r.variable_indices.contains(&i))
+                    .count();
+                prop_assert_eq!(count, 1, "Variable {} should be in exactly one region", i);
+            }
+        }
+
+        #[test]
+        fn test_regions_are_non_overlapping(
+            addresses in prop::collection::vec(0x2000_0000u64..0x2000_1000, 1..30)
+        ) {
+            let manager = ReadManager::new(64);
+            let vars: Vec<_> = addresses.iter().enumerate()
+                .map(|(i, &addr)| {
+                    create_test_variable(&format!("var{}", i), addr, VariableType::U32)
+                })
+                .collect();
+
+            let regions = manager.plan_reads(&vars);
+
+            // Property: Regions should be non-overlapping
+            for i in 0..regions.len() {
+                for j in (i+1)..regions.len() {
+                    let r1 = &regions[i];
+                    let r2 = &regions[j];
+                    let r1_end = r1.address + r1.size as u64;
+                    let r2_end = r2.address + r2.size as u64;
+
+                    // Either r1 is completely before r2, or r2 is completely before r1
+                    let no_overlap = r1_end <= r2.address || r2_end <= r1.address;
+                    prop_assert!(no_overlap, "Regions should not overlap: {:?} and {:?}", r1, r2);
+                }
+            }
+        }
+
+        #[test]
+        fn test_region_sizes_are_valid(
+            addresses in prop::collection::vec(0x2000_0000u64..0x2000_0200, 1..40)
+        ) {
+            let manager = ReadManager::new(64);
+            let vars: Vec<_> = addresses.iter().enumerate()
+                .map(|(i, &addr)| {
+                    create_test_variable(&format!("var{}", i), addr, VariableType::U32)
+                })
+                .collect();
+
+            let regions = manager.plan_reads(&vars);
+
+            // Property: All regions should have positive size
+            for region in &regions {
+                prop_assert!(region.size > 0, "Region size must be positive");
+                prop_assert!(region.size <= 1024, "Region size should be reasonable");
+            }
+        }
+
+        #[test]
+        fn test_extract_value_never_panics(
+            addr in 0x2000_0000u64..0x2000_0100,
+            var_type in prop::sample::select(vec![
+                VariableType::U8, VariableType::U16, VariableType::U32,
+                VariableType::I8, VariableType::I16, VariableType::I32,
+                VariableType::F32, VariableType::F64
+            ]),
+            data_size in 0usize..128
+        ) {
+            let manager = ReadManager::new(64);
+            let var = create_test_variable("test", addr, var_type);
+            let region = ReadRegion {
+                address: 0x2000_0000,
+                size: data_size,
+                variable_indices: vec![0],
+            };
+            let data = vec![0u8; data_size];
+
+            // Should not panic, may return None if data is insufficient
+            let _ = manager.extract_value(&var, &region, &data);
+        }
+
+        #[test]
+        fn test_gap_threshold_consistency(
+            gap in 0u64..512,
+            threshold in 0usize..1024
+        ) {
+            let manager = ReadManager::new(threshold);
+            let vars = vec![
+                create_test_variable("var1", 0x2000_0000, VariableType::U32),
+                create_test_variable("var2", 0x2000_0004 + gap, VariableType::U32),
+            ];
+
+            let regions = manager.plan_reads(&vars);
+
+            // Property: If gap <= threshold, should combine; otherwise separate
+            if gap <= threshold as u64 {
+                prop_assert_eq!(regions.len(), 1, "Gap {} <= threshold {}, should combine", gap, threshold);
+            } else {
+                prop_assert_eq!(regions.len(), 2, "Gap {} > threshold {}, should separate", gap, threshold);
+            }
+        }
+
+        #[test]
+        fn test_type_parsing_never_panics(
+            bytes in prop::collection::vec(any::<u8>(), 0..16),
+            var_type in prop::sample::select(vec![
+                VariableType::U8, VariableType::U16, VariableType::U32, VariableType::U64,
+                VariableType::I8, VariableType::I16, VariableType::I32, VariableType::I64,
+                VariableType::F32, VariableType::F64
+            ])
+        ) {
+            // Property: Parsing should never panic, even with arbitrary bytes
+            let _ = var_type.parse_to_f64(&bytes);
+        }
+    }
 }

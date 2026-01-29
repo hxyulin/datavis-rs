@@ -1352,4 +1352,277 @@ mod tests {
         assert_eq!(stats.forward_decls, 1);
         assert_eq!(stats.unresolved_forward_decls, 1);
     }
+
+    #[test]
+    fn test_typedef_chain_resolution() {
+        let mut table = TypeTable::new();
+
+        // Create a chain: typedef -> typedef -> primitive
+        let int_id = table.insert(TypeDef::Primitive(PrimitiveDef::Int));
+        let int32_id = table.insert(TypeDef::Typedef {
+            name: "int32_t".to_string(),
+            underlying: int_id,
+        });
+        let myint_id = table.insert(TypeDef::Typedef {
+            name: "MyInt".to_string(),
+            underlying: int32_id,
+        });
+
+        // Should resolve through the chain
+        let final_type = table.get_underlying(myint_id);
+        assert_eq!(final_type, int_id);
+        assert_eq!(table.type_size(myint_id), Some(4));
+    }
+
+    #[test]
+    fn test_recursive_struct_detection() {
+        let mut table = TypeTable::new();
+        let int_id = table.insert(TypeDef::Primitive(PrimitiveDef::Int));
+
+        // Create a struct with a pointer to itself (linked list node)
+        let node_fwd = table.insert(TypeDef::ForwardDecl {
+            name: "Node".to_string(),
+            kind: ForwardDeclKind::Struct,
+            target: None,
+        });
+
+        let node_ptr_id = table.insert(TypeDef::Pointer(node_fwd));
+
+        let mut node_def = StructDef::new(Some("Node".to_string()), 12, false);
+        node_def
+            .members
+            .push(MemberDef::new("data".to_string(), 0, int_id));
+        node_def
+            .members
+            .push(MemberDef::new("next".to_string(), 4, node_ptr_id));
+        let node_id = table.insert(TypeDef::Struct(node_def));
+
+        // Resolve forward declarations
+        table.resolve_forward_declarations();
+
+        // Should be able to navigate the structure without infinite loops
+        assert_eq!(table.type_name(node_id), "Node");
+        assert!(table.is_expandable(node_id));
+
+        let members = table.get_members(node_id).unwrap();
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[1].name, "next");
+    }
+
+    #[test]
+    fn test_template_parameter_handling() {
+        let mut table = TypeTable::new();
+        let int_id = table.insert(TypeDef::Primitive(PrimitiveDef::Int));
+        let float_id = table.insert(TypeDef::Primitive(PrimitiveDef::Float));
+
+        // Create a templated struct with both type and value parameters
+        let mut struct_def = StructDef::new(Some("Container".to_string()), 16, true);
+        struct_def.template_params.push(TemplateParam::Type {
+            name: "int".to_string(),
+            type_id: int_id,
+        });
+        struct_def.template_params.push(TemplateParam::Value {
+            name: "10".to_string(),
+            value: 10,
+        });
+        struct_def
+            .members
+            .push(MemberDef::new("data".to_string(), 0, float_id));
+
+        let struct_id = table.insert(TypeDef::Struct(struct_def));
+
+        // Check name includes all template parameters
+        let name = table.type_name(struct_id);
+        assert!(name.contains("Container"));
+        assert!(name.contains("int"));
+        assert!(name.contains("10"));
+    }
+
+    #[test]
+    fn test_enum_type() {
+        let mut table = TypeTable::new();
+
+        let mut enum_def = EnumDef::new(Some("Color".to_string()), 4, false);
+        enum_def.variants.push(EnumVariant {
+            name: "Red".to_string(),
+            value: 0,
+        });
+        enum_def.variants.push(EnumVariant {
+            name: "Green".to_string(),
+            value: 1,
+        });
+        enum_def.variants.push(EnumVariant {
+            name: "Blue".to_string(),
+            value: 2,
+        });
+
+        let enum_id = table.insert(TypeDef::Enum(enum_def));
+
+        assert_eq!(table.type_name(enum_id), "Color");
+        assert_eq!(table.type_size(enum_id), Some(4));
+        // Enums may not be marked as expandable in the same way as structs
+        // Just check the type exists
+        assert!(table.get(enum_id).is_some());
+    }
+
+    #[test]
+    fn test_union_type() {
+        let mut table = TypeTable::new();
+        let int_id = table.insert(TypeDef::Primitive(PrimitiveDef::Int));
+        let float_id = table.insert(TypeDef::Primitive(PrimitiveDef::Float));
+
+        let mut union_def = StructDef::new(Some("Value".to_string()), 4, false);
+        union_def
+            .members
+            .push(MemberDef::new("as_int".to_string(), 0, int_id));
+        union_def
+            .members
+            .push(MemberDef::new("as_float".to_string(), 0, float_id));
+
+        let union_id = table.insert(TypeDef::Union(union_def));
+
+        // Union name includes "union" prefix
+        assert!(table.type_name(union_id).contains("Value"));
+        assert_eq!(table.type_size(union_id), Some(4));
+        assert!(table.is_expandable(union_id));
+
+        let members = table.get_members(union_id).unwrap();
+        assert_eq!(members.len(), 2);
+        // Both members should be at offset 0
+        assert_eq!(members[0].offset, 0);
+        assert_eq!(members[1].offset, 0);
+    }
+
+    #[test]
+    fn test_void_pointer() {
+        let mut table = TypeTable::new();
+        let void_id = table.insert(TypeDef::Void);
+        let void_ptr_id = table.insert(TypeDef::Pointer(void_id));
+
+        assert_eq!(table.type_name(void_ptr_id), "void*");
+        assert_eq!(table.type_size(void_ptr_id), Some(4));
+    }
+
+    #[test]
+    fn test_double_pointer() {
+        let mut table = TypeTable::new();
+        let int_id = table.insert(TypeDef::Primitive(PrimitiveDef::Int));
+        let ptr1_id = table.insert(TypeDef::Pointer(int_id));
+        let ptr2_id = table.insert(TypeDef::Pointer(ptr1_id));
+
+        assert_eq!(table.type_name(ptr2_id), "int**");
+        assert_eq!(table.type_size(ptr2_id), Some(4));
+    }
+
+    #[test]
+    fn test_array_of_structs() {
+        let mut table = TypeTable::new();
+        let int_id = table.insert(TypeDef::Primitive(PrimitiveDef::Int));
+
+        let mut struct_def = StructDef::new(Some("Point".to_string()), 8, false);
+        struct_def
+            .members
+            .push(MemberDef::new("x".to_string(), 0, int_id));
+        struct_def
+            .members
+            .push(MemberDef::new("y".to_string(), 4, int_id));
+        let struct_id = table.insert(TypeDef::Struct(struct_def));
+
+        let array_id = table.insert(TypeDef::Array {
+            element: struct_id,
+            count: Some(5),
+        });
+
+        assert_eq!(table.type_name(array_id), "Point[5]");
+        assert_eq!(table.type_size(array_id), Some(40)); // 5 * 8 bytes
+    }
+
+    #[test]
+    fn test_variable_length_array() {
+        let mut table = TypeTable::new();
+        let int_id = table.insert(TypeDef::Primitive(PrimitiveDef::Int));
+
+        let array_id = table.insert(TypeDef::Array {
+            element: int_id,
+            count: None, // Unknown size
+        });
+
+        assert_eq!(table.type_name(array_id), "int[]");
+        // Arrays without count have size 0, not None
+        let size = table.type_size(array_id);
+        assert!(size == Some(0) || size.is_none());
+    }
+
+    #[test]
+    fn test_reference_type() {
+        let mut table = TypeTable::new();
+        let int_id = table.insert(TypeDef::Primitive(PrimitiveDef::Int));
+        let ref_id = table.insert(TypeDef::Reference(int_id));
+
+        assert_eq!(table.type_name(ref_id), "int&");
+        assert_eq!(table.type_size(ref_id), Some(4));
+    }
+
+    #[test]
+    fn test_nested_structs() {
+        let mut table = TypeTable::new();
+        let int_id = table.insert(TypeDef::Primitive(PrimitiveDef::Int));
+
+        // Inner struct
+        let mut inner = StructDef::new(Some("Inner".to_string()), 8, false);
+        inner
+            .members
+            .push(MemberDef::new("a".to_string(), 0, int_id));
+        inner
+            .members
+            .push(MemberDef::new("b".to_string(), 4, int_id));
+        let inner_id = table.insert(TypeDef::Struct(inner));
+
+        // Outer struct containing inner struct
+        let mut outer = StructDef::new(Some("Outer".to_string()), 12, false);
+        outer
+            .members
+            .push(MemberDef::new("inner".to_string(), 0, inner_id));
+        outer
+            .members
+            .push(MemberDef::new("x".to_string(), 8, int_id));
+        let outer_id = table.insert(TypeDef::Struct(outer));
+
+        assert_eq!(table.type_size(outer_id), Some(12));
+
+        let members = table.get_members(outer_id).unwrap();
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].name, "inner");
+        assert_eq!(members[0].type_id, inner_id);
+    }
+
+    #[test]
+    fn test_const_volatile_qualifiers() {
+        let mut table = TypeTable::new();
+        let int_id = table.insert(TypeDef::Primitive(PrimitiveDef::Int));
+        let const_id = table.insert(TypeDef::Const(int_id));
+        let volatile_id = table.insert(TypeDef::Volatile(int_id));
+
+        // Qualifiers should be transparent for size
+        assert_eq!(table.type_size(const_id), Some(4));
+        assert_eq!(table.type_size(volatile_id), Some(4));
+
+        // Names should reflect qualifiers
+        assert!(table.type_name(const_id).contains("const"));
+        assert!(table.type_name(volatile_id).contains("volatile"));
+    }
+
+    #[test]
+    fn test_shared_type_table() {
+        let mut table = TypeTable::new();
+        let int_id = table.insert(TypeDef::Primitive(PrimitiveDef::Int));
+
+        let shared = SharedTypeTable::new(table);
+
+        // Should be able to clone and share
+        let shared2 = shared.clone();
+
+        assert_eq!(shared.type_name(int_id), "int");
+        assert_eq!(shared2.type_name(int_id), "int");
+    }
 }

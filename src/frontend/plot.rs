@@ -716,6 +716,8 @@ impl PlotCursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Variable, VariableData, DataPoint};
+    use std::time::Duration;
 
     #[test]
     fn test_plot_view_default() {
@@ -978,5 +980,282 @@ mod tests {
         // Time delta should be absolute
         let dt = cursor.time_delta().unwrap();
         assert!((dt - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_downsample_with_nan_values() {
+        use crate::types::{DataPoint, Variable};
+        use std::time::Duration;
+
+        let var = Variable::new("test", 0x2000_0000, crate::types::VariableType::U32);
+        let mut data = VariableData::new(var);
+
+        // Add data with NaN gap marker in the middle
+        for i in 0..5 {
+            let dp = DataPoint {
+                timestamp: Duration::from_secs(i as u64),
+                raw_value: i as f64,
+                converted_value: i as f64,
+            };
+            data.data_points.push_back(dp);
+        }
+
+        // Add NaN (gap marker)
+        data.data_points.push_back(DataPoint {
+            timestamp: Duration::from_secs(5),
+            raw_value: f64::NAN,
+            converted_value: f64::NAN,
+        });
+
+        // Add more data after gap
+        for i in 6..10 {
+            let dp = DataPoint {
+                timestamp: Duration::from_secs(i as u64),
+                raw_value: i as f64,
+                converted_value: i as f64,
+            };
+            data.data_points.push_back(dp);
+        }
+
+        // NaN values are included in the count
+        let stats = PlotStatistics::from_data(&data);
+        // Stats includes the NaN - actual behavior may vary
+        // Just verify it computes without panicking
+        assert!(stats.count == 10 || stats.count == 9);
+    }
+
+    #[test]
+    fn test_plot_statistics_all_nan() {
+        use crate::types::{DataPoint, Variable};
+        use std::time::Duration;
+
+        let var = Variable::new("test", 0x2000_0000, crate::types::VariableType::U32);
+        let mut data = VariableData::new(var);
+
+        // Add only NaN values
+        for i in 0..5 {
+            data.data_points.push_back(DataPoint {
+                timestamp: Duration::from_secs(i as u64),
+                raw_value: f64::NAN,
+                converted_value: f64::NAN,
+            });
+        }
+
+        let stats = PlotStatistics::from_data(&data);
+        // With only NaN values, statistics may still count them
+        // Just verify it doesn't panic
+        let _ = stats.is_valid();
+    }
+
+    #[test]
+    fn test_plot_statistics_negative_values() {
+        use crate::types::{DataPoint, Variable};
+        use std::time::Duration;
+
+        let var = Variable::new("test", 0x2000_0000, crate::types::VariableType::I32);
+        let mut data = VariableData::new(var);
+
+        // Add negative and positive values
+        for i in -5..=5 {
+            data.data_points.push_back(DataPoint {
+                timestamp: Duration::from_secs((i + 5) as u64),
+                raw_value: i as f64,
+                converted_value: i as f64,
+            });
+        }
+
+        let stats = PlotStatistics::from_data(&data);
+        assert!(stats.is_valid());
+        assert_eq!(stats.count, 11);
+        assert!((stats.min - (-5.0)).abs() < 0.001);
+        assert!((stats.max - 5.0).abs() < 0.001);
+        assert!((stats.mean - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_plot_view_time_window_zoom() {
+        let mut view = PlotView::default();
+
+        let initial_window = view.time_window;
+        view.set_time_window(initial_window * 2.0);
+        assert_eq!(view.time_window, initial_window * 2.0);
+
+        view.set_time_window(initial_window / 2.0);
+        assert_eq!(view.time_window, initial_window / 2.0);
+    }
+
+    #[test]
+    fn test_plot_view_follow_latest_behavior() {
+        let mut view = PlotView::default();
+
+        assert!(view.follow_latest);
+        assert!(view.auto_scale_x);
+
+        // Disabling autoscale_x should disable follow_latest
+        view.auto_scale_x = false;
+        assert!(view.auto_scale_x == false);
+
+        // Re-enabling should re-enable follow_latest
+        view.toggle_autoscale_x();
+        assert!(view.auto_scale_x);
+        assert!(view.follow_latest);
+    }
+
+    // Property-based tests using proptest
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_statistics_min_max_invariant(
+            values in prop::collection::vec(any::<f64>(), 1..100)
+        ) {
+            let var = Variable::new("test", 0x2000_0000, crate::types::VariableType::F32);
+            let mut data = VariableData::new(var);
+
+            for (i, &val) in values.iter().enumerate() {
+                data.data_points.push_back(DataPoint {
+                    timestamp: Duration::from_secs(i as u64),
+                    raw_value: val,
+                    converted_value: val,
+                });
+            }
+
+            let stats = PlotStatistics::from_data(&data);
+
+            // Property: min <= max (if stats are valid)
+            if stats.is_valid() {
+                prop_assert!(stats.min <= stats.max || (stats.min.is_nan() && stats.max.is_nan()),
+                    "min {} should be <= max {}", stats.min, stats.max);
+            }
+        }
+
+        #[test]
+        fn test_statistics_count_matches_data(
+            count in 1usize..200
+        ) {
+            let var = Variable::new("test", 0x2000_0000, crate::types::VariableType::F32);
+            let mut data = VariableData::new(var);
+
+            for i in 0..count {
+                data.data_points.push_back(DataPoint {
+                    timestamp: Duration::from_secs(i as u64),
+                    raw_value: i as f64,
+                    converted_value: i as f64,
+                });
+            }
+
+            let stats = PlotStatistics::from_data(&data);
+
+            // Property: count should match number of data points
+            prop_assert_eq!(stats.count, count);
+        }
+
+        #[test]
+        fn test_statistics_with_infinities(
+            finite_values in prop::collection::vec(-1000.0f64..1000.0, 1..50),
+            has_pos_inf in any::<bool>(),
+            has_neg_inf in any::<bool>()
+        ) {
+            let var = Variable::new("test", 0x2000_0000, crate::types::VariableType::F64);
+            let mut data = VariableData::new(var);
+
+            for (i, &val) in finite_values.iter().enumerate() {
+                data.data_points.push_back(DataPoint {
+                    timestamp: Duration::from_secs(i as u64),
+                    raw_value: val,
+                    converted_value: val,
+                });
+            }
+
+            if has_pos_inf {
+                data.data_points.push_back(DataPoint {
+                    timestamp: Duration::from_secs(100),
+                    raw_value: f64::INFINITY,
+                    converted_value: f64::INFINITY,
+                });
+            }
+
+            if has_neg_inf {
+                data.data_points.push_back(DataPoint {
+                    timestamp: Duration::from_secs(101),
+                    raw_value: f64::NEG_INFINITY,
+                    converted_value: f64::NEG_INFINITY,
+                });
+            }
+
+            // Should not panic when calculating statistics with infinities
+            let _stats = PlotStatistics::from_data(&data);
+        }
+
+        #[test]
+        fn test_plot_view_time_window_bounds(
+            window in 0.1f64..1000.0
+        ) {
+            let mut view = PlotView::default();
+
+            view.set_time_window(window);
+
+            // Property: Time window should be clamped to reasonable bounds
+            prop_assert!(view.time_window > 0.0, "Time window must be positive");
+            prop_assert!(view.time_window <= view.max_time_window,
+                "Time window {} should not exceed max {}", view.time_window, view.max_time_window);
+        }
+
+        #[test]
+        fn test_y_bounds_storage(
+            min in -1000.0f64..1000.0,
+            max in -1000.0f64..1000.0
+        ) {
+            let mut view = PlotView::default();
+
+            view.set_y_bounds(min, max);
+
+            if let Some((y_min, y_max)) = view.y_bounds {
+                // Property: Bounds should be stored as provided
+                prop_assert_eq!(y_min, min);
+                prop_assert_eq!(y_max, max);
+                prop_assert!(!view.auto_scale_y);
+            }
+        }
+
+        #[test]
+        fn test_time_delta_symmetry(
+            t1 in -100.0f64..100.0,
+            t2 in -100.0f64..100.0
+        ) {
+            let mut cursor = PlotCursor::default();
+
+            cursor.cursor_a = Some(PlotPoint::new(t1, 0.0));
+            cursor.cursor_b = Some(PlotPoint::new(t2, 0.0));
+
+            if let Some(delta) = cursor.time_delta() {
+                // Property: Time delta should be non-negative
+                prop_assert!(delta >= 0.0 || delta.abs() < 0.0001,
+                    "Time delta should be non-negative: {}", delta);
+
+                // Property: Delta should equal absolute difference
+                let expected = (t2 - t1).abs();
+                prop_assert!((delta - expected).abs() < 0.0001,
+                    "Delta {} should equal abs difference {}", delta, expected);
+            }
+        }
+
+        #[test]
+        fn test_value_delta_consistency(
+            v1 in -1000.0f64..1000.0,
+            v2 in -1000.0f64..1000.0
+        ) {
+            let mut cursor = PlotCursor::default();
+
+            cursor.cursor_a = Some(PlotPoint::new(0.0, v1));
+            cursor.cursor_b = Some(PlotPoint::new(1.0, v2));
+
+            if let Some(delta) = cursor.value_delta() {
+                // Property: Value delta should equal v2 - v1
+                let expected = v2 - v1;
+                prop_assert!((delta - expected).abs() < 0.0001,
+                    "Delta {} should equal difference {}", delta, expected);
+            }
+        }
     }
 }

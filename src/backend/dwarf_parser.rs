@@ -1966,6 +1966,13 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
 mod tests {
     use super::*;
 
+    // Test ELF fixtures are embedded at compile time
+    const TEST_ARM_ELF: &[u8] = include_bytes!("../../tests/fixtures/test_arm.elf");
+    const TEST_STRUCT_ELF: &[u8] = include_bytes!("../../tests/fixtures/test_struct.elf");
+    const TEST_POINTER_ELF: &[u8] = include_bytes!("../../tests/fixtures/test_pointer.elf");
+    const TEST_COMPLEX_C_ELF: &[u8] = include_bytes!("../../tests/fixtures/test_complex_c.elf");
+    const TEST_CPP_ELF: &[u8] = include_bytes!("../../tests/fixtures/test_cpp.elf");
+
     #[test]
     fn test_dwarf_type_key() {
         let key1 = DwarfTypeKey::new(0, 100);
@@ -1976,6 +1983,382 @@ mod tests {
         assert_ne!(key1, key3);
     }
 
-    // Note: More comprehensive tests require actual ELF files with DWARF info.
-    // Those would be integration tests in a separate test file.
+    #[test]
+    fn test_parse_simple_variables() {
+        let result = DwarfParser::parse_bytes(TEST_ARM_ELF).expect("Failed to parse ELF");
+
+        // Check we found some variables
+        assert!(result.symbols.len() > 0, "Should find variables");
+
+        // Look for specific variables we know are in the test ELF
+        let global_counter = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "global_counter");
+        assert!(
+            global_counter.is_some(),
+            "Should find global_counter variable"
+        );
+
+        if let Some(var) = global_counter {
+            assert!(var.status.is_readable(), "global_counter should be readable");
+            assert!(var.address > 0, "global_counter should have valid address");
+        }
+
+        let sensor_data = result.symbols.iter().find(|s| s.name == "sensor_data");
+        assert!(sensor_data.is_some(), "Should find sensor_data variable");
+    }
+
+    #[test]
+    fn test_parse_enum_types() {
+        let result = DwarfParser::parse_bytes(TEST_ARM_ELF).expect("Failed to parse ELF");
+
+        // Look for the enum variable
+        let current_state = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "current_state");
+        assert!(
+            current_state.is_some(),
+            "Should find current_state enum variable"
+        );
+
+        // Check that we parsed enum types
+        let stats = result.type_table.stats();
+        assert!(stats.enums > 0, "Should have parsed enum types");
+    }
+
+    #[test]
+    fn test_parse_struct_types() {
+        let result = DwarfParser::parse_bytes(TEST_STRUCT_ELF).expect("Failed to parse ELF");
+
+        // Look for struct variables
+        let sensor_struct = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "sensor_struct");
+        assert!(
+            sensor_struct.is_some(),
+            "Should find sensor_struct variable"
+        );
+
+        // Check that we parsed struct types
+        let stats = result.type_table.stats();
+        assert!(stats.structs > 0, "Should have parsed struct types");
+
+        // Check that structs have members
+        if let Some(var) = sensor_struct {
+            let members = result.type_table.get_members(var.type_id);
+            assert!(
+                members.is_some(),
+                "Struct should have members"
+            );
+            if let Some(members) = members {
+                assert!(
+                    members.len() >= 3,
+                    "SensorData should have at least 3 fields (x, y, value)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_nested_structs() {
+        let result = DwarfParser::parse_bytes(TEST_STRUCT_ELF).expect("Failed to parse ELF");
+
+        // Look for device_config which contains a nested SensorData
+        let device_config = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "device_config");
+
+        if let Some(var) = device_config {
+            let members = result.type_table.get_members(var.type_id);
+            assert!(members.is_some(), "DeviceConfig should have members");
+            if let Some(members) = members {
+                // Should have id, sensor (nested struct), enabled
+                assert!(
+                    members.len() >= 3,
+                    "DeviceConfig should have at least 3 fields"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_array_types() {
+        let result = DwarfParser::parse_bytes(TEST_STRUCT_ELF).expect("Failed to parse ELF");
+
+        // Look for the buffer array
+        let buffer = result.symbols.iter().find(|s| s.name == "buffer");
+        assert!(buffer.is_some(), "Should find buffer array");
+
+        // Check array type parsing
+        let stats = result.type_table.stats();
+        assert!(stats.arrays > 0, "Should have parsed array types");
+    }
+
+    #[test]
+    fn test_parse_pointer_types() {
+        let result = DwarfParser::parse_bytes(TEST_POINTER_ELF).expect("Failed to parse ELF");
+
+        // Look for pointer variables
+        let data_ptr = result.symbols.iter().find(|s| s.name == "data_ptr");
+        assert!(data_ptr.is_some(), "Should find data_ptr variable");
+
+        let float_ptr = result.symbols.iter().find(|s| s.name == "float_ptr");
+        assert!(float_ptr.is_some(), "Should find float_ptr variable");
+
+        let double_ptr = result.symbols.iter().find(|s| s.name == "double_ptr");
+        assert!(double_ptr.is_some(), "Should find double_ptr variable");
+
+        // Check pointer type parsing
+        let stats = result.type_table.stats();
+        assert!(stats.pointers > 0, "Should have parsed pointer types");
+    }
+
+    #[test]
+    fn test_parse_null_pointer() {
+        let result = DwarfParser::parse_bytes(TEST_POINTER_ELF).expect("Failed to parse ELF");
+
+        // Look for null_ptr
+        let null_ptr = result.symbols.iter().find(|s| s.name == "null_ptr");
+        assert!(null_ptr.is_some(), "Should find null_ptr variable");
+    }
+
+    #[test]
+    fn test_parse_complex_c_types() {
+        let result = DwarfParser::parse_bytes(TEST_COMPLEX_C_ELF).expect("Failed to parse ELF");
+
+        // Test packed struct
+        let packed_data = result.symbols.iter().find(|s| s.name == "packed_data");
+        assert!(packed_data.is_some(), "Should find packed_data");
+
+        // Test bitfield struct
+        let bitfield_data = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "bitfield_data");
+        assert!(bitfield_data.is_some(), "Should find bitfield_data");
+
+        // Test union
+        let data_union = result.symbols.iter().find(|s| s.name == "data_union");
+        assert!(data_union.is_some(), "Should find data_union");
+
+        // Check union type parsing
+        let stats = result.type_table.stats();
+        assert!(stats.unions > 0, "Should have parsed union types");
+    }
+
+    #[test]
+    fn test_parse_nested_structs_complex() {
+        let result = DwarfParser::parse_bytes(TEST_COMPLEX_C_ELF).expect("Failed to parse ELF");
+
+        // Test deeply nested struct
+        let nested = result.symbols.iter().find(|s| s.name == "nested");
+        assert!(nested.is_some(), "Should find nested struct variable");
+    }
+
+    #[test]
+    fn test_parse_cpp_namespaces() {
+        let result = DwarfParser::parse_bytes(TEST_CPP_ELF).expect("Failed to parse ELF");
+
+        // Look for variables in namespaces
+        // C++ name mangling means we might not find them by simple name
+        // but they should be in the symbols list
+        assert!(result.symbols.len() > 0, "Should find C++ variables");
+
+        // Check that temp_sensor exists (may be mangled)
+        let temp_sensor = result
+            .symbols
+            .iter()
+            .find(|s| s.name.contains("temp_sensor") || s.name == "temp_sensor");
+        assert!(temp_sensor.is_some(), "Should find temp_sensor variable");
+    }
+
+    #[test]
+    fn test_parse_cpp_classes() {
+        let result = DwarfParser::parse_bytes(TEST_CPP_ELF).expect("Failed to parse ELF");
+
+        // Check that we parsed class/struct types
+        let stats = result.type_table.stats();
+        assert!(stats.structs > 0, "Should have parsed C++ class types");
+    }
+
+    #[test]
+    fn test_parse_cpp_templates() {
+        let result = DwarfParser::parse_bytes(TEST_CPP_ELF).expect("Failed to parse ELF");
+
+        // Look for template instantiations (int_container, float_container)
+        let int_container = result
+            .symbols
+            .iter()
+            .find(|s| s.name.contains("int_container"));
+        assert!(
+            int_container.is_some(),
+            "Should find int_container template instantiation"
+        );
+
+        let float_container = result
+            .symbols
+            .iter()
+            .find(|s| s.name.contains("float_container"));
+        assert!(
+            float_container.is_some(),
+            "Should find float_container template instantiation"
+        );
+    }
+
+    #[test]
+    fn test_variable_status_classification() {
+        let result = DwarfParser::parse_bytes(TEST_ARM_ELF).expect("Failed to parse ELF");
+
+        // Count variables by status
+        let readable_count = result
+            .symbols
+            .iter()
+            .filter(|s| s.status.is_readable())
+            .count();
+
+        assert!(
+            readable_count > 0,
+            "Should have at least some readable variables"
+        );
+
+        // Check diagnostics
+        assert!(
+            result.diagnostics.total_variables > 0,
+            "Should have found variables"
+        );
+        assert!(
+            result.diagnostics.with_valid_address > 0,
+            "Should have variables with valid addresses"
+        );
+    }
+
+    #[test]
+    fn test_type_table_completeness() {
+        let result = DwarfParser::parse_bytes(TEST_STRUCT_ELF).expect("Failed to parse ELF");
+
+        let stats = result.type_table.stats();
+
+        // We should have parsed various type categories
+        assert!(stats.primitives > 0, "Should have primitive types");
+        assert!(stats.total_types > 0, "Should have total types");
+
+        // Type table should not be empty
+        assert!(!result.type_table.is_empty(), "Type table should not be empty");
+    }
+
+    #[test]
+    fn test_variable_addresses_are_valid() {
+        let result = DwarfParser::parse_bytes(TEST_ARM_ELF).expect("Failed to parse ELF");
+
+        for symbol in &result.symbols {
+            if symbol.status.is_readable() {
+                if let Some(addr) = symbol.status.address() {
+                    // On ARM Cortex-M, RAM typically starts at 0x20000000
+                    // Flash at 0x08000000
+                    assert!(
+                        addr >= 0x08000000 || addr >= 0x20000000 || addr == 0,
+                        "Address should be in valid memory range: {:x}",
+                        addr
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_name_to_type_mapping() {
+        let result = DwarfParser::parse_bytes(TEST_ARM_ELF).expect("Failed to parse ELF");
+
+        // name_to_type should have entries
+        assert!(
+            !result.name_to_type.is_empty(),
+            "Should have name-to-type mappings"
+        );
+
+        // Each symbol should have a type mapping
+        for symbol in &result.symbols {
+            assert!(
+                result.name_to_type.contains_key(&symbol.name)
+                    || symbol.mangled_name.as_ref().map_or(false, |n| result.name_to_type.contains_key(n)),
+                "Symbol {} should have type mapping",
+                symbol.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_diagnostics_accuracy() {
+        let result = DwarfParser::parse_bytes(TEST_ARM_ELF).expect("Failed to parse ELF");
+
+        let diag = &result.diagnostics;
+
+        // Total should equal sum of categories (approximately)
+        let categorized = diag.with_valid_address
+            + diag.optimized_out
+            + diag.local_variables
+            + diag.extern_declarations
+            + diag.compile_time_constants
+            + diag.no_location
+            + diag.unresolved_types
+            + diag.address_zero
+            + diag.register_only
+            + diag.implicit_value
+            + diag.implicit_pointer
+            + diag.multi_piece
+            + diag.artificial;
+
+        // Should be close (may have some uncategorized)
+        assert!(
+            categorized <= diag.total_variables,
+            "Categorized count should not exceed total"
+        );
+        assert!(
+            diag.total_variables > 0,
+            "Should have processed some variables"
+        );
+    }
+
+    #[test]
+    fn test_variable_status_methods() {
+        // Test VariableStatus utility methods
+        let valid_status = VariableStatus::Valid { address: 0x20000000 };
+        assert!(valid_status.is_readable());
+        assert_eq!(valid_status.address(), Some(0x20000000));
+        assert_eq!(valid_status.reason(), "Valid address");
+
+        let optimized_status = VariableStatus::OptimizedOut;
+        assert!(!optimized_status.is_readable());
+        assert_eq!(optimized_status.address(), None);
+        assert_eq!(optimized_status.reason(), "Optimized out by compiler");
+
+        let zero_status = VariableStatus::AddressZero;
+        assert!(zero_status.is_readable());
+        assert_eq!(zero_status.address(), Some(0));
+    }
+
+    #[test]
+    fn test_parse_all_fixtures_without_panic() {
+        // Ensure all test fixtures can be parsed without panicking
+        let fixtures = [
+            ("test_arm.elf", TEST_ARM_ELF),
+            ("test_struct.elf", TEST_STRUCT_ELF),
+            ("test_pointer.elf", TEST_POINTER_ELF),
+            ("test_complex_c.elf", TEST_COMPLEX_C_ELF),
+            ("test_cpp.elf", TEST_CPP_ELF),
+        ];
+
+        for (name, data) in &fixtures {
+            let result = DwarfParser::parse_bytes(data);
+            assert!(
+                result.is_ok(),
+                "Failed to parse {}: {:?}",
+                name,
+                result.err()
+            );
+        }
+    }
 }

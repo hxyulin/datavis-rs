@@ -105,6 +105,10 @@ winres = "0.1"
 
 [dev-dependencies]
 criterion = "0.5"
+mockall = "0.13"           # Trait mocking
+proptest = "1.5"            # Property-based testing
+tempfile = "3.10"           # Temporary files for parsers
+serial_test = "3.1"         # Sequential test execution
 
 [[bench]]
 name = "data_processing"

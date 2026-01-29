@@ -98,9 +98,40 @@ cargo run --release --features mock-probe
 
 ### Running Tests
 
+The project has comprehensive test coverage with 310+ tests:
+
 ```bash
-cargo test
+# Run all tests
+cargo test --all-features
+
+# Run only unit tests
+cargo test --lib --all-features
+
+# Run only integration tests
+cargo test --test '*' --all-features
+
+# Run with coverage
+cargo install cargo-tarpaulin
+cargo tarpaulin --all-features --workspace --out Html
 ```
+
+**Test Categories:**
+- **Unit Tests** (255+): Backend worker, ReadManager, type system, DWARF parser, frontend state, UI components
+- **Integration Tests** (42+): Backend lifecycle, variable workflows, ELF parsing, state management
+- **Property-Based Tests** (13+): Bulk read optimization, statistics calculation, type parsing invariants
+
+**Coverage Targets:**
+- Overall: 70%+
+- Critical paths (backend worker, parsers): 80%+
+- Frontend business logic: 60-70%
+
+**Continuous Integration:**
+
+Tests run automatically on push/PR via GitHub Actions:
+- Multi-platform testing (Ubuntu, Windows, macOS)
+- Multiple Rust versions (stable, beta)
+- Code coverage reporting via Codecov
+- Clippy linting and rustfmt checks
 
 ## License
 
