@@ -13,7 +13,7 @@ use crate::frontend::dialogs::{
 use crate::frontend::pane_trait::Pane;
 use crate::frontend::state::{AppAction, SharedState};
 use crate::frontend::workspace::PaneKind;
-use crate::types::{ConnectionStatus, Variable};
+use crate::types::{ConnectionStatus, PointerState, Variable};
 
 /// State for the Variable List pane
 pub struct VariableListState {
@@ -124,7 +124,7 @@ pub fn render(
         let advanced_mode = state.advanced_mode;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            let variables: Vec<_> = shared.config.variables.clone();
+            let variables: Vec<_> = shared.config.variables.values().cloned().collect();
 
             // Render root variables recursively
             let roots: Vec<&Variable> = variables.iter().filter(|v| v.is_root()).collect();
@@ -158,7 +158,7 @@ pub fn render(
                 var.enabled = enabled;
                 actions.push(AppAction::UpdateVariable(var.clone()));
             }
-            let child_ids: Vec<u32> = shared.config.variables.iter()
+            let child_ids: Vec<u32> = shared.config.variables.values()
                 .filter(|v| v.parent_id == Some(parent_id))
                 .map(|v| v.id)
                 .collect();
@@ -405,7 +405,26 @@ fn render_variable_card_simple(
                     deferred.var_toggle_enabled = Some((var.id, enabled));
                 }
 
-                if let Some(data) = shared.topics.variable_data.get(&var.id) {
+                // Display pointer state if this is a pointer variable
+                if let Some(ptr_meta) = &var.pointer_metadata {
+                    match ptr_meta.pointer_state {
+                        PointerState::Null => {
+                            ui.colored_label(Color32::YELLOW, "NULL");
+                        }
+                        PointerState::Invalid(addr) => {
+                            ui.colored_label(Color32::RED, format!("INVALID: 0x{:08X}", addr));
+                        }
+                        PointerState::ReadError => {
+                            ui.colored_label(Color32::RED, "READ ERROR");
+                        }
+                        PointerState::Valid(addr) => {
+                            ui.label(format!("→ 0x{:08X}", addr));
+                        }
+                        PointerState::Unread => {
+                            ui.colored_label(Color32::GRAY, "pending...");
+                        }
+                    }
+                } else if let Some(data) = shared.topics.variable_data.get(&var.id) {
                     if let Some(point) = data.last() {
                         let value_text = if var.unit.is_empty() {
                             format!("{:.3}", point.converted_value)
@@ -546,7 +565,28 @@ fn render_variable_card_advanced(
 
                 ui.add_space(8.0);
 
-                if let Some(data) = shared.topics.variable_data.get(&var.id) {
+                // Display pointer state if this is a pointer variable
+                if let Some(ptr_meta) = &var.pointer_metadata {
+                    match ptr_meta.pointer_state {
+                        PointerState::Null => {
+                            ui.colored_label(Color32::YELLOW, "NULL");
+                        }
+                        PointerState::Invalid(addr) => {
+                            ui.colored_label(Color32::RED, format!("INVALID: 0x{:08X}", addr));
+                        }
+                        PointerState::ReadError => {
+                            ui.colored_label(Color32::RED, "READ ERROR");
+                        }
+                        PointerState::Valid(addr) => {
+                            ui.label(egui::RichText::new(format!("→ 0x{:08X}", addr))
+                                .monospace()
+                                .size(14.0));
+                        }
+                        PointerState::Unread => {
+                            ui.colored_label(Color32::GRAY, "pending...");
+                        }
+                    }
+                } else if let Some(data) = shared.topics.variable_data.get(&var.id) {
                     if let Some(point) = data.last() {
                         let value_text = if var.unit.is_empty() {
                             format!("{:.3}", point.converted_value)
@@ -748,7 +788,7 @@ pub fn render_dialogs(
                 match action {
                     ConverterEditorAction::Save { var_id, script } => {
                         if let Some(var) =
-                            shared.config.variables.iter_mut().find(|v| v.id == var_id)
+                            shared.config.variables.get_mut(&var_id)
                         {
                             var.converter_script = script;
                             actions.push(AppAction::UpdateVariable(var.clone()));

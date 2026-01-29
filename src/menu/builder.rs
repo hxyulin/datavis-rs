@@ -199,15 +199,6 @@ fn build_view_menu(state: &MenuBarState) -> Submenu {
         ))
         .unwrap();
 
-    view_menu
-        .append(&MenuItem::with_id(
-            MenuId::ViewPipelineEditor.to_muda_id(),
-            t!("menu_view_pipeline_editor"),
-            true,
-            None::<Accelerator>,
-        ))
-        .unwrap();
-
     view_menu.append(&PredefinedMenuItem::separator()).unwrap();
 
     // Multi-instance visualizers

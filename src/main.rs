@@ -6,14 +6,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use datavis_rs::{
+    backend::SwdBackend,
     config::{AppConfig, AppState, ProjectFile, UiSessionState},
     frontend::DataVisApp,
     i18n::set_language,
     menu::{build_menu_bar, MenuBarState},
-    pipeline::{PipelineBridge, PipelineBuilder, PipelineNodeIds},
+    pipeline::PipelineBridge,
 };
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 fn main() -> eframe::Result<()> {
@@ -33,8 +32,11 @@ fn main() -> eframe::Result<()> {
 
     // Load UI session state (window position, workspace layout, etc.)
     let ui_session = UiSessionState::load();
-    tracing::debug!("Loaded UI session state: show_toolbar={}, show_status_bar={}",
-        ui_session.show_toolbar, ui_session.show_status_bar);
+    tracing::debug!(
+        "Loaded UI session state: show_toolbar={}, show_status_bar={}",
+        ui_session.show_toolbar,
+        ui_session.show_status_bar
+    );
 
     // Initialize language from saved preferences
     set_language(app_state.ui_preferences.language);
@@ -56,20 +58,14 @@ fn main() -> eframe::Result<()> {
         (AppConfig::default(), None)
     };
 
-    // Create the pipeline bridge and spawn the pipeline thread
-    let (bridge, cmd_rx, msg_tx) = PipelineBridge::new();
-    let running = Arc::new(AtomicBool::new(true));
-    let builder = PipelineBuilder::new(config.clone());
-    let running_clone = running.clone();
-    let (node_ids_tx, node_ids_rx) = std::sync::mpsc::sync_channel::<PipelineNodeIds>(1);
+    // Create the backend and spawn the worker thread
+    let (backend, frontend_receiver) = SwdBackend::new(config.clone());
     let backend_handle = std::thread::spawn(move || {
-        let (mut pipeline, node_ids) = builder.build_default(cmd_rx, msg_tx, running_clone);
-        let _ = node_ids_tx.send(node_ids);
-        pipeline.run();
+        backend.run();
     });
-    let node_ids = node_ids_rx
-        .recv()
-        .expect("Failed to receive pipeline node IDs");
+
+    // Wrap the frontend receiver in a PipelineBridge for compatibility
+    let bridge = PipelineBridge::from_frontend_receiver(frontend_receiver);
 
     // Prepare menu bar state for building native menu
     let project_name = if let Some(ref path) = project_path {
@@ -167,7 +163,6 @@ fn main() -> eframe::Result<()> {
                 config,
                 app_state,
                 project_path,
-                node_ids,
                 Some(menu),
                 ui_session,
             )))

@@ -71,9 +71,6 @@ impl MenuEvent {
             MenuId::ViewSessionCapture => {
                 Some(MenuEvent::Action(AppAction::OpenPane(PaneKind::Recorder)))
             }
-            MenuId::ViewPipelineEditor => {
-                Some(MenuEvent::Action(AppAction::OpenPane(PaneKind::PipelineEditor)))
-            }
             MenuId::ViewNewTimeSeries => {
                 Some(MenuEvent::Action(AppAction::NewVisualizer(PaneKind::TimeSeries)))
             }

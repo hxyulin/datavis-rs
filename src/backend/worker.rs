@@ -29,10 +29,11 @@
 //! - `dt()` - Time since last sample
 //! - `prev()` / `prev_raw()` - Previous values for derivative calculations
 
+use crate::backend::converter_engine::ConverterEngine;
 use crate::backend::{BackendCommand, BackendMessage, ProbeBackend};
 use crate::backend::probe_trait::DebugProbe;
+use crate::backend::read_manager::DependentReadPlanner;
 use crate::config::AppConfig;
-use crate::scripting::{ExecutionContext, ScriptEngine};
 use crate::types::{CollectionStats, ConnectionStatus, Variable};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use std::collections::HashMap;
@@ -86,6 +87,64 @@ pub enum SwdResponse {
     Error(String),
 }
 
+/// Routes data to global and per-pane streams
+///
+/// This structure manages pane subscriptions and filters data for each pane.
+/// It will be used in Phase 2 when we replace the pipeline with direct routing.
+#[derive(Debug, Clone, Default)]
+pub struct DataRouter {
+    /// Which panes subscribe to which variables (pane_id → var_ids)
+    pane_subscriptions: HashMap<u64, std::collections::HashSet<u32>>,
+}
+
+impl DataRouter {
+    /// Create a new data router
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Update pane subscriptions (called from UI config changes)
+    pub fn subscribe_pane(&mut self, pane_id: u64, var_ids: std::collections::HashSet<u32>) {
+        self.pane_subscriptions.insert(pane_id, var_ids);
+    }
+
+    /// Remove a pane subscription
+    #[allow(dead_code)]
+    pub fn unsubscribe_pane(&mut self, pane_id: u64) {
+        self.pane_subscriptions.remove(&pane_id);
+    }
+
+    /// Get the current subscriptions for a pane
+    #[allow(dead_code)]
+    pub fn get_pane_subscriptions(&self, pane_id: u64) -> Option<&std::collections::HashSet<u32>> {
+        self.pane_subscriptions.get(&pane_id)
+    }
+
+    /// Route data to global + per-pane streams
+    /// This will be used in Phase 2 when we switch to the new data flow
+    #[allow(dead_code)]
+    pub fn route(
+        &self,
+        data: Vec<(u32, Duration, f64, f64)>,
+    ) -> (Vec<(u32, Duration, f64, f64)>, HashMap<u64, Vec<(u32, Duration, f64, f64)>>) {
+        let global = data.clone(); // All panes see global data
+
+        let mut per_pane = HashMap::new();
+        for (pane_id, var_ids) in &self.pane_subscriptions {
+            let pane_data: Vec<_> = data
+                .iter()
+                .filter(|(var_id, ..)| var_ids.contains(var_id))
+                .cloned()
+                .collect();
+            if !pane_data.is_empty() {
+                per_pane.insert(*pane_id, pane_data);
+            }
+        }
+
+        (global, per_pane)
+    }
+}
+
 /// The backend worker that runs the polling loop
 pub struct BackendWorker {
     /// Application configuration
@@ -102,14 +161,10 @@ pub struct BackendWorker {
     /// Whether currently using a mock probe (only with mock-probe feature)
     #[cfg(feature = "mock-probe")]
     is_mock_probe: bool,
-    /// Script engine for value conversion
-    script_engine: ScriptEngine,
+    /// Converter engine for applying scripts to raw values
+    converter_engine: ConverterEngine,
     /// Variables being observed
     variables: HashMap<u32, Variable>,
-    /// Compiled converter cache (variable_id -> compiled script)
-    converters: HashMap<u32, Option<crate::scripting::CompiledConverter>>,
-    /// Previous values for each variable (variable_id -> (prev_raw, prev_converted, prev_timestamp_secs))
-    prev_values: HashMap<u32, (f64, f64, f64)>,
     /// Current connection status
     connection_status: ConnectionStatus,
     /// Whether data collection is active
@@ -124,6 +179,11 @@ pub struct BackendWorker {
     last_poll_time: Instant,
     /// Last time stats were sent to UI
     last_stats_time: Instant,
+    /// Two-stage read planner for pointer dereferencing
+    dependent_read_planner: DependentReadPlanner,
+    /// Data router for per-pane filtering (Phase 2 - not yet used)
+    #[allow(dead_code)]
+    data_router: DataRouter,
 }
 
 impl BackendWorker {
@@ -145,10 +205,8 @@ impl BackendWorker {
             probe,
             #[cfg(feature = "mock-probe")]
             is_mock_probe: false,
-            script_engine: ScriptEngine::new(),
+            converter_engine: ConverterEngine::new(),
             variables: HashMap::new(),
-            converters: HashMap::new(),
-            prev_values: HashMap::new(),
             connection_status: ConnectionStatus::Disconnected,
             collecting: false,
             start_time: Instant::now(),
@@ -156,6 +214,8 @@ impl BackendWorker {
             stats: CollectionStats::default(),
             last_poll_time: Instant::now(),
             last_stats_time: Instant::now(),
+            dependent_read_planner: DependentReadPlanner::new(),
+            data_router: DataRouter::new(),
         }
     }
 
@@ -271,6 +331,23 @@ impl BackendWorker {
             BackendCommand::RefreshProbes => {
                 self.refresh_probes();
             }
+            BackendCommand::UpdateConverter {
+                var_id,
+                var_name,
+                script,
+            } => {
+                // Update converter engine
+                self.converter_engine.update_converter(var_id, &var_name, script.clone());
+
+                // Also update the variable's converter_script field if it exists
+                if let Some(var) = self.variables.get_mut(&var_id) {
+                    var.converter_script = script;
+                }
+            }
+            BackendCommand::SubscribePane { pane_id, var_ids } => {
+                // Update data router with pane subscriptions
+                self.data_router.subscribe_pane(pane_id, var_ids);
+            }
         }
     }
 
@@ -356,57 +433,28 @@ impl BackendWorker {
     fn add_variable(&mut self, var: Variable) {
         let id = var.id;
 
-        // Compile converter if present
-        let converter = if let Some(ref script) = var.converter_script {
-            match self.script_engine.compile(&var.name, script) {
-                Ok(c) => Some(c),
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to compile converter for variable '{}': {}",
-                        var.name,
-                        e
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        // Add to converter engine
+        self.converter_engine.add_variable(&var);
 
-        self.converters.insert(id, converter);
         self.variables.insert(id, var);
         self.send_variable_list();
     }
 
     /// Remove a variable
     fn remove_variable(&mut self, id: u32) {
+        // Remove from converter engine
+        self.converter_engine.remove_variable(id);
+
         self.variables.remove(&id);
-        self.converters.remove(&id);
-        self.prev_values.remove(&id);
     }
 
     /// Update a variable's configuration
     fn update_variable(&mut self, var: Variable) {
         let id = var.id;
 
-        // Recompile converter if changed
-        let converter = if let Some(ref script) = var.converter_script {
-            match self.script_engine.compile(&var.name, script) {
-                Ok(c) => Some(c),
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to compile converter for variable '{}': {}",
-                        var.name,
-                        e
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        // Update converter engine
+        self.converter_engine.update_converter(id, &var.name, var.converter_script.clone());
 
-        self.converters.insert(id, converter);
         self.variables.insert(id, var);
         self.send_variable_list();
     }
@@ -459,15 +507,17 @@ impl BackendWorker {
         self.start_time = Instant::now();
         self.stats = CollectionStats::default();
         self.probe.reset_stats();
-        // Clear previous values when clearing data
-        self.prev_values.clear();
+        // Clear converter engine state
+        self.converter_engine.clear_state();
+        // Clear pointer read planner cache
+        self.dependent_read_planner.clear();
     }
 
     /// Poll all enabled variables using batched reads for better performance
+    /// Supports two-stage pointer dereferencing: read pointers at lower rate,
+    /// then read pointed-to data using cached addresses.
     fn poll_variables(&mut self) {
         let timestamp = self.start_time.elapsed();
-        let time_secs = timestamp.as_secs_f64();
-        let mut batch = Vec::new();
 
         // Collect enabled variables
         let enabled_vars: Vec<Variable> = self
@@ -481,50 +531,58 @@ impl BackendWorker {
             return;
         }
 
-        // Use batched read for better performance (single core acquisition)
-        // The trait provides read_variables which probes can optimize
-        let read_results = self.probe.read_variables(&enabled_vars);
+        // Two-stage read planning for pointer support
+        let (pointer_vars, mut data_vars) = self.dependent_read_planner.plan_reads(&enabled_vars);
 
-        // Process results
-        for (var, read_result) in enabled_vars.iter().zip(read_results.into_iter()) {
+        // Stage 1: Read pointers (if any need updating)
+        if !pointer_vars.is_empty() {
+            let pointer_results = self.probe.read_variables(&pointer_vars);
+
+            // Update pointer states and cache
+            for (var, result) in pointer_vars.iter().zip(pointer_results.iter()) {
+                match result {
+                    Ok(value) => {
+                        // Update pointer state in the main variables map
+                        if let Some(var_mut) = self.variables.get_mut(&var.id) {
+                            DependentReadPlanner::update_pointer_state(var_mut, *value);
+                        }
+                    }
+                    Err(_) => {
+                        // Mark pointer read as failed
+                        if let Some(var_mut) = self.variables.get_mut(&var.id) {
+                            DependentReadPlanner::mark_pointer_error(var_mut);
+                        }
+                    }
+                }
+            }
+
+            // Update planner's timestamp cache
+            let updated_vars: Vec<Variable> = pointer_vars.iter()
+                .filter_map(|v| self.variables.get(&v.id).cloned())
+                .collect();
+            self.dependent_read_planner.update_pointer_cache(&updated_vars);
+        }
+
+        // Resolve dependent variable addresses using cached pointer values
+        let resolved_vars: Vec<Variable> = data_vars.iter()
+            .map(|v| {
+                // Get latest state from variables map
+                self.variables.get(&v.id).cloned().unwrap_or_else(|| v.clone())
+            })
+            .collect();
+        data_vars = self.dependent_read_planner.resolve_addresses(&resolved_vars);
+
+        // Stage 2: Read data variables (with resolved addresses)
+        let read_results = self.probe.read_variables(&data_vars);
+
+        // Build probe results vector: (var_id, timestamp, raw_value)
+        let mut probe_data = Vec::new();
+        for (var, read_result) in data_vars.iter().zip(read_results.into_iter()) {
             match read_result {
                 Ok(raw_value) => {
                     self.stats.successful_reads += 1;
                     self.stats.total_bytes_read += var.var_type.size_bytes() as u64;
-
-                    // Build execution context with previous values
-                    let exec_ctx = if let Some(&(prev_raw, prev_converted, prev_time)) =
-                        self.prev_values.get(&var.id)
-                    {
-                        let dt = time_secs - prev_time;
-                        ExecutionContext::new(time_secs, dt, prev_raw, prev_converted)
-                    } else {
-                        ExecutionContext::first_sample(time_secs)
-                    };
-
-                    // Apply converter if available
-                    let converted_value =
-                        if let Some(Some(converter)) = self.converters.get(&var.id) {
-                            match self.script_engine.execute(converter, raw_value, exec_ctx) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    tracing::trace!(
-                                        "Converter error for '{}': {}, using raw value",
-                                        var.name,
-                                        e
-                                    );
-                                    raw_value
-                                }
-                            }
-                        } else {
-                            raw_value
-                        };
-
-                    // Store current values as previous for next iteration
-                    self.prev_values
-                        .insert(var.id, (raw_value, converted_value, time_secs));
-
-                    batch.push((var.id, timestamp, raw_value, converted_value));
+                    probe_data.push((var.id, timestamp, raw_value));
                 }
                 Err(e) => {
                     self.stats.failed_reads += 1;
@@ -535,6 +593,10 @@ impl BackendWorker {
                 }
             }
         }
+
+        // Apply converters to all probe data in one call
+        // Returns Vec<(var_id, timestamp, raw, converted)>
+        let batch = self.converter_engine.apply_converters(&probe_data);
 
         // Send batch if not empty (using try_send for backpressure)
         if !batch.is_empty() {
@@ -558,7 +620,7 @@ impl BackendWorker {
         self.stats.reads_saved_by_bulk = probe_stats.individual_reads_saved;
 
         // Calculate rate based on total batch time, not per-variable time
-        if self.stats.avg_read_time_us > 0.0 && !enabled_vars.is_empty() {
+        if self.stats.avg_read_time_us > 0.0 && !data_vars.is_empty() {
             // The avg_read_time_us now represents the entire batch read time
             // So effective rate is simply 1M / batch_time
             self.stats.effective_sample_rate = 1_000_000.0 / self.stats.avg_read_time_us;

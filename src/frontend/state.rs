@@ -12,8 +12,7 @@ use crate::config::settings::RuntimeSettings;
 use crate::config::{AppConfig, AppState, DataPersistenceConfig};
 use crate::frontend::topics::Topics;
 use crate::pipeline::bridge::PipelineBridge;
-use crate::pipeline::id::{EdgeId, NodeId};
-use crate::pipeline::node_type::NodeType;
+use crate::pipeline::id::NodeId;
 use crate::pipeline::packet::ConfigValue;
 use crate::types::{Variable, VariableType};
 
@@ -24,6 +23,14 @@ use super::workspace::{PaneId, PaneKind};
 pub struct ChildVariableSpec {
     pub name: String,
     pub address: u64,
+    pub var_type: VariableType,
+}
+
+/// Specification for a pointer-dependent child variable (Phase 2 feature)
+#[derive(Debug, Clone)]
+pub struct PointerChildSpec {
+    pub name: String,
+    pub offset_from_pointer: u64,
     pub var_type: VariableType,
 }
 
@@ -101,6 +108,12 @@ pub enum AppAction {
         parent: Variable,
         children: Vec<ChildVariableSpec>,
     },
+    /// Add a pointer variable with auto-dereferencing children (Phase 2 feature)
+    AddPointerVariable {
+        pointer: Variable,
+        children: Vec<PointerChildSpec>,
+        pointer_poll_rate_hz: u32,
+    },
     /// Remove a variable by ID
     RemoveVariable(u32),
     /// Update an existing variable
@@ -140,20 +153,8 @@ pub enum AppAction {
     /// Request pipeline topology snapshot
     RequestTopology,
 
-    // Pipeline graph mutations
-    /// Add a new node to the pipeline
-    AddPipelineNode(NodeType),
-    /// Add a new node to the pipeline with optional configuration
-    AddPipelineNodeWithConfig {
-        node_type: NodeType,
-        config: Option<ConfigValue>,
-    },
-    /// Remove a node from the pipeline
-    RemovePipelineNode(NodeId),
-    /// Add an edge connecting two pipeline nodes
-    AddPipelineEdge { from_node: NodeId, to_node: NodeId },
-    /// Remove an edge from the pipeline
-    RemovePipelineEdge(EdgeId),
+    // Pipeline graph mutations (removed in Phase 3)
+    // The pipeline editor has been removed in favor of direct converter configuration
 
     // Workspace actions
     /// Open/focus a singleton pane, or create if not exists

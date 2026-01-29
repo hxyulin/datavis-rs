@@ -1,50 +1,26 @@
-//! Node-based data pipeline architecture.
+//! Communication bridge and shared types for backend/frontend communication.
 //!
-//! Data flows through typed nodes: Source (probes) → Transform (scripts, filters)
-//! → Sink (graphs, recorder, exporter). The pipeline runs on a dedicated thread
-//! and communicates with the UI via crossbeam channels.
+//! This module has been simplified after the architecture redesign (Phase 3).
+//! The node-based pipeline has been replaced with a direct data flow using
+//! ConverterEngine in the backend worker.
 //!
-//! # Architecture
+//! # Remaining Components
 //!
-//! Default minimal pipeline:
-//! ```text
-//! [ProbeSource] ──► [ScriptTransform] ──► [UIBroadcastSink]
-//! ```
-//!
-//! Sinks like RecorderSink, ExporterSink, GraphSink can be added dynamically.
-//!
-//! # Design
-//!
-//! - **Enum dispatch on hot path** — `BuiltinNode` enum for all built-in nodes.
-//! - **Zero allocation on hot path** — `DataPacket` is a fixed-size inline buffer.
-//! - **Variable tree** — flat `Vec<VariableNode>` with `VarId` as array index.
-//! - **Dedicated thread** — pipeline runs independently, sinks push via channel.
-//! - **Backward compatible** — `PipelineBridge` has same API as `FrontendReceiver`.
+//! - **PipelineBridge** - Communication channel between backend and frontend
+//! - **SinkMessage** - Messages sent from backend to frontend
+//! - **Basic types** - IDs, packets, and variable tree for compatibility
 
 pub mod bridge;
-pub mod compiled_plan;
-pub mod compiler;
 pub mod error;
-pub mod executor;
 pub mod id;
-pub mod node;
-pub mod node_type;
-pub mod nodes;
 pub mod packet;
-pub mod port;
 pub mod variable_tree;
 
 pub use bridge::{
-    EdgeSnapshot, NodeSnapshot, PipelineBridge, PipelineCommand, SinkMessage, TopologySnapshot,
+    PipelineBridge, PipelineCommand, SinkMessage,
     VariableNodeSnapshot,
 };
-pub use compiled_plan::{CompiledPlan, PlanStats};
-pub use compiler::PipelineCompiler;
 pub use error::{PipelineError, PipelineResult};
-pub use executor::{Pipeline, PipelineBuilder, PipelineNodeIds};
-pub use id::{EdgeId, NodeId, PortId, VarId};
-pub use node::{AnyNode, BuiltinNode, NodeContext, NodePlugin};
-pub use node_type::NodeType;
+pub use id::{NodeId, VarId};
 pub use packet::{ConfigValue, DataPacket, PipelineEvent, Sample, MAX_PACKET_VARS};
-pub use port::{PortDescriptor, PortDirection, PortKind};
 pub use variable_tree::{VariableNode, VariableTree};

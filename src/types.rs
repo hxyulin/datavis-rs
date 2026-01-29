@@ -250,6 +250,44 @@ impl DataPoint {
     }
 }
 
+/// Metadata for pointer variables to track dereferencing state
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PointerMetadata {
+    /// Last read pointer value (address it points to)
+    pub cached_address: Option<u64>,
+
+    /// Timestamp of last pointer read (not serialized)
+    #[serde(skip)]
+    pub last_pointer_read: Option<Instant>,
+
+    /// How often to re-read pointer value (Hz), separate from data poll rate
+    pub pointer_poll_rate_hz: u32,
+
+    /// ID of parent pointer variable (for pointed-to members)
+    pub pointer_parent_id: Option<u32>,
+
+    /// Offset from dereferenced pointer (for struct members)
+    pub offset_from_pointer: u64,
+
+    /// Pointer validity state
+    pub pointer_state: PointerState,
+}
+
+/// State of a pointer value
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PointerState {
+    /// Never read yet
+    Unread,
+    /// Last read value (non-NULL)
+    Valid(u64),
+    /// Pointer is NULL
+    Null,
+    /// Suspicious value (unaligned, out of range)
+    Invalid(u64),
+    /// Failed to read pointer
+    ReadError,
+}
+
 /// Configuration for a variable to observe
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Variable {
@@ -282,6 +320,9 @@ pub struct Variable {
     /// Parent variable ID (None = root-level variable)
     #[serde(default)]
     pub parent_id: Option<u32>,
+    /// Pointer metadata for runtime dereferencing (Phase 2 feature)
+    #[serde(default)]
+    pub pointer_metadata: Option<PointerMetadata>,
 }
 
 impl Default for Variable {
@@ -300,6 +341,7 @@ impl Default for Variable {
             y_axis: 0, // Primary (left) axis by default
             plot_style: PlotStyle::default(),
             parent_id: None,
+            pointer_metadata: None,
         }
     }
 }
@@ -420,8 +462,8 @@ impl Variable {
     ///
     /// This should be called after loading variables from a saved project
     /// to ensure new variables get IDs that don't conflict with loaded ones.
-    pub fn sync_next_id(variables: &[Variable]) {
-        if let Some(max_id) = variables.iter().map(|v| v.id).max() {
+    pub fn sync_next_id(variables: &std::collections::HashMap<u32, Variable>) {
+        if let Some(max_id) = variables.values().map(|v| v.id).max() {
             // Set NEXT_VARIABLE_ID to max + 1, but only if it would increase the counter
             let mut current = NEXT_VARIABLE_ID.load(std::sync::atomic::Ordering::SeqCst);
             while current <= max_id {

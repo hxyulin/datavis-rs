@@ -33,7 +33,6 @@ pub enum PaneKind {
     VariableBrowser,
     VariableList,
     Recorder,
-    PipelineEditor,
     // Visualizers (multiple instances allowed)
     TimeSeries,
     Watcher,
@@ -191,10 +190,14 @@ impl Workspace {
                 "VariableBrowser" => PaneKind::VariableBrowser,
                 "VariableList" => PaneKind::VariableList,
                 "Recorder" => PaneKind::Recorder,
-                "PipelineEditor" => PaneKind::PipelineEditor,
                 "TimeSeries" => PaneKind::TimeSeries,
                 "Watcher" => PaneKind::Watcher,
                 "FftView" => PaneKind::FftView,
+                // Legacy: skip PipelineEditor from old configs
+                "PipelineEditor" => {
+                    tracing::info!("Skipping legacy PipelineEditor pane from saved layout");
+                    continue;
+                }
                 _ => {
                     tracing::warn!("Unknown pane kind: {}, skipping", pane_info.kind);
                     continue;

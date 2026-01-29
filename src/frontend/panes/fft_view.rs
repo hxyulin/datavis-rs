@@ -57,13 +57,13 @@ pub fn render(
             .selected_text(
                 state
                     .target_variable_id
-                    .and_then(|id| shared.config.variables.iter().find(|v| v.id == id))
+                    .and_then(|id| shared.config.variables.get(&id))
                     .map(|v| v.name.as_str())
                     .unwrap_or("Select..."),
             )
             .width(120.0)
             .show_ui(ui, |ui| {
-                for var in &shared.config.variables {
+                for var in shared.config.variables.values() {
                     if var.enabled && var.show_in_graph {
                         let is_selected = state.target_variable_id == Some(var.id);
                         if ui.selectable_label(is_selected, &var.name).clicked() {
@@ -233,7 +233,7 @@ pub fn render(
 
             let color = state
                 .target_variable_id
-                .and_then(|id| shared.config.variables.iter().find(|v| v.id == id))
+                .and_then(|id| shared.config.variables.get(&id))
                 .map(|v| {
                     Color32::from_rgba_unmultiplied(v.color[0], v.color[1], v.color[2], v.color[3])
                 })

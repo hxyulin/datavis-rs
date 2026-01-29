@@ -713,59 +713,6 @@ impl PlotCursor {
     }
 }
 
-/// Color palette for multiple variables
-///
-/// Provides a set of visually distinct colors for plotting multiple
-/// variables. Colors cycle when all are used.
-pub struct ColorPalette {
-    colors: Vec<[u8; 4]>,
-    index: usize,
-}
-
-impl Default for ColorPalette {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ColorPalette {
-    /// Create a new color palette with default colors
-    pub fn new() -> Self {
-        Self {
-            colors: vec![
-                [255, 99, 132, 255],  // Red
-                [54, 162, 235, 255],  // Blue
-                [255, 206, 86, 255],  // Yellow
-                [75, 192, 192, 255],  // Teal
-                [153, 102, 255, 255], // Purple
-                [255, 159, 64, 255],  // Orange
-                [199, 199, 199, 255], // Gray
-                [83, 102, 255, 255],  // Indigo
-                [255, 99, 255, 255],  // Pink
-                [99, 255, 132, 255],  // Green
-            ],
-            index: 0,
-        }
-    }
-
-    /// Get the next color in the palette
-    pub fn next(&mut self) -> [u8; 4] {
-        let color = self.colors[self.index % self.colors.len()];
-        self.index += 1;
-        color
-    }
-
-    /// Reset the palette to the beginning
-    pub fn reset(&mut self) {
-        self.index = 0;
-    }
-
-    /// Get a color by index
-    pub fn get(&self, index: usize) -> [u8; 4] {
-        self.colors[index % self.colors.len()]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -882,19 +829,6 @@ mod tests {
         view.lock_y = true;
         assert!(!view.can_interact_x());
         assert!(!view.can_interact_y());
-    }
-
-    #[test]
-    fn test_color_palette() {
-        let mut palette = ColorPalette::new();
-        let color1 = palette.next();
-        let color2 = palette.next();
-
-        assert_ne!(color1, color2);
-
-        palette.reset();
-        let color1_again = palette.next();
-        assert_eq!(color1, color1_again);
     }
 
     #[test]

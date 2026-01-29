@@ -8,8 +8,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::backend::DetectedProbe;
-use crate::pipeline::bridge::{TopologySnapshot, VariableNodeSnapshot};
-use crate::pipeline::id::NodeId;
+use crate::pipeline::bridge::VariableNodeSnapshot;
 use crate::session::types::{SessionRecording, SessionState};
 use crate::types::{CollectionStats, ConnectionStatus, VariableData};
 
@@ -18,12 +17,6 @@ use crate::types::{CollectionStats, ConnectionStatus, VariableData};
 /// This is a plain struct — direct field access, zero overhead.
 /// No `HashMap` lookup, no `TypeId` hashing, no `Box<dyn Any>` downcasting.
 pub struct Topics {
-    // --- Pipeline infrastructure ---
-    /// Node ID for recorder sink (set once at startup)
-    pub recorder_node_id: NodeId,
-    /// Node ID for exporter sink (set once at startup)
-    pub exporter_node_id: NodeId,
-
     // --- Live data (high frequency) ---
     /// Collected variable time-series data, keyed by variable ID.
     /// This is the primary data sink for all visualizer panes.
@@ -51,9 +44,6 @@ pub struct Topics {
     pub exporter_rows_written: u64,
 
     // --- Snapshots (on-demand / event-driven) ---
-    /// Pipeline topology for the editor pane
-    pub topology: Option<TopologySnapshot>,
-
     /// Available debug probes (from RefreshProbes)
     pub available_probes: Vec<DetectedProbe>,
 
@@ -87,8 +77,6 @@ pub struct Topics {
 impl Default for Topics {
     fn default() -> Self {
         Self {
-            recorder_node_id: NodeId(0),
-            exporter_node_id: NodeId(0),
             variable_data: HashMap::new(),
             graph_pane_data: HashMap::new(),
             stats: CollectionStats::default(),
@@ -97,7 +85,6 @@ impl Default for Topics {
             recorder_frame_count: 0,
             exporter_active: false,
             exporter_rows_written: 0,
-            topology: None,
             available_probes: Vec::new(),
             completed_recordings: Vec::new(),
             variable_tree: Vec::new(),

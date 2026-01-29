@@ -4,10 +4,8 @@
 //! allowing the UI code to transition with minimal changes.
 
 use crate::config::{MemoryAccessMode, ProbeConfig};
-use crate::pipeline::id::{EdgeId, NodeId, VarId};
-use crate::pipeline::node_type::NodeType;
+use crate::pipeline::id::{NodeId, VarId};
 use crate::pipeline::packet::ConfigValue;
-use crate::pipeline::port::PortDescriptor;
 use crate::session::types::{SessionRecording, SessionState};
 use crate::types::{CollectionStats, ConnectionStatus, Variable, VariableType};
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -75,36 +73,6 @@ pub enum SinkMessage {
     /// Snapshot of the variable tree for UI display.
     VariableTreeSnapshot(Vec<VariableNodeSnapshot>),
 
-    /// Pipeline topology snapshot for the pipeline editor.
-    Topology(TopologySnapshot),
-
-    /// Node was added (includes the new ID).
-    NodeAdded(NodeId),
-
-    /// Node was removed.
-    NodeRemoved(NodeId),
-
-    /// Edge was added.
-    EdgeAdded(EdgeId),
-
-    /// Edge was removed.
-    EdgeRemoved(EdgeId),
-
-    /// Topology has changed (triggers UI refresh).
-    TopologyChanged,
-
-    /// Error during graph mutation.
-    GraphError(String),
-
-    /// Request to create a pane for a newly added node.
-    CreatePaneForNode {
-        node_id: NodeId,
-        pane_kind: crate::frontend::workspace::PaneKind,
-    },
-
-    /// Request to close a pane when its linked node is deleted.
-    ClosePaneForNode { pane_id: u64 },
-
     /// Pipeline is shutting down.
     Shutdown,
 }
@@ -125,29 +93,6 @@ pub struct VariableNodeSnapshot {
     pub enabled: bool,
 }
 
-/// Snapshot of a single pipeline node.
-#[derive(Debug, Clone)]
-pub struct NodeSnapshot {
-    pub id: NodeId,
-    pub name: String,
-    pub ports: Vec<PortDescriptor>,
-    pub node_type: Option<crate::pipeline::node_type::NodeType>,
-}
-
-/// Snapshot of a single pipeline edge.
-#[derive(Debug, Clone)]
-pub struct EdgeSnapshot {
-    pub id: EdgeId,
-    pub from_node: NodeId,
-    pub to_node: NodeId,
-}
-
-/// Complete topology snapshot of the pipeline graph.
-#[derive(Debug, Clone)]
-pub struct TopologySnapshot {
-    pub nodes: Vec<NodeSnapshot>,
-    pub edges: Vec<EdgeSnapshot>,
-}
 
 /// Commands sent from the UI thread to the pipeline.
 #[derive(Debug, Clone)]
@@ -193,19 +138,6 @@ pub enum PipelineCommand {
     RefreshProbes,
     /// Request a variable tree snapshot to be sent back.
     RequestVariableTree,
-    /// Request a pipeline topology snapshot.
-    RequestTopology,
-    /// Add a new node to the pipeline (returns NodeId via message).
-    AddNode {
-        node_type: NodeType,
-        config: Option<ConfigValue>,
-    },
-    /// Remove a node by ID.
-    RemoveNode(NodeId),
-    /// Add an edge connecting two nodes.
-    AddEdge { from_node: NodeId, to_node: NodeId },
-    /// Remove an edge by ID.
-    RemoveEdge(EdgeId),
     /// Shut down the pipeline thread.
     Shutdown,
 }
@@ -219,7 +151,9 @@ const MSG_CHANNEL_CAPACITY: usize = 10_000;
 /// UI-side handle for communicating with the pipeline thread.
 ///
 /// Drop-in replacement for `FrontendReceiver` — same method names.
+/// Now wraps the new backend FrontendReceiver and converts message types.
 pub struct PipelineBridge {
+    frontend_receiver: Option<crate::backend::FrontendReceiver>,
     pub cmd_tx: Sender<PipelineCommand>,
     pub msg_rx: Receiver<SinkMessage>,
 }
@@ -231,13 +165,40 @@ impl PipelineBridge {
     pub fn new() -> (Self, Receiver<PipelineCommand>, Sender<SinkMessage>) {
         let (cmd_tx, cmd_rx) = bounded(CMD_CHANNEL_CAPACITY);
         let (msg_tx, msg_rx) = bounded(MSG_CHANNEL_CAPACITY);
-        (Self { cmd_tx, msg_rx }, cmd_rx, msg_tx)
+        (Self {
+            frontend_receiver: None,
+            cmd_tx,
+            msg_rx
+        }, cmd_rx, msg_tx)
+    }
+
+    /// Create a PipelineBridge from a FrontendReceiver (new backend)
+    ///
+    /// This wraps the new backend's FrontendReceiver and converts between
+    /// old message types (SinkMessage/PipelineCommand) and new types
+    /// (BackendMessage/BackendCommand) for backwards compatibility.
+    pub fn from_frontend_receiver(receiver: crate::backend::FrontendReceiver) -> Self {
+        let (cmd_tx, _cmd_rx) = bounded(CMD_CHANNEL_CAPACITY);
+        let (_msg_tx, msg_rx) = bounded(MSG_CHANNEL_CAPACITY);
+        Self {
+            frontend_receiver: Some(receiver),
+            cmd_tx,
+            msg_rx,
+        }
     }
 
     // --- Drain messages (same as FrontendReceiver) ---
 
     /// Drain all pending messages.
     pub fn drain(&self) -> Vec<SinkMessage> {
+        // If using new backend, drain from frontend_receiver and convert
+        if let Some(ref receiver) = self.frontend_receiver {
+            return receiver.drain().into_iter()
+                .filter_map(|msg| Self::convert_backend_message(msg))
+                .collect();
+        }
+
+        // Otherwise use old channel
         let mut msgs = Vec::new();
         while let Ok(msg) = self.msg_rx.try_recv() {
             msgs.push(msg);
@@ -247,16 +208,108 @@ impl PipelineBridge {
 
     /// Try to receive a single message without blocking.
     pub fn try_recv(&self) -> Option<SinkMessage> {
+        // If using new backend, try_recv from frontend_receiver and convert
+        if let Some(ref receiver) = self.frontend_receiver {
+            return receiver.try_recv().and_then(|msg| Self::convert_backend_message(msg));
+        }
+
+        // Otherwise use old channel
         self.msg_rx.try_recv().ok()
+    }
+
+    /// Convert BackendMessage to SinkMessage
+    fn convert_backend_message(msg: crate::backend::BackendMessage) -> Option<SinkMessage> {
+        use crate::backend::BackendMessage;
+        use crate::pipeline::id::VarId;
+
+        match msg {
+            BackendMessage::DataBatch(data) => {
+                // Convert u32 IDs to VarId
+                let converted: Vec<_> = data.into_iter()
+                    .map(|(id, ts, raw, conv)| (VarId(id), ts, raw, conv))
+                    .collect();
+                Some(SinkMessage::DataBatch(converted))
+            }
+            BackendMessage::DataUpdate(update) => {
+                // Convert DataUpdate to DataBatch for now
+                let converted: Vec<_> = update.global.into_iter()
+                    .map(|(id, ts, raw, conv)| (VarId(id), ts, raw, conv))
+                    .collect();
+                Some(SinkMessage::DataBatch(converted))
+            }
+            BackendMessage::Stats(stats) => {
+                Some(SinkMessage::Stats(stats))
+            }
+            BackendMessage::ConnectionStatus(status) => {
+                Some(SinkMessage::ConnectionStatus(status))
+            }
+            BackendMessage::ConnectionError(error) => {
+                Some(SinkMessage::ConnectionError(error))
+            }
+            BackendMessage::DataPoint { variable_id, timestamp, raw_value, converted_value } => {
+                Some(SinkMessage::DataBatch(vec![(VarId(variable_id), timestamp, raw_value, converted_value)]))
+            }
+            BackendMessage::ReadError { variable_id, error } => {
+                Some(SinkMessage::ReadError { variable_id, error })
+            }
+            BackendMessage::WriteSuccess { variable_id } => {
+                Some(SinkMessage::WriteSuccess { variable_id })
+            }
+            BackendMessage::WriteError { variable_id, error } => {
+                Some(SinkMessage::WriteError { variable_id, error })
+            }
+            BackendMessage::VariableList(vars) => {
+                Some(SinkMessage::VariableList(vars))
+            }
+            BackendMessage::ProbeList(probes) => {
+                Some(SinkMessage::ProbeList(probes))
+            }
+            BackendMessage::Shutdown => None,
+        }
     }
 
     // --- Commands (same API surface as FrontendReceiver) ---
 
+    /// Convert PipelineCommand to BackendCommand
+    fn convert_pipeline_command(cmd: PipelineCommand) -> crate::backend::BackendCommand {
+        use crate::backend::BackendCommand;
+
+        match cmd {
+            PipelineCommand::Connect { selector, target, probe_config } => {
+                BackendCommand::Connect { selector, target, probe_config }
+            }
+            PipelineCommand::Disconnect => BackendCommand::Disconnect,
+            PipelineCommand::Start => BackendCommand::StartCollection,
+            PipelineCommand::Stop => BackendCommand::StopCollection,
+            PipelineCommand::AddVariable(var) => BackendCommand::AddVariable(var),
+            PipelineCommand::RemoveVariable(id) => BackendCommand::RemoveVariable(id),
+            PipelineCommand::UpdateVariable(var) => BackendCommand::UpdateVariable(var),
+            PipelineCommand::WriteVariable { id, value } => {
+                BackendCommand::WriteVariable { id, value }
+            }
+            PipelineCommand::ClearData => BackendCommand::ClearData,
+            PipelineCommand::SetPollRate(rate) => BackendCommand::SetPollRate(rate),
+            PipelineCommand::SetMemoryAccessMode(mode) => BackendCommand::SetMemoryAccessMode(mode),
+            PipelineCommand::Shutdown => BackendCommand::Shutdown,
+            #[cfg(feature = "mock-probe")]
+            PipelineCommand::UseMockProbe(use_mock) => BackendCommand::UseMockProbe(use_mock),
+            PipelineCommand::RefreshProbes => BackendCommand::RefreshProbes,
+            _ => BackendCommand::Shutdown, // Fallback for unhandled commands
+        }
+    }
+
     pub fn send_command(&self, cmd: PipelineCommand) -> bool {
+        if let Some(ref receiver) = self.frontend_receiver {
+            return receiver.send_command(Self::convert_pipeline_command(cmd));
+        }
         self.cmd_tx.send(cmd).is_ok()
     }
 
     pub fn connect(&self, selector: Option<String>, target: String, probe_config: ProbeConfig) {
+        if let Some(ref receiver) = self.frontend_receiver {
+            receiver.connect(selector, target, probe_config);
+            return;
+        }
         let _ = self.cmd_tx.send(PipelineCommand::Connect {
             selector,
             target,
@@ -265,45 +318,85 @@ impl PipelineBridge {
     }
 
     pub fn disconnect(&self) {
+        if let Some(ref receiver) = self.frontend_receiver {
+            receiver.disconnect();
+            return;
+        }
         let _ = self.cmd_tx.send(PipelineCommand::Disconnect);
     }
 
     pub fn start_collection(&self) {
+        if let Some(ref receiver) = self.frontend_receiver {
+            receiver.start_collection();
+            return;
+        }
         let _ = self.cmd_tx.send(PipelineCommand::Start);
     }
 
     pub fn stop_collection(&self) {
+        if let Some(ref receiver) = self.frontend_receiver {
+            receiver.stop_collection();
+            return;
+        }
         let _ = self.cmd_tx.send(PipelineCommand::Stop);
     }
 
     pub fn add_variable(&self, variable: Variable) {
+        if let Some(ref receiver) = self.frontend_receiver {
+            receiver.add_variable(variable);
+            return;
+        }
         let _ = self.cmd_tx.send(PipelineCommand::AddVariable(variable));
     }
 
     pub fn remove_variable(&self, id: u32) {
+        if let Some(ref receiver) = self.frontend_receiver {
+            receiver.remove_variable(id);
+            return;
+        }
         let _ = self.cmd_tx.send(PipelineCommand::RemoveVariable(id));
     }
 
     pub fn update_variable(&self, variable: Variable) {
+        if let Some(ref receiver) = self.frontend_receiver {
+            receiver.update_variable(variable);
+            return;
+        }
         let _ = self.cmd_tx.send(PipelineCommand::UpdateVariable(variable));
     }
 
     pub fn write_variable(&self, id: u32, value: f64) {
+        if let Some(ref receiver) = self.frontend_receiver {
+            receiver.write_variable(id, value);
+            return;
+        }
         let _ = self
             .cmd_tx
             .send(PipelineCommand::WriteVariable { id, value });
     }
 
     pub fn clear_data(&self) {
+        if let Some(ref receiver) = self.frontend_receiver {
+            receiver.clear_data();
+            return;
+        }
         let _ = self.cmd_tx.send(PipelineCommand::ClearData);
     }
 
     pub fn shutdown(&self) {
+        if let Some(ref receiver) = self.frontend_receiver {
+            receiver.shutdown();
+            return;
+        }
         let _ = self.cmd_tx.send(PipelineCommand::Shutdown);
     }
 
     #[cfg(feature = "mock-probe")]
     pub fn use_mock_probe(&self, use_mock: bool) {
+        if let Some(ref receiver) = self.frontend_receiver {
+            receiver.use_mock_probe(use_mock);
+            return;
+        }
         let _ = self.cmd_tx.send(PipelineCommand::UseMockProbe(use_mock));
     }
 }

@@ -61,9 +61,6 @@ use workspace::{PaneId, PaneKind, Workspace};
 
 use crate::backend::{parse_elf, ElfInfo, ElfSymbol};
 use crate::pipeline::bridge::{PipelineBridge, PipelineCommand, SinkMessage};
-use crate::pipeline::executor::PipelineNodeIds;
-use crate::pipeline::node_type::NodeType;
-use crate::pipeline::packet::ConfigValue;
 use crate::config::{settings::RuntimeSettings, AppConfig, AppState};
 use crate::types::{CollectionStats, ConnectionStatus, DataPoint, VariableData, VariableType};
 use egui::Color32;
@@ -303,7 +300,7 @@ impl DataVisApp {
         mut config: AppConfig,
         app_state: AppState,
         project_path: Option<PathBuf>,
-        node_ids: PipelineNodeIds,
+        // Pipeline removed in Phase 3 - node_ids no longer needed
         native_menu: Option<muda::Menu>,
         ui_session: crate::config::UiSessionState,
     ) -> Self {
@@ -365,11 +362,11 @@ impl DataVisApp {
         crate::types::Variable::sync_next_id(&config.variables);
 
         let mut variable_data = HashMap::new();
-        for var in &config.variables {
+        for var in config.variables.values() {
             variable_data.insert(var.id, VariableData::new(var.clone()));
         }
 
-        for var in &config.variables {
+        for var in config.variables.values() {
             frontend.add_variable(var.clone());
         }
 
@@ -397,8 +394,6 @@ impl DataVisApp {
         }
 
         let topics = Topics {
-            recorder_node_id: node_ids.recorder_sink,
-            exporter_node_id: node_ids.exporter_sink,
             variable_data,
             project_name,
             project_file_path: project_path.clone(),
@@ -564,44 +559,6 @@ impl DataVisApp {
                     }
                     self.topics.available_probes = probes;
                 }
-                SinkMessage::CreatePaneForNode { node_id, pane_kind } => {
-                    // Create the pane
-                    let title = match pane_kind {
-                        workspace::PaneKind::TimeSeries => format!("Time Series {}", node_id.0),
-                        workspace::PaneKind::Recorder => "Recorder".to_string(),
-                        _ => continue,
-                    };
-
-                    let pane_id = self.workspace.register_pane(pane_kind, title);
-                    self.workspace.dock_state.push_to_first_leaf(pane_id);
-
-                    // Link back: configure node with pane_id
-                    let config_key = match pane_kind {
-                        workspace::PaneKind::TimeSeries => "pane_id",
-                        workspace::PaneKind::Recorder => "pane_id",
-                        _ => continue,
-                    };
-
-                    self.frontend.send_command(PipelineCommand::NodeConfig {
-                        node_id,
-                        key: config_key.to_string(),
-                        value: crate::pipeline::packet::ConfigValue::Int(pane_id.0 as i64),
-                    });
-
-                    // Store linkage for tracking
-                    self.node_to_pane.insert(node_id, pane_id);
-                    self.pane_to_node.insert(pane_id, node_id);
-                }
-                SinkMessage::ClosePaneForNode { pane_id } => {
-                    let pane_id = workspace::PaneId(pane_id);
-                    // Clean up tracking
-                    if let Some(node_id) = self.pane_to_node.remove(&pane_id) {
-                        self.node_to_pane.remove(&node_id);
-                    }
-
-                    // Close the pane
-                    self.workspace.remove_pane(pane_id);
-                }
                 SinkMessage::Shutdown => {
                     tracing::info!("Backend shutdown received");
                 }
@@ -626,34 +583,9 @@ impl DataVisApp {
                 SinkMessage::VariableTreeSnapshot(snapshots) => {
                     self.topics.variable_tree = snapshots;
                 }
-                SinkMessage::Topology(snapshot) => {
-                    self.topics.topology = Some(snapshot);
-                }
                 SinkMessage::RecordingComplete(recording) => {
                     tracing::info!("Recording complete: {} frames", recording.frames.len());
                     self.topics.completed_recordings.push(recording);
-                }
-                SinkMessage::NodeAdded(node_id) => {
-                    tracing::info!("Node added: {:?}", node_id);
-                }
-                SinkMessage::NodeRemoved(node_id) => {
-                    tracing::info!("Node removed: {:?}", node_id);
-                }
-                SinkMessage::EdgeAdded(edge_id) => {
-                    tracing::info!("Edge added: {:?}", edge_id);
-                }
-                SinkMessage::EdgeRemoved(edge_id) => {
-                    tracing::info!("Edge removed: {:?}", edge_id);
-                }
-                SinkMessage::TopologyChanged => {
-                    // Clear cached topology to force refresh
-                    self.topics.topology = None;
-                    // Request fresh topology
-                    self.frontend.send_command(PipelineCommand::RequestTopology);
-                }
-                SinkMessage::GraphError(msg) => {
-                    tracing::error!("Graph mutation error: {}", msg);
-                    self.last_error = Some(msg);
                 }
             }
         }
@@ -739,9 +671,51 @@ impl DataVisApp {
                     self.add_variable_confirmed(child);
                 }
             }
+            AppAction::AddPointerVariable { mut pointer, children, pointer_poll_rate_hz } => {
+                use crate::types::{PointerMetadata, PointerState};
+
+                let pointer_id = pointer.id;
+                let pointer_color = pointer.color;
+                let child_count = children.len();
+
+                // Set up pointer metadata on parent
+                pointer.pointer_metadata = Some(PointerMetadata {
+                    cached_address: None,
+                    last_pointer_read: None,
+                    pointer_poll_rate_hz,
+                    pointer_parent_id: None,
+                    offset_from_pointer: 0,
+                    pointer_state: PointerState::Unread,
+                });
+
+                self.add_variable_confirmed(pointer);
+
+                // Create dependent child variables
+                for (i, child_spec) in children.into_iter().enumerate() {
+                    let mut child = crate::types::Variable::new(
+                        &child_spec.name, 0, child_spec.var_type, // Address will be resolved at runtime
+                    );
+                    child.parent_id = Some(pointer_id);
+                    child.enabled = false;
+                    child.show_in_graph = false;
+                    child.color = crate::types::Variable::generate_child_color(pointer_color, i, child_count);
+
+                    // Set up pointer metadata for dependent child
+                    child.pointer_metadata = Some(PointerMetadata {
+                        cached_address: None,
+                        last_pointer_read: None,
+                        pointer_poll_rate_hz: 0, // Children don't poll independently
+                        pointer_parent_id: Some(pointer_id),
+                        offset_from_pointer: child_spec.offset_from_pointer,
+                        pointer_state: PointerState::Unread,
+                    });
+
+                    self.add_variable_confirmed(child);
+                }
+            }
             AppAction::RemoveVariable(id) => {
                 // Remove children first
-                let child_ids: Vec<u32> = self.config.variables.iter()
+                let child_ids: Vec<u32> = self.config.variables.values()
                     .filter(|v| v.parent_id == Some(id))
                     .map(|v| v.id)
                     .collect();
@@ -812,15 +786,11 @@ impl DataVisApp {
                 let id = self.workspace.register_pane(kind, title);
                 self.workspace.dock_state.push_to_first_leaf(id);
 
-                // For TimeSeries panes, create a linked GraphSink node
+                // Pipeline removed in Phase 3 - pane routing now handled by DataRouter
+                // For TimeSeries panes, data routing is automatic via DataRouter
                 if kind == PaneKind::TimeSeries {
-                    self.frontend.send_command(PipelineCommand::AddNode {
-                        node_type: NodeType::GraphSink,
-                        config: Some(ConfigValue::Int(id.0 as i64)),
-                    });
-                    // The GraphSink will be created but not connected.
-                    // User can connect it via Pipeline Editor if desired.
-                    // Data will flow once connected.
+                    // TODO: Send SubscribePane command to backend with pane variables
+                    // For now, panes receive global data
                 }
             }
             AppAction::NodeConfig { node_id, key, value } => {
@@ -831,16 +801,10 @@ impl DataVisApp {
                 });
             }
             AppAction::RequestTopology => {
-                self.frontend.send_command(PipelineCommand::RequestTopology);
+                // Pipeline topology removed - no action needed
             }
             AppAction::ClosePane(id) => {
-                // If this pane has a linked node, delete it
-                if let Some(node_id) = self.pane_to_node.remove(&id) {
-                    self.node_to_pane.remove(&node_id);
-                    self.frontend.send_command(PipelineCommand::RemoveNode(node_id));
-                }
-
-                // Continue with normal pane cleanup
+                // Pipeline node linkage removed - just close the pane
                 self.workspace.remove_pane(id);
             }
             AppAction::NewProject => {
@@ -891,7 +855,7 @@ impl DataVisApp {
                         data.variable.name = new_name.clone();
                     }
                     // Propagate prefix change to children
-                    let child_ids: Vec<u32> = self.config.variables.iter()
+                    let child_ids: Vec<u32> = self.config.variables.values()
                         .filter(|v| v.parent_id == Some(id))
                         .map(|v| v.id)
                         .collect();
@@ -909,27 +873,8 @@ impl DataVisApp {
                     }
                 }
             }
-            AppAction::AddPipelineNode(node_type) => {
-                self.frontend.send_command(PipelineCommand::AddNode {
-                    node_type,
-                    config: None,
-                });
-            }
-            AppAction::AddPipelineNodeWithConfig { node_type, config } => {
-                self.frontend.send_command(PipelineCommand::AddNode {
-                    node_type,
-                    config,
-                });
-            }
-            AppAction::RemovePipelineNode(node_id) => {
-                self.frontend.send_command(PipelineCommand::RemoveNode(node_id));
-            }
-            AppAction::AddPipelineEdge { from_node, to_node } => {
-                self.frontend.send_command(PipelineCommand::AddEdge { from_node, to_node });
-            }
-            AppAction::RemovePipelineEdge(edge_id) => {
-                self.frontend.send_command(PipelineCommand::RemoveEdge(edge_id));
-            }
+            // Pipeline actions removed in Phase 3
+            // AppAction::AddPipelineNode, AddPipelineNodeWithConfig, etc. no longer exist
         }
     }
 
@@ -975,7 +920,7 @@ impl DataVisApp {
         let is_duplicate = self
             .config
             .variables
-            .iter()
+            .values()
             .any(|v| v.address == var.address);
 
         if is_duplicate {
@@ -1114,7 +1059,7 @@ impl DataVisApp {
                 }
 
                 self.topics.variable_data.clear();
-                for var in &self.config.variables {
+                for var in self.config.variables.values() {
                     self.topics.variable_data
                         .insert(var.id, crate::types::VariableData::new(var.clone()));
                     self.frontend.add_variable(var.clone());
@@ -1140,7 +1085,7 @@ impl DataVisApp {
 
         let mut changes: Vec<VariableChange> = Vec::new();
 
-        for var in &self.config.variables {
+        for var in self.config.variables.values() {
             let symbol = elf_info.find_symbol(&var.name);
 
             match symbol {
@@ -1242,7 +1187,7 @@ impl DataVisApp {
         }
 
         for (var_id, new_address) in address_updates {
-            if let Some(var) = self.config.variables.iter_mut().find(|v| v.id == var_id) {
+            if let Some(var) = self.config.variables.get_mut(&var_id) {
                 tracing::info!(
                     "Updating variable '{}' address: 0x{:08X} -> 0x{:08X}",
                     var.name,
@@ -1254,13 +1199,13 @@ impl DataVisApp {
             if let Some(data) = self.topics.variable_data.get_mut(&var_id) {
                 data.variable.address = new_address;
             }
-            if let Some(var) = self.config.variables.iter().find(|v| v.id == var_id) {
+            if let Some(var) = self.config.variables.get(&var_id) {
                 self.frontend.update_variable(var.clone());
             }
         }
 
         for (var_id, new_type) in type_updates {
-            if let Some(var) = self.config.variables.iter_mut().find(|v| v.id == var_id) {
+            if let Some(var) = self.config.variables.get_mut(&var_id) {
                 tracing::info!(
                     "Updating variable '{}' type: {} -> {}",
                     var.name,
@@ -1272,13 +1217,13 @@ impl DataVisApp {
             if let Some(data) = self.topics.variable_data.get_mut(&var_id) {
                 data.variable.var_type = new_type;
             }
-            if let Some(var) = self.config.variables.iter().find(|v| v.id == var_id) {
+            if let Some(var) = self.config.variables.get(&var_id) {
                 self.frontend.update_variable(var.clone());
             }
         }
 
         for id in ids_to_remove {
-            if let Some(var) = self.config.variables.iter().find(|v| v.id == id) {
+            if let Some(var) = self.config.variables.get(&id) {
                 tracing::info!("Removing missing variable '{}' (id: {})", var.name, id);
             }
             self.config.remove_variable(id);

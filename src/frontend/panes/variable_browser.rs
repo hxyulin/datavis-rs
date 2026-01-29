@@ -39,11 +39,23 @@ impl VariableBrowserState {
         self.filtered_symbols.clear();
         if let Some(info) = elf_info {
             let results = info.search_variables(&self.query);
-            self.filtered_symbols = results
-                .into_iter()
-                .filter(|s| self.show_unreadable || s.is_readable())
-                .cloned()
-                .collect();
+
+            // Deduplicate by (address, name) - prefer readable over unreadable
+            let mut seen = std::collections::HashMap::new();
+            for symbol in results {
+                if self.show_unreadable || symbol.is_readable() {
+                    let key = (symbol.address, symbol.display_name.as_str());
+                    seen.entry(key)
+                        .and_modify(|existing: &mut &ElfSymbol| {
+                            // Prefer readable symbols over unreadable
+                            if !existing.is_readable() && symbol.is_readable() {
+                                *existing = symbol;
+                            }
+                        })
+                        .or_insert(symbol);
+                }
+            }
+            self.filtered_symbols = seen.into_values().cloned().collect();
         }
         if self.filtered_symbols.is_empty() {
             self.selected_index = None;
@@ -205,6 +217,7 @@ pub fn render(
                             &mut struct_add_actions,
                             &mut None,
                             None,
+                            false, // root level is never a pointer child
                         );
                     }
                 }
@@ -340,6 +353,7 @@ fn render_type_tree(
     struct_add_actions: &mut Vec<AppAction>,
     symbol_to_use: &mut Option<ElfSymbol>,
     root_symbol: Option<&ElfSymbol>,
+    parent_is_pointer: bool,
 ) {
     let is_expanded = expanded_paths.contains(path);
     let type_name = type_handle
@@ -365,34 +379,67 @@ fn render_type_tree(
         .map(|h| h.is_pointer_or_reference())
         .unwrap_or(false);
 
-    let members = underlying.as_ref().and_then(|h| {
-        if let Some(members) = h.members() {
-            return Some((members.to_vec(), h.clone()));
-        }
-        None
-    });
+    let members = if is_pointer {
+        // For pointers, get members from the pointee type
+        underlying.as_ref().and_then(|h| {
+            h.pointee_underlying().and_then(|pointee| {
+                pointee.members().map(|m| (m.to_vec(), pointee.clone()))
+            })
+        })
+    } else {
+        // For non-pointers, get members directly
+        underlying.as_ref().and_then(|h| {
+            h.members().map(|m| (m.to_vec(), h.clone()))
+        })
+    };
 
-    let array_info = underlying.as_ref().and_then(|h| {
-        if !h.is_pointer_or_reference() && h.is_array() {
-            let count = h.array_count().unwrap_or(0);
-            let elem_size = h.element_size().unwrap_or(0);
-            let elem_type = h.element_type();
-            if count > 0 && elem_size > 0 {
-                Some((count.min(MAX_ARRAY_ELEMENTS), elem_size, elem_type))
+    let array_info = if is_pointer {
+        // For pointers, check if pointee is an array
+        underlying.as_ref().and_then(|h| {
+            h.pointee_underlying().and_then(|pointee| {
+                if pointee.is_array() {
+                    let count = pointee.array_count().unwrap_or(0);
+                    let elem_size = pointee.element_size().unwrap_or(0);
+                    let elem_type = pointee.element_type();
+                    if count > 0 && elem_size > 0 {
+                        Some((count.min(MAX_ARRAY_ELEMENTS), elem_size, elem_type))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+        })
+    } else {
+        // Non-pointer: use existing direct array logic
+        underlying.as_ref().and_then(|h| {
+            if h.is_array() {
+                let count = h.array_count().unwrap_or(0);
+                let elem_size = h.element_size().unwrap_or(0);
+                let elem_type = h.element_type();
+                if count > 0 && elem_size > 0 {
+                    Some((count.min(MAX_ARRAY_ELEMENTS), elem_size, elem_type))
+                } else {
+                    None
+                }
             } else {
                 None
             }
-        } else {
-            None
-        }
-    });
+        })
+    };
 
     ui.horizontal(|ui| {
         ui.add_space((indent_level * 20) as f32);
 
         if can_expand {
             let expand_icon = if is_expanded { "v" } else { ">" };
-            if ui.small_button(expand_icon).clicked() {
+            let expand_tooltip = if is_pointer {
+                "Expand to see pointee structure (requires dereferencing at runtime)"
+            } else {
+                "Expand to see members/elements"
+            };
+            if ui.small_button(expand_icon).on_hover_text(expand_tooltip).clicked() {
                 *toggle_expand_path = Some(path.to_string());
             }
         } else {
@@ -404,6 +451,10 @@ fn render_type_tree(
                 "{} @ 0x{:08X} ({} bytes) - {}",
                 name, address, size, type_name
             )
+        } else if parent_is_pointer {
+            let short_name = name.rsplit('.').next().unwrap_or(name);
+            // For pointer members, show offset from pointer base (Phase 2 will use actual pointer value)
+            format!("→{}: {} (needs pointer dereference)", short_name, type_name)
         } else {
             let short_name = name.rsplit('.').next().unwrap_or(name);
             format!(".{}: {} @ 0x{:08X}", short_name, type_name, address)
@@ -418,7 +469,9 @@ fn render_type_tree(
         }
 
         if is_addable {
-            let hover_text = if is_pointer {
+            let hover_text = if is_pointer && can_expand {
+                "Add pointer variable (reads address stored in pointer)"
+            } else if is_pointer {
                 "Add pointer value as variable"
             } else {
                 "Add as variable"
@@ -448,6 +501,26 @@ fn render_type_tree(
                 });
             }
         }
+
+        // "Add all" button for pointer types (Phase 2 feature)
+        if can_expand && is_pointer {
+            if ui.small_button("+all")
+                .on_hover_text("Add pointer with auto-dereferencing children (updates pointer at 1 Hz)")
+                .clicked()
+            {
+                let parent_type = type_handle
+                    .as_ref()
+                    .map(|h| h.to_variable_type())
+                    .unwrap_or(crate::types::VariableType::U32);
+                let pointer_var = Variable::new(name, address, parent_type);
+                let children = collect_pointer_children(&type_handle, name);
+                struct_add_actions.push(AppAction::AddPointerVariable {
+                    pointer: pointer_var,
+                    children,
+                    pointer_poll_rate_hz: 1, // Default 1 Hz for pointer updates
+                });
+            }
+        }
     });
 
     // Render expanded members or array elements
@@ -473,6 +546,7 @@ fn render_type_tree(
                     struct_add_actions,
                     symbol_to_use,
                     root_symbol,
+                    is_pointer, // Pass pointer state to children
                 );
             }
         }
@@ -497,6 +571,7 @@ fn render_type_tree(
                     struct_add_actions,
                     symbol_to_use,
                     root_symbol,
+                    is_pointer, // Pass pointer state to array elements
                 );
             }
 
@@ -593,6 +668,97 @@ fn collect_children_from_type(
     }
 
     children
+}
+
+/// Collect pointer-dependent children from a pointer type handle for AddPointerVariable.
+/// Similar to collect_children_from_type, but stores offsets from dereferenced pointer
+/// instead of absolute addresses (Phase 2 feature).
+fn collect_pointer_children(
+    type_handle: &Option<TypeHandle>,
+    parent_name: &str,
+) -> Vec<crate::frontend::state::PointerChildSpec> {
+
+    let mut children = Vec::new();
+    let Some(handle) = type_handle else {
+        return children;
+    };
+
+    // Get the pointee type (what the pointer points to)
+    let pointee = handle.underlying().pointee_underlying();
+    let Some(pointee) = pointee else {
+        return children;
+    };
+
+    // Recursively collect from pointee, starting at offset 0
+    collect_pointer_children_recursive(&pointee, parent_name, 0, &mut children);
+
+    children
+}
+
+/// Recursive helper for collecting pointer children with offsets
+fn collect_pointer_children_recursive(
+    type_handle: &TypeHandle,
+    parent_name: &str,
+    base_offset: u64,
+    children: &mut Vec<crate::frontend::state::PointerChildSpec>,
+) {
+    use crate::frontend::state::PointerChildSpec;
+
+    // Struct members
+    if let Some(members) = type_handle.members() {
+        for member in members {
+            let member_offset = base_offset + member.offset;
+            let full_name = format!("{}.{}", parent_name, member.name);
+            let member_type = type_handle.member_type(member);
+            let member_underlying = member_type.underlying();
+
+            if member_underlying.is_expandable() && !member_underlying.is_pointer_or_reference() {
+                // Recurse into nested structs
+                collect_pointer_children_recursive(
+                    &member_type,
+                    &full_name,
+                    member_offset,
+                    children,
+                );
+            } else if member_type.is_addable() {
+                children.push(PointerChildSpec {
+                    name: full_name,
+                    offset_from_pointer: member_offset,
+                    var_type: member_type.to_variable_type(),
+                });
+            }
+        }
+    }
+
+    // Array elements
+    if !type_handle.is_pointer_or_reference() && type_handle.is_array() {
+        let count = type_handle.array_count().unwrap_or(0).min(MAX_ARRAY_ELEMENTS);
+        let elem_size = type_handle.element_size().unwrap_or(0);
+        let elem_type = type_handle.element_type();
+        if count > 0 && elem_size > 0 {
+            for i in 0..count {
+                let elem_offset = base_offset + (i * elem_size);
+                let full_name = format!("{}[{}]", parent_name, i);
+                if let Some(ref et) = elem_type {
+                    let et_underlying = et.underlying();
+                    if et_underlying.is_expandable() && !et_underlying.is_pointer_or_reference() {
+                        collect_pointer_children_recursive(
+                            et,
+                            &full_name,
+                            elem_offset,
+                            children,
+                        );
+                    } else if et.is_addable() {
+                        children.push(PointerChildSpec {
+                            name: full_name,
+                            offset_from_pointer: elem_offset,
+                            var_type: et.to_variable_type(),
+                        });
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Pane for VariableBrowserState {

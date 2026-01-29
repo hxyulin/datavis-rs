@@ -124,10 +124,10 @@ impl DialogState for ExportConfigState {
 
 impl ExportConfigState {
     /// Initialize state with available variables
-    pub fn init_with_variables(&mut self, variables: &[Variable]) {
+    pub fn init_with_variables(&mut self, variables: &std::collections::HashMap<u32, Variable>) {
         if self.select_all {
             self.selected_variables = variables
-                .iter()
+                .values()
                 .filter(|v| v.enabled)
                 .map(|v| v.id)
                 .collect();
@@ -188,7 +188,7 @@ pub enum ExportConfigAction {
 /// Context for rendering the export config dialog
 pub struct ExportConfigContext<'a> {
     /// Available variables
-    pub variables: &'a [Variable],
+    pub variables: &'a std::collections::HashMap<u32, Variable>,
     /// Total number of data points across all variables
     pub total_samples: usize,
     /// Data duration in seconds
@@ -318,7 +318,7 @@ impl Dialog for ExportConfigDialog {
                     egui::ScrollArea::vertical()
                         .max_height(100.0)
                         .show(ui, |ui| {
-                            for var in ctx.variables {
+                            for var in ctx.variables.values() {
                                 if var.enabled {
                                     let mut selected = state.selected_variables.contains(&var.id);
                                     if ui.checkbox(&mut selected, &var.name).changed() {
@@ -335,7 +335,7 @@ impl Dialog for ExportConfigDialog {
             }
 
             let selected_count = if state.select_all {
-                ctx.variables.iter().filter(|v| v.enabled).count()
+                ctx.variables.values().filter(|v| v.enabled).count()
             } else {
                 state.selected_variables.len()
             };
@@ -500,7 +500,7 @@ impl Dialog for ExportConfigDialog {
                 if state.settings.include_timestamps {
                     header_preview.push("timestamp");
                 }
-                for var in ctx.variables {
+                for var in ctx.variables.values() {
                     if state.select_all || state.selected_variables.contains(&var.id) {
                         if var.enabled {
                             header_preview.push(&var.name);
@@ -538,7 +538,7 @@ impl Dialog for ExportConfigDialog {
                         time_end: state.time_end,
                         variables: if state.select_all {
                             ctx.variables
-                                .iter()
+                                .values()
                                 .filter(|v| v.enabled)
                                 .map(|v| v.id)
                                 .collect()

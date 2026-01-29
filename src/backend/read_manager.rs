@@ -4,6 +4,10 @@
 //! adjacent addresses into single larger reads. This reduces probe communication
 //! overhead significantly when variables are located close together in memory.
 //!
+//! Also provides DependentReadPlanner for two-stage pointer dereferencing:
+//! 1. Read pointer values at lower rate (e.g., 1 Hz)
+//! 2. Read pointed-to data at normal rate using cached pointer addresses
+//!
 //! # Example
 //!
 //! ```ignore
@@ -21,7 +25,8 @@
 //! }
 //! ```
 
-use crate::types::Variable;
+use crate::types::{Variable, PointerState};
+use std::time::Instant;
 
 /// Default gap threshold for combining reads (64 bytes)
 pub const DEFAULT_GAP_THRESHOLD: usize = 64;
@@ -181,6 +186,183 @@ impl ReadManager {
 impl Default for ReadManager {
     fn default() -> Self {
         Self::new(DEFAULT_GAP_THRESHOLD)
+    }
+}
+
+/// Manages two-stage reads for pointer dereferencing
+///
+/// Separates pointer variables (read at lower rate) from dependent variables
+/// (data pointed to, read at normal rate). Resolves dependent addresses using
+/// cached pointer values.
+#[derive(Debug, Default)]
+pub struct DependentReadPlanner {
+    /// Last time each pointer was read (keyed by variable ID)
+    last_pointer_reads: std::collections::HashMap<u32, Instant>,
+}
+
+impl DependentReadPlanner {
+    /// Create a new dependent read planner
+    pub fn new() -> Self {
+        Self {
+            last_pointer_reads: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Plan two-stage reads: pointers first, then data
+    ///
+    /// # Arguments
+    /// * `all_vars` - All enabled variables to consider
+    ///
+    /// # Returns
+    /// A tuple of (pointers_to_read, data_to_read) where:
+    /// - pointers_to_read: Pointer variables that need their value updated
+    /// - data_to_read: All variables with resolved addresses (non-pointers + cached pointers)
+    pub fn plan_reads(&mut self, all_vars: &[Variable]) -> (Vec<Variable>, Vec<Variable>) {
+        let now = Instant::now();
+        let mut pointers_to_read = Vec::new();
+        let mut data_to_read = Vec::new();
+
+        for var in all_vars {
+            if let Some(ptr_meta) = &var.pointer_metadata {
+                // This is a pointer variable or depends on a pointer
+                if ptr_meta.pointer_parent_id.is_none() {
+                    // This is the pointer itself (not a dependent child)
+                    if self.should_read_pointer(var, now) {
+                        pointers_to_read.push(var.clone());
+                    }
+                    // Always add to data reads (we'll use cached address or current value)
+                    data_to_read.push(var.clone());
+                } else {
+                    // This is a dependent variable - will be resolved later
+                    // For now, just add with its current address
+                    data_to_read.push(var.clone());
+                }
+            } else {
+                // Regular variable (non-pointer)
+                data_to_read.push(var.clone());
+            }
+        }
+
+        (pointers_to_read, data_to_read)
+    }
+
+    /// Check if a pointer variable needs to be read based on its poll rate
+    fn should_read_pointer(&self, var: &Variable, now: Instant) -> bool {
+        let Some(ptr_meta) = &var.pointer_metadata else {
+            return false;
+        };
+
+        // If never read, always read
+        let Some(last_read) = self.last_pointer_reads.get(&var.id) else {
+            return true;
+        };
+
+        // Check if enough time has passed based on poll rate
+        let poll_rate_hz = ptr_meta.pointer_poll_rate_hz.max(1);
+        let interval = std::time::Duration::from_secs_f64(1.0 / poll_rate_hz as f64);
+        now.duration_since(*last_read) >= interval
+    }
+
+    /// Update pointer cache after reading pointer values
+    ///
+    /// # Arguments
+    /// * `variables` - The variables that were read (with updated pointer_metadata)
+    ///
+    /// This should be called after successfully reading pointer values to update
+    /// the timestamp tracking.
+    pub fn update_pointer_cache(&mut self, variables: &[Variable]) {
+        let now = Instant::now();
+        for var in variables {
+            if let Some(ptr_meta) = &var.pointer_metadata {
+                if ptr_meta.pointer_parent_id.is_none() {
+                    // This is a pointer variable (not a dependent)
+                    self.last_pointer_reads.insert(var.id, now);
+                }
+            }
+        }
+    }
+
+    /// Resolve dependent variable addresses using cached pointer values
+    ///
+    /// # Arguments
+    /// * `variables` - All variables (includes both pointers and dependents)
+    ///
+    /// # Returns
+    /// A new vector with dependent variables having their addresses resolved
+    /// to pointer_value + offset. Variables without valid pointer parents are unchanged.
+    pub fn resolve_addresses(&self, variables: &[Variable]) -> Vec<Variable> {
+        // Build a map of pointer ID -> cached address
+        let mut pointer_addresses = std::collections::HashMap::new();
+        for var in variables {
+            if let Some(ptr_meta) = &var.pointer_metadata {
+                if ptr_meta.pointer_parent_id.is_none() {
+                    // This is a pointer, store its cached address
+                    if let Some(cached_addr) = ptr_meta.cached_address {
+                        pointer_addresses.insert(var.id, cached_addr);
+                    }
+                }
+            }
+        }
+
+        // Resolve dependent variable addresses
+        variables.iter().map(|var| {
+            if let Some(ptr_meta) = &var.pointer_metadata {
+                if let Some(parent_id) = ptr_meta.pointer_parent_id {
+                    // This is a dependent variable
+                    if let Some(&parent_addr) = pointer_addresses.get(&parent_id) {
+                        // Resolve: parent_address + offset
+                        let mut resolved = var.clone();
+                        resolved.address = parent_addr.wrapping_add(ptr_meta.offset_from_pointer);
+                        return resolved;
+                    }
+                }
+            }
+            var.clone()
+        }).collect()
+    }
+
+    /// Update pointer state based on read value
+    ///
+    /// # Arguments
+    /// * `variable` - The variable to update (must have pointer_metadata)
+    /// * `value` - The read value (interpreted as address)
+    ///
+    /// # Returns
+    /// Updated variable with pointer state set appropriately
+    pub fn update_pointer_state(variable: &mut Variable, value: f64) {
+        let Some(ptr_meta) = &mut variable.pointer_metadata else {
+            return;
+        };
+
+        let addr = value as u64;
+
+        // Update cached address
+        ptr_meta.cached_address = Some(addr);
+
+        // Determine pointer state
+        ptr_meta.pointer_state = if addr == 0 {
+            PointerState::Null
+        } else if addr < 0x1000 || addr > 0xFFFF_FFFF_0000_0000 {
+            // Suspicious addresses (very low or very high)
+            PointerState::Invalid(addr)
+        } else if addr % 4 != 0 {
+            // Unaligned pointer (suspicious for 32/64-bit architectures)
+            PointerState::Invalid(addr)
+        } else {
+            PointerState::Valid(addr)
+        };
+    }
+
+    /// Mark pointer read as failed
+    pub fn mark_pointer_error(variable: &mut Variable) {
+        if let Some(ptr_meta) = &mut variable.pointer_metadata {
+            ptr_meta.pointer_state = PointerState::ReadError;
+        }
+    }
+
+    /// Clear cached data (for reset/reconnect)
+    pub fn clear(&mut self) {
+        self.last_pointer_reads.clear();
     }
 }
 

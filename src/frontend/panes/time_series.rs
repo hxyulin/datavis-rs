@@ -860,7 +860,7 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
             .and_then(|id| shared.topics.graph_pane_data.get(&id))
             .is_some();
 
-        for var in &shared.config.variables {
+        for var in shared.config.variables.values() {
             if !var.enabled || !var.show_in_graph {
                 continue;
             }
@@ -1106,7 +1106,7 @@ fn format_cursor_tooltip(state: &TimeSeriesState) -> String {
 fn update_range_statistics(state: &mut TimeSeriesState, shared: &SharedState<'_>) {
     state.variable_statistics.clear();
     if let Some((t_start, t_end)) = state.cursor.time_range() {
-        for var in &shared.config.variables {
+        for var in shared.config.variables.values() {
             if !var.enabled || !var.show_in_graph {
                 continue;
             }

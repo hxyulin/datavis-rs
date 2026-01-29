@@ -6,7 +6,7 @@
 
 use crate::frontend::pane_trait::Pane;
 use crate::frontend::panes::{
-    FftViewState, PipelineEditorState, RecorderPaneState,
+    FftViewState, RecorderPaneState,
     TimeSeriesState, VariableBrowserState, VariableListState, WatcherState,
 };
 use crate::frontend::workspace::PaneKind;
@@ -40,12 +40,6 @@ pub fn build_registry() -> Vec<PaneKindInfo> {
             display_name: "Session Capture",
             is_singleton: true,
             factory: || Box::new(RecorderPaneState::default()),
-        },
-        PaneKindInfo {
-            kind: PaneKind::PipelineEditor,
-            display_name: "Pipeline Editor",
-            is_singleton: true,
-            factory: || Box::new(PipelineEditorState::default()),
         },
         // Multi-instance visualizers
         PaneKindInfo {

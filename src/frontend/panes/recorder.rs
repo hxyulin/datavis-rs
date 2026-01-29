@@ -10,10 +10,25 @@ use egui::Ui;
 use crate::frontend::pane_trait::Pane;
 use crate::frontend::state::{AppAction, SharedState};
 use crate::frontend::workspace::PaneKind;
-use crate::pipeline::id::NodeId;
-use crate::pipeline::nodes::{ExportLayout, ValueChoice};
-use crate::pipeline::packet::ConfigValue;
 use crate::session::{SessionPlayer, SessionRecording, SessionState};
+
+/// Export layout modes (formerly from pipeline::nodes::exporter_sink)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportLayout {
+    /// Long format: one row per sample (timestamp, var_name, value)
+    Long,
+    /// Wide format: one row per timestamp, columns for each variable
+    Wide,
+}
+
+/// Which value to export (formerly from pipeline::nodes::exporter_sink)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueChoice {
+    /// Export raw value
+    Raw,
+    /// Export converted value
+    Converted,
+}
 
 /// Tab selection for the Session Capture pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,10 +131,8 @@ fn render_record_tab(
     ui: &mut Ui,
     actions: &mut Vec<AppAction>,
 ) {
-    let recorder_node_id = shared.topics.recorder_node_id;
-
     // --- Recording controls ---
-    render_recording_controls(state, shared, ui, actions, recorder_node_id);
+    render_recording_controls(state, shared, ui, actions);
     ui.separator();
 
     // --- Playback controls ---
@@ -134,8 +147,7 @@ fn render_recording_controls(
     state: &mut RecorderPaneState,
     shared: &SharedState<'_>,
     ui: &mut Ui,
-    actions: &mut Vec<AppAction>,
-    recorder_node_id: NodeId,
+    _actions: &mut Vec<AppAction>,
 ) {
     let recorder_state = shared.topics.recorder_state;
 
@@ -180,37 +192,9 @@ fn render_recording_controls(
             });
 
             if ui.button("Start Recording").clicked() {
-                let name = if state.session_name.is_empty() {
-                    format!(
-                        "Session {}",
-                        chrono::Local::now().format("%Y-%m-%d %H:%M")
-                    )
-                } else {
-                    state.session_name.clone()
-                };
-
-                actions.push(AppAction::NodeConfig {
-                    node_id: recorder_node_id,
-                    key: "session_name".to_string(),
-                    value: ConfigValue::String(name),
-                });
-                if state.max_frames > 0 {
-                    actions.push(AppAction::NodeConfig {
-                        node_id: recorder_node_id,
-                        key: "max_frames".to_string(),
-                        value: ConfigValue::Int(state.max_frames as i64),
-                    });
-                }
-                actions.push(AppAction::NodeConfig {
-                    node_id: recorder_node_id,
-                    key: "sample_interval_ms".to_string(),
-                    value: ConfigValue::Int(state.sample_interval_ms as i64),
-                });
-                actions.push(AppAction::NodeConfig {
-                    node_id: recorder_node_id,
-                    key: "start".to_string(),
-                    value: ConfigValue::Bool(true),
-                });
+                // TODO: Implement recording with new backend architecture
+                // Recording functionality needs to be re-implemented without pipeline nodes
+                ui.label("Recording not yet implemented in new architecture");
             }
         }
         SessionState::Recording => {
@@ -221,18 +205,10 @@ fn render_recording_controls(
 
             ui.horizontal(|ui| {
                 if ui.button("Stop").clicked() {
-                    actions.push(AppAction::NodeConfig {
-                        node_id: recorder_node_id,
-                        key: "stop".to_string(),
-                        value: ConfigValue::Bool(true),
-                    });
+                    // TODO: Implement stop recording
                 }
                 if ui.button("Cancel").clicked() {
-                    actions.push(AppAction::NodeConfig {
-                        node_id: recorder_node_id,
-                        key: "cancel".to_string(),
-                        value: ConfigValue::Bool(true),
-                    });
+                    // TODO: Implement cancel recording
                 }
             });
         }
@@ -401,9 +377,8 @@ fn render_export_tab(
     state: &mut RecorderPaneState,
     shared: &mut SharedState<'_>,
     ui: &mut Ui,
-    actions: &mut Vec<AppAction>,
+    _actions: &mut Vec<AppAction>,
 ) {
-    let exporter_node_id = shared.topics.exporter_node_id;
 
     // --- Status ---
     ui.horizontal(|ui| {
@@ -507,68 +482,14 @@ fn render_export_tab(
     ui.horizontal(|ui| {
         if shared.topics.exporter_active {
             if ui.button("Stop Export").clicked() {
-                actions.push(AppAction::NodeConfig {
-                    node_id: exporter_node_id,
-                    key: "stop".to_string(),
-                    value: ConfigValue::Bool(true),
-                });
+                // TODO: Implement stop export with new architecture
             }
         } else {
-            let can_start = !state.export_path.is_empty();
-            ui.add_enabled_ui(can_start, |ui| {
-                if ui.button("Start Export").clicked() {
-                    actions.push(AppAction::NodeConfig {
-                        node_id: exporter_node_id,
-                        key: "path".to_string(),
-                        value: ConfigValue::String(state.export_path.clone()),
-                    });
-                    actions.push(AppAction::NodeConfig {
-                        node_id: exporter_node_id,
-                        key: "format".to_string(),
-                        value: ConfigValue::String(state.export_format.display_name().to_lowercase()),
-                    });
-                    // Send layout
-                    actions.push(AppAction::NodeConfig {
-                        node_id: exporter_node_id,
-                        key: "layout".to_string(),
-                        value: ConfigValue::String(
-                            match state.export_layout {
-                                ExportLayout::Long => "long",
-                                ExportLayout::Wide => "wide",
-                            }
-                            .to_string(),
-                        ),
-                    });
-                    // Send per-variable value choices (wide mode)
-                    if state.export_layout == ExportLayout::Wide {
-                        let choices_str = state
-                            .value_choices
-                            .iter()
-                            .map(|(id, choice)| {
-                                format!(
-                                    "{}:{}",
-                                    id,
-                                    match choice {
-                                        ValueChoice::Raw => "raw",
-                                        ValueChoice::Converted => "converted",
-                                    }
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        actions.push(AppAction::NodeConfig {
-                            node_id: exporter_node_id,
-                            key: "value_choices".to_string(),
-                            value: ConfigValue::String(choices_str),
-                        });
-                    }
-                    actions.push(AppAction::NodeConfig {
-                        node_id: exporter_node_id,
-                        key: "start".to_string(),
-                        value: ConfigValue::Bool(true),
-                    });
-                }
-            });
+            let _can_start = !state.export_path.is_empty();
+            if ui.button("Start Export").clicked() {
+                // TODO: Implement CSV export with new backend architecture
+                // Export functionality needs to be re-implemented without pipeline nodes
+            }
         }
     });
 }

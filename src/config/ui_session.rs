@@ -14,6 +14,7 @@
 //! | **Portability** | Not portable (local machine) | Portable (share with team) |
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::config::{app_data_dir, ensure_app_data_dir};
@@ -58,10 +59,10 @@ pub struct UiSessionState {
     #[serde(default)]
     pub elf_file_path: Option<PathBuf>,
 
-    /// Variables configured in this session
+    /// Variables configured in this session (indexed by ID for O(1) lookup)
     /// These are auto-saved so one-off debugging sessions persist variables
     #[serde(default)]
-    pub variables: Vec<Variable>,
+    pub variables: HashMap<u32, Variable>,
 }
 
 fn default_version() -> u32 {
@@ -84,7 +85,7 @@ impl Default for UiSessionState {
             selected_probe_index: None,
             target_chip_input: String::new(),
             elf_file_path: None,
-            variables: Vec::new(),
+            variables: HashMap::new(),
         }
     }
 }

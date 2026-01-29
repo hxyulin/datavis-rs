@@ -72,7 +72,7 @@ pub fn render(
                     }
                     ui.end_row();
 
-                    for var in &shared.config.variables {
+                    for var in shared.config.variables.values() {
                         if !var.enabled {
                             continue;
                         }

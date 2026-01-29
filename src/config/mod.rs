@@ -45,6 +45,7 @@ pub use ui_session::{SerializedPane, SerializedWorkspaceLayout, UiSessionState, 
 use crate::error::{DataVisError, Result};
 use crate::types::{Variable, VariableType};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -551,9 +552,9 @@ pub struct AppConfig {
     #[serde(default)]
     pub probe: ProbeConfig,
 
-    /// Variables to observe
+    /// Variables to observe (indexed by variable ID for O(1) lookup)
     #[serde(default)]
-    pub variables: Vec<Variable>,
+    pub variables: HashMap<u32, Variable>,
 
     /// UI configuration
     #[serde(default)]
@@ -572,29 +573,27 @@ impl AppConfig {
 
     /// Add a variable to observe
     pub fn add_variable(&mut self, variable: Variable) {
-        self.variables.push(variable);
+        self.variables.insert(variable.id, variable);
     }
 
-    /// Remove a variable by ID
+    /// Remove a variable by ID (returns true if variable was present)
     pub fn remove_variable(&mut self, id: u32) -> bool {
-        let len_before = self.variables.len();
-        self.variables.retain(|v| v.id != id);
-        self.variables.len() < len_before
+        self.variables.remove(&id).is_some()
     }
 
-    /// Find a variable by ID
+    /// Find a variable by ID (O(1) lookup)
     pub fn find_variable(&self, id: u32) -> Option<&Variable> {
-        self.variables.iter().find(|v| v.id == id)
+        self.variables.get(&id)
     }
 
-    /// Find a variable by ID (mutable)
+    /// Find a variable by ID (mutable, O(1) lookup)
     pub fn find_variable_mut(&mut self, id: u32) -> Option<&mut Variable> {
-        self.variables.iter_mut().find(|v| v.id == id)
+        self.variables.get_mut(&id)
     }
 
     /// Get enabled variables
     pub fn enabled_variables(&self) -> impl Iterator<Item = &Variable> {
-        self.variables.iter().filter(|v| v.enabled)
+        self.variables.values().filter(|v| v.enabled)
     }
 
     /// Create a sample configuration with example variables

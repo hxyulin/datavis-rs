@@ -48,6 +48,7 @@
 //! }
 //! ```
 
+pub mod converter_engine;
 pub mod dwarf_parser;
 pub mod elf_parser;
 #[cfg(feature = "mock-probe")]
@@ -59,6 +60,7 @@ pub mod type_table;
 pub mod worker;
 
 use crate::config::ProbeConfig;
+use std::collections::{HashMap, HashSet};
 
 pub use dwarf_parser::{DwarfDiagnostics, DwarfParseResult, DwarfParser, ParsedSymbol, VariableStatus};
 pub use elf_parser::{demangle_symbol, ElfInfo, ElfParser, SymbolInfo, SymbolType};
@@ -81,6 +83,17 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Data update with global and per-pane routing
+///
+/// This will replace DataBatch in Phase 2 when we switch to the new data flow.
+#[derive(Debug, Clone)]
+pub struct DataUpdate {
+    /// Global data stream (all variables, all panes can see this)
+    pub global: Vec<(u32, Duration, f64, f64)>, // (var_id, timestamp, raw, converted)
+    /// Per-pane filtered data streams
+    pub per_pane: HashMap<u64, Vec<(u32, Duration, f64, f64)>>, // pane_id -> data
+}
 
 /// Message sent from the UI to the backend
 #[derive(Debug, Clone)]
@@ -128,6 +141,22 @@ pub enum BackendCommand {
     UseMockProbe(bool),
     /// Request probe list refresh (async)
     RefreshProbes,
+    /// Update converter script for a variable (Phase 2)
+    UpdateConverter {
+        /// Variable ID
+        var_id: u32,
+        /// Variable name (for error messages)
+        var_name: String,
+        /// New converter script (None to remove converter)
+        script: Option<String>,
+    },
+    /// Subscribe a pane to specific variables (Phase 2)
+    SubscribePane {
+        /// Pane ID
+        pane_id: u64,
+        /// Variable IDs this pane wants to receive
+        var_ids: HashSet<u32>,
+    },
 }
 
 /// Represents a detected probe (real or mock)
@@ -228,6 +257,8 @@ pub enum BackendMessage {
     },
     /// Batch of data points (more efficient for high-frequency updates)
     DataBatch(Vec<(u32, Duration, f64, f64)>),
+    /// Data update with per-pane routing (Phase 2 - replaces DataBatch)
+    DataUpdate(DataUpdate),
     /// Variable read error
     ReadError { variable_id: u32, error: String },
     /// Variable write succeeded

@@ -92,7 +92,7 @@ pub enum TriggerConfigAction {
 /// Context for rendering the trigger config dialog
 pub struct TriggerConfigContext<'a> {
     /// Available variables to trigger on
-    pub variables: &'a [Variable],
+    pub variables: &'a std::collections::HashMap<u32, Variable>,
     /// Current trigger state (armed, triggered)
     pub is_armed: bool,
     pub is_triggered: bool,
@@ -148,12 +148,12 @@ impl Dialog for TriggerConfigDialog {
                     .selected_text(
                         state
                             .variable_id
-                            .and_then(|id| ctx.variables.iter().find(|v| v.id == id))
+                            .and_then(|id| ctx.variables.get(&id))
                             .map(|v| v.name.as_str())
                             .unwrap_or("Select..."),
                     )
                     .show_ui(ui, |ui| {
-                        for var in ctx.variables {
+                        for var in ctx.variables.values() {
                             if var.enabled {
                                 ui.selectable_value(
                                     &mut state.variable_id,
