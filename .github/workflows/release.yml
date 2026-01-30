@@ -33,7 +33,7 @@ jobs:
             pkg-config libudev-dev libhidapi-dev libgl1-mesa-dev \
             libxrandr-dev libxcb-render0-dev libxi-dev libxcursor-dev \
             libxinerama-dev libx11-dev libatk1.0-dev libgtk-3-dev \
-            libfuse2
+            libusb-1.0-0-dev libxdo-dev libfuse2
 
       - name: Install cargo-packager
         run: cargo install cargo-packager --locked
