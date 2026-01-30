@@ -113,12 +113,7 @@ impl VariableTree {
     }
 
     /// Add a root variable (no parent).
-    pub fn add_root(
-        &mut self,
-        name: String,
-        address: u64,
-        var_type: VariableType,
-    ) -> VarId {
+    pub fn add_root(&mut self, name: String, address: u64, var_type: VariableType) -> VarId {
         let id = VarId(self.nodes.len() as u32);
         let node = VariableNode::new_root(id, name.clone(), address, var_type);
         self.name_index.insert(name, id);
@@ -301,7 +296,11 @@ impl VariableTree {
             return;
         }
         out.push(id);
-        let mut child = self.nodes.get(id.index()).map(|n| n.first_child).unwrap_or(VarId::INVALID);
+        let mut child = self
+            .nodes
+            .get(id.index())
+            .map(|n| n.first_child)
+            .unwrap_or(VarId::INVALID);
         while child.is_valid() {
             self.collect_subtree(child, out);
             child = self.nodes[child.index()].next_sibling;
@@ -369,8 +368,7 @@ impl VariableTree {
                     // Cap at 256 elements
                     let elem_addr = base_address + i * elem_size;
                     let elem_type = type_table.to_variable_type(element);
-                    let child_id =
-                        self.add_child(parent, format!("[{}]", i), elem_addr, elem_type);
+                    let child_id = self.add_child(parent, format!("[{}]", i), elem_addr, elem_type);
 
                     if type_table.is_expandable(element) {
                         self.decompose_type_inner(
@@ -507,15 +505,9 @@ mod tests {
 
         // Create a struct: PidController { kp: f32, ki: f32, kd: f32, output: f32 }
         let mut pid_def = StructDef::new(Some("PidController".into()), 16, false);
-        pid_def
-            .members
-            .push(MemberDef::new("kp".into(), 0, f32_id));
-        pid_def
-            .members
-            .push(MemberDef::new("ki".into(), 4, f32_id));
-        pid_def
-            .members
-            .push(MemberDef::new("kd".into(), 8, f32_id));
+        pid_def.members.push(MemberDef::new("kp".into(), 0, f32_id));
+        pid_def.members.push(MemberDef::new("ki".into(), 4, f32_id));
+        pid_def.members.push(MemberDef::new("kd".into(), 8, f32_id));
         pid_def
             .members
             .push(MemberDef::new("output".into(), 12, f32_id));

@@ -29,8 +29,8 @@ pub mod dialogs;
 pub mod markers;
 pub mod pane_registry;
 pub mod pane_trait;
-pub mod panes;
 mod panels;
+pub mod panes;
 mod plot;
 pub mod script_editor;
 pub mod state;
@@ -60,12 +60,12 @@ use workspace::tab_viewer::WorkspaceTabViewer;
 use workspace::{PaneId, PaneKind, Workspace};
 
 use crate::backend::{parse_elf, ElfInfo, ElfSymbol};
-use crate::pipeline::bridge::{PipelineBridge, PipelineCommand, SinkMessage};
 use crate::config::{settings::RuntimeSettings, AppConfig, AppState};
+use crate::pipeline::bridge::{PipelineBridge, PipelineCommand, SinkMessage};
 use crate::types::{CollectionStats, ConnectionStatus, DataPoint, VariableData, VariableType};
 use egui::Color32;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Actions that can be performed on variables from the UI
@@ -80,7 +80,10 @@ enum VariableAction {
 /// Type of change detected for a variable when reloading ELF
 #[derive(Debug, Clone)]
 pub enum VariableChangeType {
-    AddressChanged { old_address: u64, new_address: u64 },
+    AddressChanged {
+        old_address: u64,
+        new_address: u64,
+    },
     TypeChanged {
         old_type: VariableType,
         new_type: VariableType,
@@ -325,7 +328,9 @@ impl DataVisApp {
         }
 
         // Restore ELF path from session and load if it exists
-        let (elf_file_path, elf_info, elf_symbols) = if let Some(ref path) = ui_session.elf_file_path {
+        let (elf_file_path, elf_info, elf_symbols) = if let Some(ref path) =
+            ui_session.elf_file_path
+        {
             if path.exists() {
                 match crate::backend::parse_elf(path) {
                     Ok(info) => {
@@ -489,20 +494,23 @@ impl DataVisApp {
                                 let pane_data = self.topics.graph_pane_data.entry(id).or_default();
                                 for (var_id, timestamp, raw_value, converted_value) in data {
                                     let variable_id = var_id.0;
-                                    let var_data = pane_data.entry(variable_id).or_insert_with(|| {
-                                        // Create a new VariableData for this variable in this pane
-                                        if let Some(original) = self.topics.variable_data.get(&variable_id) {
-                                            VariableData::new(original.variable.clone())
-                                        } else {
-                                            // Fallback: create a basic variable
-                                            let var = crate::types::Variable::new(
-                                                &format!("var_{}", variable_id),
-                                                0,
-                                                crate::types::VariableType::F32,
-                                            );
-                                            VariableData::new(var)
-                                        }
-                                    });
+                                    let var_data =
+                                        pane_data.entry(variable_id).or_insert_with(|| {
+                                            // Create a new VariableData for this variable in this pane
+                                            if let Some(original) =
+                                                self.topics.variable_data.get(&variable_id)
+                                            {
+                                                VariableData::new(original.variable.clone())
+                                            } else {
+                                                // Fallback: create a basic variable
+                                                let var = crate::types::Variable::new(
+                                                    format!("var_{}", variable_id),
+                                                    0,
+                                                    crate::types::VariableType::F32,
+                                                );
+                                                VariableData::new(var)
+                                            }
+                                        });
                                     var_data.push(DataPoint::with_conversion(
                                         timestamp,
                                         raw_value,
@@ -510,13 +518,17 @@ impl DataVisApp {
                                     ));
                                 }
                                 // Record timestamp for pane-specific data freshness
-                                self.topics.pane_data_freshness.insert(id, std::time::Instant::now());
+                                self.topics
+                                    .pane_data_freshness
+                                    .insert(id, std::time::Instant::now());
                             }
                             None => {
                                 // Broadcast to all panes - add to global variable_data
                                 for (var_id, timestamp, raw_value, converted_value) in data {
                                     let variable_id = var_id.0;
-                                    if let Some(data) = self.topics.variable_data.get_mut(&variable_id) {
+                                    if let Some(data) =
+                                        self.topics.variable_data.get_mut(&variable_id)
+                                    {
                                         data.push(DataPoint::with_conversion(
                                             timestamp,
                                             raw_value,
@@ -540,9 +552,10 @@ impl DataVisApp {
                 }
                 SinkMessage::VariableList(vars) => {
                     for var in vars {
-                        if !self.topics.variable_data.contains_key(&var.id) {
-                            self.topics.variable_data.insert(var.id, VariableData::new(var));
-                        }
+                        self.topics
+                            .variable_data
+                            .entry(var.id)
+                            .or_insert_with(|| VariableData::new(var));
                     }
                 }
                 SinkMessage::ProbeList(probes) => {
@@ -576,7 +589,10 @@ impl DataVisApp {
                     self.topics.recorder_state = state;
                     self.topics.recorder_frame_count = frame_count;
                 }
-                SinkMessage::ExporterStatus { active, rows_written } => {
+                SinkMessage::ExporterStatus {
+                    active,
+                    rows_written,
+                } => {
                     self.topics.exporter_active = active;
                     self.topics.exporter_rows_written = rows_written;
                 }
@@ -595,9 +611,11 @@ impl DataVisApp {
 
     /// Compute current display time (frozen when not collecting)
     fn display_time(&self) -> Duration {
-        self.accumulated_time + self.collection_start
-            .map(|s| s.elapsed())
-            .unwrap_or(Duration::ZERO)
+        self.accumulated_time
+            + self
+                .collection_start
+                .map(|s| s.elapsed())
+                .unwrap_or(Duration::ZERO)
     }
 
     fn handle_action(&mut self, action: AppAction) {
@@ -662,16 +680,23 @@ impl DataVisApp {
                 self.add_variable_confirmed(parent);
                 for (i, child_spec) in children.into_iter().enumerate() {
                     let mut child = crate::types::Variable::new(
-                        &child_spec.name, child_spec.address, child_spec.var_type,
+                        &child_spec.name,
+                        child_spec.address,
+                        child_spec.var_type,
                     );
                     child.parent_id = Some(parent_id);
                     child.enabled = false;
                     child.show_in_graph = false;
-                    child.color = crate::types::Variable::generate_child_color(parent_color, i, child_count);
+                    child.color =
+                        crate::types::Variable::generate_child_color(parent_color, i, child_count);
                     self.add_variable_confirmed(child);
                 }
             }
-            AppAction::AddPointerVariable { mut pointer, children, pointer_poll_rate_hz } => {
+            AppAction::AddPointerVariable {
+                mut pointer,
+                children,
+                pointer_poll_rate_hz,
+            } => {
                 use crate::types::{PointerMetadata, PointerState};
 
                 let pointer_id = pointer.id;
@@ -693,12 +718,15 @@ impl DataVisApp {
                 // Create dependent child variables
                 for (i, child_spec) in children.into_iter().enumerate() {
                     let mut child = crate::types::Variable::new(
-                        &child_spec.name, 0, child_spec.var_type, // Address will be resolved at runtime
+                        &child_spec.name,
+                        0,
+                        child_spec.var_type, // Address will be resolved at runtime
                     );
                     child.parent_id = Some(pointer_id);
                     child.enabled = false;
                     child.show_in_graph = false;
-                    child.color = crate::types::Variable::generate_child_color(pointer_color, i, child_count);
+                    child.color =
+                        crate::types::Variable::generate_child_color(pointer_color, i, child_count);
 
                     // Set up pointer metadata for dependent child
                     child.pointer_metadata = Some(PointerMetadata {
@@ -715,7 +743,10 @@ impl DataVisApp {
             }
             AppAction::RemoveVariable(id) => {
                 // Remove children first
-                let child_ids: Vec<u32> = self.config.variables.values()
+                let child_ids: Vec<u32> = self
+                    .config
+                    .variables
+                    .values()
                     .filter(|v| v.parent_id == Some(id))
                     .map(|v| v.id)
                     .collect();
@@ -793,7 +824,11 @@ impl DataVisApp {
                     // For now, panes receive global data
                 }
             }
-            AppAction::NodeConfig { node_id, key, value } => {
+            AppAction::NodeConfig {
+                node_id,
+                key,
+                value,
+            } => {
                 self.frontend.send_command(PipelineCommand::NodeConfig {
                     node_id,
                     key,
@@ -824,8 +859,7 @@ impl DataVisApp {
             AppAction::ResetLayout => {
                 // Rebuild workspace with default layout
                 let mut workspace = Workspace::new();
-                let dock_state =
-                    workspace::default_layout::build_default_layout(&mut workspace);
+                let dock_state = workspace::default_layout::build_default_layout(&mut workspace);
                 workspace.dock_state = dock_state;
                 self.workspace = workspace;
             }
@@ -855,7 +889,10 @@ impl DataVisApp {
                         data.variable.name = new_name.clone();
                     }
                     // Propagate prefix change to children
-                    let child_ids: Vec<u32> = self.config.variables.values()
+                    let child_ids: Vec<u32> = self
+                        .config
+                        .variables
+                        .values()
                         .filter(|v| v.parent_id == Some(id))
                         .map(|v| v.id)
                         .collect();
@@ -872,17 +909,17 @@ impl DataVisApp {
                         }
                     }
                 }
-            }
-            // Pipeline actions removed in Phase 3
-            // AppAction::AddPipelineNode, AddPipelineNodeWithConfig, etc. no longer exist
+            } // Pipeline actions removed in Phase 3
+              // AppAction::AddPipelineNode, AddPipelineNodeWithConfig, etc. no longer exist
         }
     }
 
     fn open_dialog(&mut self, dialog_id: DialogId) {
         match dialog_id {
             DialogId::AddVariable | DialogId::EditVariable(_) => {}
-            DialogId::ConverterEditor(_) | DialogId::ValueEditor(_) | DialogId::VariableDetail(_) => {
-            }
+            DialogId::ConverterEditor(_)
+            | DialogId::ValueEditor(_)
+            | DialogId::VariableDetail(_) => {}
             DialogId::ElfSymbols => {
                 self.elf_symbols_open = true;
             }
@@ -893,8 +930,8 @@ impl DataVisApp {
         }
     }
 
-    fn load_elf(&mut self, path: &PathBuf) {
-        self.elf_file_path = Some(path.clone());
+    fn load_elf(&mut self, path: &Path) {
+        self.elf_file_path = Some(path.to_path_buf());
         match parse_elf(path) {
             Ok(info) => {
                 tracing::info!(
@@ -933,7 +970,8 @@ impl DataVisApp {
 
     fn add_variable_confirmed(&mut self, var: crate::types::Variable) {
         self.config.add_variable(var.clone());
-        self.topics.variable_data
+        self.topics
+            .variable_data
             .insert(var.id, VariableData::new(var.clone()));
         self.frontend.add_variable(var);
     }
@@ -972,11 +1010,8 @@ impl DataVisApp {
                         .as_ref()
                         .map(|info| info.infer_variable_type_for_symbol(&symbol))
                         .unwrap_or(crate::types::VariableType::U32);
-                    let var = crate::types::Variable::new(
-                        &symbol.display_name,
-                        symbol.address,
-                        var_type,
-                    );
+                    let var =
+                        crate::types::Variable::new(&symbol.display_name, symbol.address, var_type);
                     self.add_variable(var);
                 }
             }
@@ -1060,7 +1095,8 @@ impl DataVisApp {
 
                 self.topics.variable_data.clear();
                 for var in self.config.variables.values() {
-                    self.topics.variable_data
+                    self.topics
+                        .variable_data
                         .insert(var.id, crate::types::VariableData::new(var.clone()));
                     self.frontend.add_variable(var.clone());
                 }
@@ -1314,7 +1350,7 @@ impl DataVisApp {
 
         match event {
             MenuEvent::Action(action) => {
-                self.handle_action(action);
+                self.handle_action(*action);
             }
             MenuEvent::ToggleToolbar => {
                 self.show_toolbar = !self.show_toolbar;
@@ -1338,10 +1374,8 @@ impl DataVisApp {
                 self.persistence_settings_open = true;
             }
             MenuEvent::OpenPreferences => {
-                self.preferences_state = PreferencesState::from_config(
-                    &self.config.ui,
-                    &self.app_state.ui_preferences,
-                );
+                self.preferences_state =
+                    PreferencesState::from_config(&self.config.ui, &self.app_state.ui_preferences);
                 self.preferences_open = true;
             }
             MenuEvent::OpenElfSymbols => {
@@ -1429,10 +1463,7 @@ impl DataVisApp {
                             let p = path.clone();
                             self.handle_action(AppAction::SaveProject(p));
                         } else if let Some(path) = rfd::FileDialog::new()
-                            .add_filter(
-                                "DataVis Project",
-                                &[crate::config::PROJECT_FILE_EXTENSION],
-                            )
+                            .add_filter("DataVis Project", &[crate::config::PROJECT_FILE_EXTENSION])
                             .set_file_name("project.datavisproj")
                             .save_file()
                         {
@@ -1442,10 +1473,7 @@ impl DataVisApp {
                     }
                     if ui.button("Save As...").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter(
-                                "DataVis Project",
-                                &[crate::config::PROJECT_FILE_EXTENSION],
-                            )
+                            .add_filter("DataVis Project", &[crate::config::PROJECT_FILE_EXTENSION])
                             .set_file_name("project.datavisproj")
                             .save_file()
                         {
@@ -1481,10 +1509,7 @@ impl DataVisApp {
                     }
                     if ui.button("Open Project...").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter(
-                                "DataVis Project",
-                                &[crate::config::PROJECT_FILE_EXTENSION],
-                            )
+                            .add_filter("DataVis Project", &[crate::config::PROJECT_FILE_EXTENSION])
                             .pick_file()
                         {
                             self.handle_action(AppAction::LoadProject(path));
@@ -1497,10 +1522,7 @@ impl DataVisApp {
                             let p = path.clone();
                             self.handle_action(AppAction::SaveProject(p));
                         } else if let Some(path) = rfd::FileDialog::new()
-                            .add_filter(
-                                "DataVis Project",
-                                &[crate::config::PROJECT_FILE_EXTENSION],
-                            )
+                            .add_filter("DataVis Project", &[crate::config::PROJECT_FILE_EXTENSION])
                             .set_file_name("project.datavisproj")
                             .save_file()
                         {
@@ -1510,10 +1532,7 @@ impl DataVisApp {
                     }
                     if ui.button("Save As...").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter(
-                                "DataVis Project",
-                                &[crate::config::PROJECT_FILE_EXTENSION],
-                            )
+                            .add_filter("DataVis Project", &[crate::config::PROJECT_FILE_EXTENSION])
                             .set_file_name("project.datavisproj")
                             .save_file()
                         {
@@ -1529,7 +1548,10 @@ impl DataVisApp {
                     if ui.checkbox(&mut self.show_toolbar, "Toolbar").changed() {
                         // Just toggling the bool
                     }
-                    if ui.checkbox(&mut self.show_status_bar, "Status Bar").changed() {
+                    if ui
+                        .checkbox(&mut self.show_status_bar, "Status Bar")
+                        .changed()
+                    {
                         // Just toggling the bool
                     }
 
@@ -1637,12 +1659,9 @@ impl DataVisApp {
                 });
 
                 // === Right-aligned: Quick Connect dropdown ===
-                ui.with_layout(
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| {
-                        self.render_quick_connect(ui);
-                    },
-                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.render_quick_connect(ui);
+                });
             });
         });
     }
@@ -1655,11 +1674,14 @@ impl DataVisApp {
         match status {
             ConnectionStatus::Disconnected | ConnectionStatus::Error => {
                 // Show a real Button for connecting
-                let btn = egui::Button::new(
-                    egui::RichText::new("Connect").strong()
-                ).fill(egui::Color32::from_rgb(0, 100, 180));
+                let btn = egui::Button::new(egui::RichText::new("Connect").strong())
+                    .fill(egui::Color32::from_rgb(0, 100, 180));
 
-                if ui.add(btn).on_hover_text("Click to connect to a debug probe").clicked() {
+                if ui
+                    .add(btn)
+                    .on_hover_text("Click to connect to a debug probe")
+                    .clicked()
+                {
                     self.connection_dialog_open = true;
                 }
                 return;
@@ -1674,117 +1696,107 @@ impl DataVisApp {
             _ => ("Disconnected", Color32::GRAY),
         };
 
-        let response = ui.menu_button(
-            egui::RichText::new(btn_text).color(status_color),
-            |ui| {
-                ui.set_min_width(250.0);
+        let response = ui.menu_button(egui::RichText::new(btn_text).color(status_color), |ui| {
+            ui.set_min_width(250.0);
 
-                // Target chip
-                ui.horizontal(|ui| {
-                    ui.label("Target:");
-                    ui.text_edit_singleline(&mut self.target_chip_input);
-                    if ui.button("Apply").clicked() {
+            // Target chip
+            ui.horizontal(|ui| {
+                ui.label("Target:");
+                ui.text_edit_singleline(&mut self.target_chip_input);
+                if ui.button("Apply").clicked() {
+                    self.config.probe.target_chip = self.target_chip_input.clone();
+                }
+            });
+
+            // Probe selector (use submenu instead of ComboBox to avoid nested popup issues)
+            ui.horizontal(|ui| {
+                ui.label("Probe:");
+                let probes = &self.topics.available_probes;
+                let selected_text = self
+                    .selected_probe_index
+                    .and_then(|i| probes.get(i))
+                    .map(|p| p.display_name())
+                    .unwrap_or_else(|| "Select probe...".to_string());
+
+                ui.menu_button(selected_text, |ui| {
+                    if probes.is_empty() {
+                        ui.label("No probes detected");
+                    } else {
+                        for (i, probe) in probes.iter().enumerate() {
+                            let is_selected = self.selected_probe_index == Some(i);
+                            if ui
+                                .selectable_label(is_selected, probe.display_name())
+                                .clicked()
+                            {
+                                self.selected_probe_index = Some(i);
+                                ui.close();
+                            }
+                        }
+                    }
+                });
+
+                if ui.button("Refresh").clicked() {
+                    self.handle_action(AppAction::RefreshProbes);
+                }
+            });
+
+            ui.separator();
+
+            // Connect / Disconnect
+            match status {
+                ConnectionStatus::Connected => {
+                    if ui.button("Disconnect").clicked() {
+                        self.handle_action(AppAction::Disconnect);
+                        ui.close();
+                    }
+                }
+                ConnectionStatus::Connecting => {
+                    ui.add_enabled(false, egui::Button::new("Connecting..."));
+                }
+                _ => {
+                    let can_connect = self.selected_probe_index.is_some();
+                    if ui
+                        .add_enabled(can_connect, egui::Button::new("Connect"))
+                        .clicked()
+                    {
                         self.config.probe.target_chip = self.target_chip_input.clone();
-                    }
-                });
 
-                // Probe selector (use submenu instead of ComboBox to avoid nested popup issues)
-                ui.horizontal(|ui| {
-                    ui.label("Probe:");
-                    let probes = &self.topics.available_probes;
-                    let selected_text = self
-                        .selected_probe_index
-                        .and_then(|i| probes.get(i))
-                        .map(|p| p.display_name())
-                        .unwrap_or_else(|| "Select probe...".to_string());
+                        #[cfg(feature = "mock-probe")]
+                        if let Some(idx) = self.selected_probe_index {
+                            if let Some(crate::backend::DetectedProbe::Mock(_)) =
+                                self.topics.available_probes.get(idx)
+                            {
+                                self.handle_action(AppAction::UseMockProbe(true));
+                            }
+                        }
 
-                    ui.menu_button(selected_text, |ui| {
-                        if probes.is_empty() {
-                            ui.label("No probes detected");
-                        } else {
-                            for (i, probe) in probes.iter().enumerate() {
-                                let is_selected = self.selected_probe_index == Some(i);
-                                if ui
-                                    .selectable_label(is_selected, probe.display_name())
-                                    .clicked()
-                                {
-                                    self.selected_probe_index = Some(i);
-                                    ui.close();
+                        if let Some(idx) = self.selected_probe_index {
+                            let selector = match self.topics.available_probes.get(idx) {
+                                Some(crate::backend::DetectedProbe::Real(info)) => {
+                                    Some(format!("{:04x}:{:04x}", info.vendor_id, info.product_id))
                                 }
-                            }
+                                #[cfg(feature = "mock-probe")]
+                                Some(crate::backend::DetectedProbe::Mock(_)) => None,
+                                _ => None,
+                            };
+                            self.handle_action(AppAction::Connect {
+                                probe_selector: selector,
+                                target: self.target_chip_input.clone(),
+                            });
                         }
-                    });
-
-                    if ui.button("Refresh").clicked() {
-                        self.handle_action(AppAction::RefreshProbes);
-                    }
-                });
-
-                ui.separator();
-
-                // Connect / Disconnect
-                match status {
-                    ConnectionStatus::Connected => {
-                        if ui.button("Disconnect").clicked() {
-                            self.handle_action(AppAction::Disconnect);
-                            ui.close();
-                        }
-                    }
-                    ConnectionStatus::Connecting => {
-                        ui.add_enabled(false, egui::Button::new("Connecting..."));
-                    }
-                    _ => {
-                        let can_connect = self.selected_probe_index.is_some();
-                        if ui
-                            .add_enabled(can_connect, egui::Button::new("Connect"))
-                            .clicked()
-                        {
-                            self.config.probe.target_chip = self.target_chip_input.clone();
-
-                            #[cfg(feature = "mock-probe")]
-                            if let Some(idx) = self.selected_probe_index {
-                                if let Some(crate::backend::DetectedProbe::Mock(_)) =
-                                    self.topics.available_probes.get(idx)
-                                {
-                                    self.handle_action(AppAction::UseMockProbe(true));
-                                }
-                            }
-
-                            if let Some(idx) = self.selected_probe_index {
-                                let selector =
-                                    match self.topics.available_probes.get(idx) {
-                                        Some(crate::backend::DetectedProbe::Real(info)) => {
-                                            Some(format!(
-                                                "{:04x}:{:04x}",
-                                                info.vendor_id, info.product_id
-                                            ))
-                                        }
-                                        #[cfg(feature = "mock-probe")]
-                                        Some(crate::backend::DetectedProbe::Mock(_)) => None,
-                                        _ => None,
-                                    };
-                                self.handle_action(AppAction::Connect {
-                                    probe_selector: selector,
-                                    target: self.target_chip_input.clone(),
-                                });
-                            }
-                            ui.close();
-                        }
+                        ui.close();
                     }
                 }
+            }
 
-                ui.separator();
-                if ui
-                    .small_button("Connection Settings...")
-                    .clicked()
-                {
-                    self.connection_settings_state =
-                        ConnectionSettingsState::from_config(&self.config.probe);
-                    self.connection_settings_open = true;
-                    ui.close();
-                }
-            },
-        );
+            ui.separator();
+            if ui.small_button("Connection Settings...").clicked() {
+                self.connection_settings_state =
+                    ConnectionSettingsState::from_config(&self.config.probe);
+                self.connection_settings_open = true;
+                ui.close();
+            }
+        });
         let _ = response;
     }
 
@@ -1829,7 +1841,10 @@ impl DataVisApp {
                                 } else {
                                     for (i, probe) in probes.iter().enumerate() {
                                         let is_selected = self.selected_probe_index == Some(i);
-                                        if ui.selectable_label(is_selected, probe.display_name()).clicked() {
+                                        if ui
+                                            .selectable_label(is_selected, probe.display_name())
+                                            .clicked()
+                                        {
                                             self.selected_probe_index = Some(i);
                                         }
                                     }
@@ -1843,9 +1858,13 @@ impl DataVisApp {
 
                     if self.topics.available_probes.is_empty() {
                         ui.add_space(4.0);
-                        ui.label(egui::RichText::new("No probes found. Click Refresh or connect a probe.")
+                        ui.label(
+                            egui::RichText::new(
+                                "No probes found. Click Refresh or connect a probe.",
+                            )
                             .color(Color32::GRAY)
-                            .italics());
+                            .italics(),
+                        );
                     }
 
                     ui.add_space(12.0);
@@ -1856,7 +1875,10 @@ impl DataVisApp {
                     ui.horizontal(|ui| {
                         let can_connect = self.selected_probe_index.is_some();
 
-                        if ui.add_enabled(can_connect, egui::Button::new("Connect")).clicked() {
+                        if ui
+                            .add_enabled(can_connect, egui::Button::new("Connect"))
+                            .clicked()
+                        {
                             self.config.probe.target_chip = self.target_chip_input.clone();
 
                             #[cfg(feature = "mock-probe")]
@@ -1870,9 +1892,9 @@ impl DataVisApp {
 
                             if let Some(idx) = self.selected_probe_index {
                                 let selector = match self.topics.available_probes.get(idx) {
-                                    Some(crate::backend::DetectedProbe::Real(info)) => {
-                                        Some(format!("{:04x}:{:04x}", info.vendor_id, info.product_id))
-                                    }
+                                    Some(crate::backend::DetectedProbe::Real(info)) => Some(
+                                        format!("{:04x}:{:04x}", info.vendor_id, info.product_id),
+                                    ),
                                     #[cfg(feature = "mock-probe")]
                                     Some(crate::backend::DetectedProbe::Mock(_)) => None,
                                     _ => None,
@@ -2127,17 +2149,19 @@ impl eframe::App for DataVisApp {
 
         // 2. Toolbar (if visible)
         if self.show_toolbar {
-            let toolbar_result = egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-                let toolbar_ctx = toolbar::ToolbarContext {
-                    topics: &self.topics,
-                    config: &self.config,
-                    settings: &self.settings,
-                    elf_file_path: self.elf_file_path.as_ref(),
-                    selected_probe_index: self.selected_probe_index,
-                    target_chip_input: self.target_chip_input.clone(),
-                };
-                toolbar::render_toolbar(ui, &toolbar_ctx)
-            }).inner;
+            let toolbar_result = egui::TopBottomPanel::top("toolbar")
+                .show(ctx, |ui| {
+                    let toolbar_ctx = toolbar::ToolbarContext {
+                        topics: &self.topics,
+                        config: &self.config,
+                        settings: &self.settings,
+                        elf_file_path: self.elf_file_path.as_ref(),
+                        selected_probe_index: self.selected_probe_index,
+                        target_chip_input: self.target_chip_input.clone(),
+                    };
+                    toolbar::render_toolbar(ui, &toolbar_ctx)
+                })
+                .inner;
 
             // Apply state changes from toolbar
             if let Some(idx) = toolbar_result.state_changes.selected_probe_index {
@@ -2168,10 +2192,14 @@ impl eframe::App for DataVisApp {
         // 4. Dock workspace
         {
             let display_time = self.display_time().as_secs_f64();
-            let singleton_pane_kinds: Vec<_> = self.workspace.registry_singletons()
+            let singleton_pane_kinds: Vec<_> = self
+                .workspace
+                .registry_singletons()
                 .map(|info| (info.kind, info.display_name))
                 .collect();
-            let multi_pane_kinds: Vec<_> = self.workspace.registry_multi()
+            let multi_pane_kinds: Vec<_> = self
+                .workspace
+                .registry_multi()
                 .map(|info| (info.kind, info.display_name))
                 .collect();
 
@@ -2219,7 +2247,8 @@ impl eframe::App for DataVisApp {
         // Duplicate confirm dialog
         if self.duplicate_confirm_open {
             use dialogs::{
-                show_dialog, DuplicateConfirmAction, DuplicateConfirmContext, DuplicateConfirmDialog,
+                show_dialog, DuplicateConfirmAction, DuplicateConfirmContext,
+                DuplicateConfirmDialog,
             };
 
             let dialog_ctx = DuplicateConfirmContext;

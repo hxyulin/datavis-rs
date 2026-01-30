@@ -121,8 +121,8 @@ impl ProbeStats {
         if self.recent_read_times.len() < 2 {
             return 0.0;
         }
-        let mean = self.recent_read_times.iter().sum::<u64>() as f64
-            / self.recent_read_times.len() as f64;
+        let mean =
+            self.recent_read_times.iter().sum::<u64>() as f64 / self.recent_read_times.len() as f64;
         let variance = self
             .recent_read_times
             .iter()

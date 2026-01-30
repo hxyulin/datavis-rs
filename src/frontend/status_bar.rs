@@ -46,7 +46,10 @@ pub fn render_status_bar(ui: &mut Ui, ctx: &StatusBarContext<'_>) {
             Color32::GRAY
         };
         ui.label(RichText::new("Rate:").small());
-        ui.colored_label(rate_color, RichText::new(format!("{:.1} Hz", target_rate)).small());
+        ui.colored_label(
+            rate_color,
+            RichText::new(format!("{:.1} Hz", target_rate)).small(),
+        );
 
         ui.separator();
 

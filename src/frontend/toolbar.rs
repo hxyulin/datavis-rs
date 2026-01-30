@@ -5,10 +5,10 @@
 use egui::{Color32, RichText, Ui};
 
 use crate::backend::DetectedProbe;
-use crate::frontend::state::AppAction;
-use crate::frontend::topics::Topics;
 use crate::config::settings::RuntimeSettings;
 use crate::config::AppConfig;
+use crate::frontend::state::AppAction;
+use crate::frontend::topics::Topics;
 use crate::types::ConnectionStatus;
 
 /// Context needed to render the toolbar.
@@ -63,7 +63,10 @@ pub fn render_toolbar(ui: &mut Ui, ctx: &ToolbarContext<'_>) -> ToolbarResult {
         });
     });
 
-    ToolbarResult { actions, state_changes }
+    ToolbarResult {
+        actions,
+        state_changes,
+    }
 }
 
 fn render_connection_group(
@@ -79,10 +82,8 @@ fn render_connection_group(
             // Show connected status indicator
             ui.colored_label(Color32::GREEN, "●");
 
-            let btn = egui::Button::new(
-                RichText::new("Disconnect").color(Color32::WHITE),
-            )
-            .fill(Color32::from_rgb(50, 120, 50));
+            let btn = egui::Button::new(RichText::new("Disconnect").color(Color32::WHITE))
+                .fill(Color32::from_rgb(50, 120, 50));
             if ui.add(btn).on_hover_text("Disconnect from probe").clicked() {
                 actions.push(AppAction::Disconnect);
             }
@@ -110,7 +111,10 @@ fn render_connection_group(
                 if let Some(probe) = ctx.topics.available_probes.get(idx) {
                     match probe {
                         DetectedProbe::Real(info) => {
-                            format!("{} ({:04x}:{:04x})", info.probe_type, info.vendor_id, info.product_id)
+                            format!(
+                                "{} ({:04x}:{:04x})",
+                                info.probe_type, info.vendor_id, info.product_id
+                            )
                         }
                         #[cfg(feature = "mock-probe")]
                         DetectedProbe::Mock(info) => info.name.clone(),
@@ -132,12 +136,18 @@ fn render_connection_group(
                         for (i, probe) in ctx.topics.available_probes.iter().enumerate() {
                             let label = match probe {
                                 DetectedProbe::Real(info) => {
-                                    format!("{} ({:04x}:{:04x})", info.probe_type, info.vendor_id, info.product_id)
+                                    format!(
+                                        "{} ({:04x}:{:04x})",
+                                        info.probe_type, info.vendor_id, info.product_id
+                                    )
                                 }
                                 #[cfg(feature = "mock-probe")]
                                 DetectedProbe::Mock(info) => info.name.clone(),
                             };
-                            if ui.selectable_label(current_probe_index == Some(i), &label).clicked() {
+                            if ui
+                                .selectable_label(current_probe_index == Some(i), &label)
+                                .clicked()
+                            {
                                 state_changes.selected_probe_index = Some(Some(i));
                             }
                         }
@@ -157,7 +167,7 @@ fn render_connection_group(
             let response = ui.add(
                 egui::TextEdit::singleline(&mut target_chip)
                     .hint_text("Target chip")
-                    .desired_width(100.0)
+                    .desired_width(100.0),
             );
             if response.changed() {
                 state_changes.target_chip_input = Some(target_chip.clone());
@@ -179,10 +189,9 @@ fn render_connection_group(
 
                 if let Some(idx) = current_probe_index {
                     let selector = match ctx.topics.available_probes.get(idx) {
-                        Some(DetectedProbe::Real(info)) => Some(format!(
-                            "{:04x}:{:04x}",
-                            info.vendor_id, info.product_id
-                        )),
+                        Some(DetectedProbe::Real(info)) => {
+                            Some(format!("{:04x}:{:04x}", info.vendor_id, info.product_id))
+                        }
                         #[cfg(feature = "mock-probe")]
                         Some(DetectedProbe::Mock(_)) => None,
                         _ => None,
@@ -202,10 +211,8 @@ fn render_collection_group(ui: &mut Ui, ctx: &ToolbarContext<'_>, actions: &mut 
 
     if ctx.settings.collecting {
         // Stop button
-        let btn = egui::Button::new(
-            RichText::new("Stop").color(Color32::WHITE),
-        )
-        .fill(Color32::from_rgb(180, 50, 50));
+        let btn = egui::Button::new(RichText::new("Stop").color(Color32::WHITE))
+            .fill(Color32::from_rgb(180, 50, 50));
         if ui
             .add_enabled(connected, btn)
             .on_hover_text("Stop collection (Space)")
@@ -215,7 +222,11 @@ fn render_collection_group(ui: &mut Ui, ctx: &ToolbarContext<'_>, actions: &mut 
         }
 
         // Pause button
-        let pause_text = if ctx.settings.paused { "Resume" } else { "Pause" };
+        let pause_text = if ctx.settings.paused {
+            "Resume"
+        } else {
+            "Pause"
+        };
         if ui
             .add_enabled(connected, egui::Button::new(pause_text))
             .on_hover_text("Pause/resume collection (P)")
@@ -225,10 +236,8 @@ fn render_collection_group(ui: &mut Ui, ctx: &ToolbarContext<'_>, actions: &mut 
         }
     } else {
         // Start button
-        let btn = egui::Button::new(
-            RichText::new("Start").color(Color32::WHITE),
-        )
-        .fill(Color32::from_rgb(50, 120, 50));
+        let btn = egui::Button::new(RichText::new("Start").color(Color32::WHITE))
+            .fill(Color32::from_rgb(50, 120, 50));
         if ui
             .add_enabled(connected, btn)
             .on_hover_text("Start collection (Space)")

@@ -95,8 +95,7 @@ impl Dialog for ValueEditorDialog {
         };
 
         // Check if we can write
-        let can_write =
-            ctx.is_writable && ctx.connection_status == ConnectionStatus::Connected;
+        let can_write = ctx.is_writable && ctx.connection_status == ConnectionStatus::Connected;
 
         ui.vertical(|ui| {
             // Variable name header
@@ -127,10 +126,11 @@ impl Dialog for ValueEditorDialog {
                 let response = ui.text_edit_singleline(&mut state.input);
 
                 // Submit on Enter
-                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    if can_write {
-                        should_write = true;
-                    }
+                if response.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    && can_write
+                {
+                    should_write = true;
                 }
             });
 

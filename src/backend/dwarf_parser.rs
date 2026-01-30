@@ -1366,7 +1366,7 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         unit: &Unit<Reader<'a>>,
         expr: &gimli::Expression<Reader<'a>>,
     ) -> Option<u64> {
-        let mut ops = expr.clone().operations(unit.encoding());
+        let mut ops = (*expr).operations(unit.encoding());
 
         // Look for DW_OP_plus_uconst which is the common case for member offsets
         // The expression is evaluated with an implicit "base address" on the stack,
@@ -1467,8 +1467,16 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         }
 
         // 1. Check for compile-time constant (has value but may not have location)
-        let has_const_value = entry.attr_value(gimli::DW_AT_const_value).ok().flatten().is_some();
-        let has_location = entry.attr_value(gimli::DW_AT_location).ok().flatten().is_some();
+        let has_const_value = entry
+            .attr_value(gimli::DW_AT_const_value)
+            .ok()
+            .flatten()
+            .is_some();
+        let has_location = entry
+            .attr_value(gimli::DW_AT_location)
+            .ok()
+            .flatten()
+            .is_some();
 
         if has_const_value && !has_location {
             let value = self.get_const_value(entry);
@@ -1515,13 +1523,11 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
             }
 
             // Indexed address (DWARF 5)
-            AttributeValue::DebugAddrIndex(index) => {
-                match self.dwarf.address(unit, index) {
-                    Ok(addr) if addr == 0 => VariableStatus::AddressZero,
-                    Ok(addr) => VariableStatus::Valid { address: addr },
-                    Err(_) => VariableStatus::NoLocation,
-                }
-            }
+            AttributeValue::DebugAddrIndex(index) => match self.dwarf.address(unit, index) {
+                Ok(0) => VariableStatus::AddressZero,
+                Ok(addr) => VariableStatus::Valid { address: addr },
+                Err(_) => VariableStatus::NoLocation,
+            },
 
             // Location list reference
             AttributeValue::LocationListsRef(offset) => {
@@ -1567,21 +1573,27 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
                 if addr == 0 {
                     VariableStatus::AddressZero
                 } else {
-                    VariableStatus::Valid { address: addr as u64 }
+                    VariableStatus::Valid {
+                        address: addr as u64,
+                    }
                 }
             }
             AttributeValue::Data2(addr) => {
                 if addr == 0 {
                     VariableStatus::AddressZero
                 } else {
-                    VariableStatus::Valid { address: addr as u64 }
+                    VariableStatus::Valid {
+                        address: addr as u64,
+                    }
                 }
             }
             AttributeValue::Data4(addr) => {
                 if addr == 0 {
                     VariableStatus::AddressZero
                 } else {
-                    VariableStatus::Valid { address: addr as u64 }
+                    VariableStatus::Valid {
+                        address: addr as u64,
+                    }
                 }
             }
             AttributeValue::Data8(addr) => {
@@ -1595,7 +1607,9 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
                 if addr == 0 {
                     VariableStatus::AddressZero
                 } else {
-                    VariableStatus::Valid { address: addr as u64 }
+                    VariableStatus::Valid {
+                        address: addr as u64,
+                    }
                 }
             }
 
@@ -1609,7 +1623,7 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         unit: &Unit<Reader<'a>>,
         expr: &gimli::Expression<Reader<'a>>,
     ) -> VariableStatus {
-        let mut evaluation = expr.clone().evaluation(unit.encoding());
+        let mut evaluation = (*expr).evaluation(unit.encoding());
 
         let mut result = match evaluation.evaluate() {
             Ok(r) => r,
@@ -1658,12 +1672,10 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
                 // Needs an address from .debug_addr section
                 gimli::EvaluationResult::RequiresIndexedAddress { index, relocate: _ } => {
                     match self.dwarf.address(unit, index) {
-                        Ok(address) => {
-                            match evaluation.resume_with_indexed_address(address) {
-                                Ok(r) => result = r,
-                                Err(_) => return VariableStatus::NoLocation,
-                            }
-                        }
+                        Ok(address) => match evaluation.resume_with_indexed_address(address) {
+                            Ok(r) => result = r,
+                            Err(_) => return VariableStatus::NoLocation,
+                        },
                         Err(_) => return VariableStatus::NoLocation,
                     }
                 }
@@ -1818,7 +1830,7 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         unit: &Unit<Reader<'a>>,
         expr: &gimli::Expression<Reader<'a>>,
     ) -> Option<u64> {
-        let mut evaluation = expr.clone().evaluation(unit.encoding());
+        let mut evaluation = (*expr).evaluation(unit.encoding());
 
         // Run the evaluation loop
         let mut result = evaluation.evaluate().ok()?;
@@ -1830,10 +1842,9 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
                     let pieces = evaluation.result();
                     // We expect a single piece with an address for global variables
                     if pieces.len() == 1 {
-                        match pieces[0].location {
-                            gimli::Location::Address { address } => return Some(address),
-                            // Value on stack without Location means the address is the value itself
-                            _ => {}
+                        // Value on stack without Location means the address is the value itself
+                        if let gimli::Location::Address { address } = pieces[0].location {
+                            return Some(address);
                         }
                     }
                     // For multi-piece or non-address locations, try to get address from first piece
@@ -1988,20 +1999,20 @@ mod tests {
         let result = DwarfParser::parse_bytes(TEST_ARM_ELF).expect("Failed to parse ELF");
 
         // Check we found some variables
-        assert!(result.symbols.len() > 0, "Should find variables");
+        assert!(!result.symbols.is_empty(), "Should find variables");
 
         // Look for specific variables we know are in the test ELF
-        let global_counter = result
-            .symbols
-            .iter()
-            .find(|s| s.name == "global_counter");
+        let global_counter = result.symbols.iter().find(|s| s.name == "global_counter");
         assert!(
             global_counter.is_some(),
             "Should find global_counter variable"
         );
 
         if let Some(var) = global_counter {
-            assert!(var.status.is_readable(), "global_counter should be readable");
+            assert!(
+                var.status.is_readable(),
+                "global_counter should be readable"
+            );
             assert!(var.address > 0, "global_counter should have valid address");
         }
 
@@ -2014,10 +2025,7 @@ mod tests {
         let result = DwarfParser::parse_bytes(TEST_ARM_ELF).expect("Failed to parse ELF");
 
         // Look for the enum variable
-        let current_state = result
-            .symbols
-            .iter()
-            .find(|s| s.name == "current_state");
+        let current_state = result.symbols.iter().find(|s| s.name == "current_state");
         assert!(
             current_state.is_some(),
             "Should find current_state enum variable"
@@ -2033,10 +2041,7 @@ mod tests {
         let result = DwarfParser::parse_bytes(TEST_STRUCT_ELF).expect("Failed to parse ELF");
 
         // Look for struct variables
-        let sensor_struct = result
-            .symbols
-            .iter()
-            .find(|s| s.name == "sensor_struct");
+        let sensor_struct = result.symbols.iter().find(|s| s.name == "sensor_struct");
         assert!(
             sensor_struct.is_some(),
             "Should find sensor_struct variable"
@@ -2049,10 +2054,7 @@ mod tests {
         // Check that structs have members
         if let Some(var) = sensor_struct {
             let members = result.type_table.get_members(var.type_id);
-            assert!(
-                members.is_some(),
-                "Struct should have members"
-            );
+            assert!(members.is_some(), "Struct should have members");
             if let Some(members) = members {
                 assert!(
                     members.len() >= 3,
@@ -2067,10 +2069,7 @@ mod tests {
         let result = DwarfParser::parse_bytes(TEST_STRUCT_ELF).expect("Failed to parse ELF");
 
         // Look for device_config which contains a nested SensorData
-        let device_config = result
-            .symbols
-            .iter()
-            .find(|s| s.name == "device_config");
+        let device_config = result.symbols.iter().find(|s| s.name == "device_config");
 
         if let Some(var) = device_config {
             let members = result.type_table.get_members(var.type_id);
@@ -2135,10 +2134,7 @@ mod tests {
         assert!(packed_data.is_some(), "Should find packed_data");
 
         // Test bitfield struct
-        let bitfield_data = result
-            .symbols
-            .iter()
-            .find(|s| s.name == "bitfield_data");
+        let bitfield_data = result.symbols.iter().find(|s| s.name == "bitfield_data");
         assert!(bitfield_data.is_some(), "Should find bitfield_data");
 
         // Test union
@@ -2166,7 +2162,7 @@ mod tests {
         // Look for variables in namespaces
         // C++ name mangling means we might not find them by simple name
         // but they should be in the symbols list
-        assert!(result.symbols.len() > 0, "Should find C++ variables");
+        assert!(!result.symbols.is_empty(), "Should find C++ variables");
 
         // Check that temp_sensor exists (may be mangled)
         let temp_sensor = result
@@ -2247,7 +2243,10 @@ mod tests {
         assert!(stats.total_types > 0, "Should have total types");
 
         // Type table should not be empty
-        assert!(!result.type_table.is_empty(), "Type table should not be empty");
+        assert!(
+            !result.type_table.is_empty(),
+            "Type table should not be empty"
+        );
     }
 
     #[test]
@@ -2283,7 +2282,10 @@ mod tests {
         for symbol in &result.symbols {
             assert!(
                 result.name_to_type.contains_key(&symbol.name)
-                    || symbol.mangled_name.as_ref().map_or(false, |n| result.name_to_type.contains_key(n)),
+                    || symbol
+                        .mangled_name
+                        .as_ref()
+                        .is_some_and(|n| result.name_to_type.contains_key(n)),
                 "Symbol {} should have type mapping",
                 symbol.name
             );
@@ -2325,7 +2327,9 @@ mod tests {
     #[test]
     fn test_variable_status_methods() {
         // Test VariableStatus utility methods
-        let valid_status = VariableStatus::Valid { address: 0x20000000 };
+        let valid_status = VariableStatus::Valid {
+            address: 0x20000000,
+        };
         assert!(valid_status.is_readable());
         assert_eq!(valid_status.address(), Some(0x20000000));
         assert_eq!(valid_status.reason(), "Valid address");

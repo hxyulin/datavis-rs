@@ -6,9 +6,10 @@
 use egui::{Align2, Context, Ui};
 
 /// Actions that a dialog can return after rendering
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum DialogAction<A> {
     /// Keep the dialog open, no action needed
+    #[default]
     None,
     /// Close the dialog without performing any action
     Close,
@@ -16,12 +17,6 @@ pub enum DialogAction<A> {
     CloseWithAction(A),
     /// Keep the dialog open but perform the specified action
     Action(A),
-}
-
-impl<A> Default for DialogAction<A> {
-    fn default() -> Self {
-        DialogAction::None
-    }
 }
 
 impl<A> DialogAction<A> {
@@ -348,13 +343,13 @@ pub use persistence_settings::{
     PersistenceSettingsAction, PersistenceSettingsContext, PersistenceSettingsDialog,
     PersistenceSettingsState,
 };
-pub use preferences::{
-    PreferencesAction, PreferencesContext, PreferencesDialog, PreferencesState,
-};
+pub use preferences::{PreferencesAction, PreferencesContext, PreferencesDialog, PreferencesState};
 pub use trigger_config::{
     TriggerConfigAction, TriggerConfigContext, TriggerConfigDialog, TriggerConfigState,
 };
-pub use value_editor::{ValueEditorAction, ValueEditorContext, ValueEditorDialog, ValueEditorState};
+pub use value_editor::{
+    ValueEditorAction, ValueEditorContext, ValueEditorDialog, ValueEditorState,
+};
 pub use variable_change::{
     VariableChangeAction, VariableChangeContext, VariableChangeDialog, VariableChangeState,
 };

@@ -208,7 +208,7 @@ impl<'a> SharedState<'a> {
     ///
     /// # Arguments
     /// * `pane_id` - Optional pane ID. If provided, checks pane-specific data freshness.
-    ///               If None, checks global data freshness.
+    ///   If None, checks global data freshness.
     ///
     /// # Returns
     /// * `true` if data is stale (no updates within threshold while collecting)
@@ -238,4 +238,3 @@ impl<'a> SharedState<'a> {
         false
     }
 }
-

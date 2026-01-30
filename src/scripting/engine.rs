@@ -528,7 +528,7 @@ impl ScriptEngine {
                     .and_then(|v| {
                         // Try to get as f64 first (covers both int and float cases)
                         if let Ok(f) = v.as_float() {
-                            Ok(f as f64)
+                            Ok(f)
                         } else if let Ok(i) = v.as_int() {
                             Ok(i as f64)
                         } else {

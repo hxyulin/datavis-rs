@@ -60,9 +60,8 @@ impl WindowFunction {
             WindowFunction::Blackman => {
                 // Clamp to 0.0: the formula is exactly 0 at endpoints but
                 // floating-point representation of 0.42 and 0.08 can produce -ε.
-                (0.42 - 0.5 * (2.0 * PI * i_f / n_f).cos()
-                    + 0.08 * (4.0 * PI * i_f / n_f).cos())
-                .max(0.0)
+                (0.42 - 0.5 * (2.0 * PI * i_f / n_f).cos() + 0.08 * (4.0 * PI * i_f / n_f).cos())
+                    .max(0.0)
             }
             WindowFunction::FlatTop => {
                 let a0 = 0.21557895;
@@ -70,8 +69,7 @@ impl WindowFunction {
                 let a2 = 0.277263158;
                 let a3 = 0.083578947;
                 let a4 = 0.006947368;
-                a0 - a1 * (2.0 * PI * i_f / n_f).cos()
-                    + a2 * (4.0 * PI * i_f / n_f).cos()
+                a0 - a1 * (2.0 * PI * i_f / n_f).cos() + a2 * (4.0 * PI * i_f / n_f).cos()
                     - a3 * (6.0 * PI * i_f / n_f).cos()
                     + a4 * (8.0 * PI * i_f / n_f).cos()
             }
@@ -304,11 +302,7 @@ impl FftAnalyzer {
             .take(fft_size)
             .enumerate()
             .map(|(i, &s)| {
-                let windowed = if i < window.len() {
-                    s * window[i]
-                } else {
-                    0.0
-                };
+                let windowed = if i < window.len() { s * window[i] } else { 0.0 };
                 Complex::new(windowed, 0.0)
             })
             .collect();
@@ -454,7 +448,12 @@ mod tests {
             // All coefficients should be approximately in [0, 1].
             // FlatTop window has small negative side lobes (~-0.0004) by design.
             for &c in &coeffs {
-                assert!(c >= -0.1 && c <= 1.5, "Window {} coefficient {} out of range", window.display_name(), c);
+                assert!(
+                    (-0.1..=1.5).contains(&c),
+                    "Window {} coefficient {} out of range",
+                    window.display_name(),
+                    c
+                );
             }
         }
     }

@@ -2,7 +2,9 @@
 //!
 //! Run with: cargo run --example analyze_dwarf -- <axf-file>
 
-use gimli::{AttributeValue, DebugInfoOffset, EndianSlice, RunTimeEndian, UnitOffset};
+#![allow(deprecated)] // Example code may use deprecated APIs for demonstration
+
+use gimli::{AttributeValue, EndianSlice, RunTimeEndian};
 use object::{Object, ObjectSection};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -61,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let global_offset = entry
                 .offset()
                 .to_debug_info_offset(&unit.header)
-                .map(|o| o.0 as usize);
+                .map(|o| o.0);
 
             if let Some(off) = global_offset {
                 let name =
@@ -130,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let global_offset = entry
                 .offset()
                 .to_debug_info_offset(&unit.header)
-                .map(|o| o.0 as usize);
+                .map(|o| o.0);
 
             // Check attributes
             let has_declaration = matches!(
@@ -165,10 +167,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok()
                 .flatten()
                 .and_then(|v| match v {
-                    AttributeValue::UnitRef(offset) => offset
-                        .to_debug_info_offset(&unit.header)
-                        .map(|o| o.0 as usize),
-                    AttributeValue::DebugInfoRef(offset) => Some(offset.0 as usize),
+                    AttributeValue::UnitRef(offset) => {
+                        offset.to_debug_info_offset(&unit.header).map(|o| o.0)
+                    }
+                    AttributeValue::DebugInfoRef(offset) => Some(offset.0),
                     _ => None,
                 });
 
@@ -177,10 +179,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok()
                 .flatten()
                 .and_then(|v| match v {
-                    AttributeValue::UnitRef(offset) => offset
-                        .to_debug_info_offset(&unit.header)
-                        .map(|o| o.0 as usize),
-                    AttributeValue::DebugInfoRef(offset) => Some(offset.0 as usize),
+                    AttributeValue::UnitRef(offset) => {
+                        offset.to_debug_info_offset(&unit.header).map(|o| o.0)
+                    }
+                    AttributeValue::DebugInfoRef(offset) => Some(offset.0),
                     _ => None,
                 });
 

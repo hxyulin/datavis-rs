@@ -1,5 +1,7 @@
 //! Common test utilities and helpers
 
+#![allow(dead_code)] // Test utilities may not all be used in every test file
+
 pub mod builders;
 pub mod mock_helpers;
 

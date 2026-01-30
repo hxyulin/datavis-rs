@@ -15,9 +15,10 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// Marker type for categorization and color coding
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MarkerType {
     /// Generic event marker (blue)
+    #[default]
     Event,
     /// Error or issue marker (red)
     Error,
@@ -39,8 +40,8 @@ impl MarkerType {
             MarkerType::Error => Color32::from_rgb(255, 99, 71),   // Tomato red
             MarkerType::Note => Color32::from_rgb(255, 215, 0),    // Gold
             MarkerType::RegionStart => Color32::from_rgb(50, 205, 50), // Lime green
-            MarkerType::RegionEnd => Color32::from_rgb(34, 139, 34),   // Forest green
-            MarkerType::Custom => Color32::from_rgb(200, 200, 200),    // Gray
+            MarkerType::RegionEnd => Color32::from_rgb(34, 139, 34), // Forest green
+            MarkerType::Custom => Color32::from_rgb(200, 200, 200), // Gray
         }
     }
 
@@ -66,12 +67,6 @@ impl MarkerType {
             MarkerType::RegionEnd,
             MarkerType::Custom,
         ]
-    }
-}
-
-impl Default for MarkerType {
-    fn default() -> Self {
-        MarkerType::Event
     }
 }
 
@@ -215,16 +210,8 @@ impl MarkerManager {
     /// Get the nearest marker to a time point
     pub fn nearest(&self, time: Duration) -> Option<&Marker> {
         self.markers.iter().min_by(|a, b| {
-            let diff_a = if a.time > time {
-                a.time - time
-            } else {
-                time - a.time
-            };
-            let diff_b = if b.time > time {
-                b.time - time
-            } else {
-                time - b.time
-            };
+            let diff_a = a.time.abs_diff(time);
+            let diff_b = b.time.abs_diff(time);
             diff_a.cmp(&diff_b)
         })
     }
@@ -261,7 +248,9 @@ impl MarkerManager {
 
     /// Get markers of a specific type
     pub fn by_type(&self, marker_type: MarkerType) -> impl Iterator<Item = &Marker> {
-        self.markers.iter().filter(move |m| m.marker_type == marker_type)
+        self.markers
+            .iter()
+            .filter(move |m| m.marker_type == marker_type)
     }
 
     /// Update a marker's name
@@ -301,8 +290,8 @@ mod tests {
     #[test]
     fn test_marker_manager_add() {
         let mut manager = MarkerManager::new();
-        let id1 = manager.add("First", Duration::from_secs(10), MarkerType::Event);
-        let id2 = manager.add("Second", Duration::from_secs(5), MarkerType::Note);
+        let _id1 = manager.add("First", Duration::from_secs(10), MarkerType::Event);
+        let _id2 = manager.add("Second", Duration::from_secs(5), MarkerType::Note);
 
         assert_eq!(manager.len(), 2);
         // Should be sorted by time

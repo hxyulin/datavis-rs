@@ -47,20 +47,15 @@ impl ExportFormat {
 }
 
 /// Downsampling mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DownsampleMode {
     /// No downsampling - export all data
+    #[default]
     None,
     /// Export every Nth sample
     EveryNth(u32),
     /// Target a specific sample rate (Hz)
     TargetRate(u32),
-}
-
-impl Default for DownsampleMode {
-    fn default() -> Self {
-        DownsampleMode::None
-    }
 }
 
 /// State for the export configuration dialog
@@ -117,8 +112,7 @@ impl Default for ExportConfigState {
 impl DialogState for ExportConfigState {
     fn is_valid(&self) -> bool {
         // Valid if we have at least one variable selected and a valid file path
-        (!self.selected_variables.is_empty() || self.select_all)
-            && !self.file_path_input.is_empty()
+        (!self.selected_variables.is_empty() || self.select_all) && !self.file_path_input.is_empty()
     }
 }
 
@@ -247,7 +241,10 @@ impl Dialog for ExportConfigDialog {
             ui.heading("Time Range");
             ui.horizontal(|ui| {
                 if ui
-                    .radio(!state.use_cursor_range && state.time_start.is_none(), "All Data")
+                    .radio(
+                        !state.use_cursor_range && state.time_start.is_none(),
+                        "All Data",
+                    )
                     .clicked()
                 {
                     state.time_start = None;
@@ -306,10 +303,8 @@ impl Dialog for ExportConfigDialog {
             // Variable selection
             ui.heading("Variables");
             ui.horizontal(|ui| {
-                if ui.checkbox(&mut state.select_all, "Select All").changed() {
-                    if state.select_all {
-                        state.init_with_variables(ctx.variables);
-                    }
+                if ui.checkbox(&mut state.select_all, "Select All").changed() && state.select_all {
+                    state.init_with_variables(ctx.variables);
                 }
             });
 
@@ -461,11 +456,8 @@ impl Dialog for ExportConfigDialog {
             }
 
             // Statistics option
-            ui.checkbox(
-                &mut state.include_statistics,
-                "Include statistics summary",
-            )
-            .on_hover_text("Add min/max/mean/stddev for each variable");
+            ui.checkbox(&mut state.include_statistics, "Include statistics summary")
+                .on_hover_text("Add min/max/mean/stddev for each variable");
 
             ui.add_space(8.0);
 
@@ -487,7 +479,11 @@ impl Dialog for ExportConfigDialog {
             ui.heading("Preview");
             let estimated_rows = state.estimate_row_count(ctx.total_samples, ctx.data_duration);
             let estimated_cols = selected_count
-                + if state.settings.include_timestamps { 1 } else { 0 };
+                + if state.settings.include_timestamps {
+                    1
+                } else {
+                    0
+                };
 
             ui.label(format!(
                 "Estimated: {} rows x {} columns",
@@ -501,10 +497,10 @@ impl Dialog for ExportConfigDialog {
                     header_preview.push("timestamp");
                 }
                 for var in ctx.variables.values() {
-                    if state.select_all || state.selected_variables.contains(&var.id) {
-                        if var.enabled {
-                            header_preview.push(&var.name);
-                        }
+                    if (state.select_all || state.selected_variables.contains(&var.id))
+                        && var.enabled
+                    {
+                        header_preview.push(&var.name);
                     }
                 }
                 let header_str = header_preview.join(&state.settings.field_separator.to_string());
@@ -570,6 +566,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn test_estimate_row_count() {
         let state = ExportConfigState::default();
 

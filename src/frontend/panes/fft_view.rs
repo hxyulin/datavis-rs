@@ -152,20 +152,12 @@ pub fn render(
         if state.fft_result.is_none() {
             if let Some(data) = shared.topics.variable_data.get(&var_id) {
                 if !data.data_points.is_empty() {
-                    let samples: Vec<f64> = data
-                        .data_points
-                        .iter()
-                        .map(|p| p.converted_value)
-                        .collect();
+                    let samples: Vec<f64> =
+                        data.data_points.iter().map(|p| p.converted_value).collect();
 
                     let sample_rate = if data.data_points.len() >= 2 {
                         let duration = data.data_points.back().unwrap().timestamp.as_secs_f64()
-                            - data
-                                .data_points
-                                .front()
-                                .unwrap()
-                                .timestamp
-                                .as_secs_f64();
+                            - data.data_points.front().unwrap().timestamp.as_secs_f64();
                         if duration > 0.0 {
                             data.data_points.len() as f64 / duration
                         } else {
@@ -260,12 +252,18 @@ pub fn render(
 }
 
 impl Pane for FftViewState {
-    fn kind(&self) -> PaneKind { PaneKind::FftView }
+    fn kind(&self) -> PaneKind {
+        PaneKind::FftView
+    }
 
     fn render(&mut self, shared: &mut SharedState, ui: &mut Ui) -> Vec<AppAction> {
         render(self, shared, ui)
     }
 
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

@@ -1048,6 +1048,7 @@ dependencies = [
  "object 0.38.1",
  "probe-rs",
  "proptest",
+ "raw-window-handle",
  "rfd",
  "rhai",
  "rust-i18n",

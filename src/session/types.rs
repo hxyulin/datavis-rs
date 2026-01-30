@@ -188,12 +188,7 @@ impl SessionRecording {
     }
 
     /// Get data points for a variable within a time range
-    pub fn get_variable_data(
-        &self,
-        var_id: u32,
-        start: Duration,
-        end: Duration,
-    ) -> Vec<DataPoint> {
+    pub fn get_variable_data(&self, var_id: u32, start: Duration, end: Duration) -> Vec<DataPoint> {
         self.frames
             .iter()
             .filter(|f| f.timestamp >= start && f.timestamp <= end)
@@ -284,6 +279,9 @@ mod tests {
         assert_eq!(recording.find_frame_at(Duration::from_millis(0)), Some(0));
         assert_eq!(recording.find_frame_at(Duration::from_millis(150)), Some(1));
         assert_eq!(recording.find_frame_at(Duration::from_millis(500)), Some(5));
-        assert_eq!(recording.find_frame_at(Duration::from_millis(1000)), Some(9));
+        assert_eq!(
+            recording.find_frame_at(Duration::from_millis(1000)),
+            Some(9)
+        );
     }
 }

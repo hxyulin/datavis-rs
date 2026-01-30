@@ -125,9 +125,9 @@ fn test_remove_variable() {
 
     // Verify we're getting data
     let messages = frontend.drain();
-    let had_data = messages.iter().any(|msg| {
-        matches!(msg, BackendMessage::DataBatch(_))
-    });
+    let had_data = messages
+        .iter()
+        .any(|msg| matches!(msg, BackendMessage::DataBatch(_)));
     assert!(had_data, "Should receive data before removal");
 
     // Remove the variable
@@ -181,9 +181,9 @@ fn test_update_variable() {
 
     // Should continue receiving data (at new address with mock probe)
     let messages = frontend.drain();
-    let has_data = messages.iter().any(|msg| {
-        matches!(msg, BackendMessage::DataBatch(_))
-    });
+    let has_data = messages
+        .iter()
+        .any(|msg| matches!(msg, BackendMessage::DataBatch(_)));
     assert!(has_data, "Should continue receiving data after update");
 
     frontend.stop_collection();
@@ -258,9 +258,10 @@ fn test_variable_types_collection() {
     thread::sleep(Duration::from_millis(300));
 
     let messages = frontend.drain();
-    let data_count = messages.iter().filter(|msg| {
-        matches!(msg, BackendMessage::DataBatch(_))
-    }).count();
+    let data_count = messages
+        .iter()
+        .filter(|msg| matches!(msg, BackendMessage::DataBatch(_)))
+        .count();
 
     assert!(data_count > 0, "Should receive data for various types");
 
@@ -286,11 +287,7 @@ fn test_rapid_variable_changes() {
 
     // Rapidly add and remove variables
     for i in 0..10 {
-        let var = Variable::new(
-            &format!("var{}", i),
-            0x20000000 + (i * 4),
-            VariableType::U32
-        );
+        let var = Variable::new(format!("var{}", i), 0x20000000 + (i * 4), VariableType::U32);
         frontend.add_variable(var);
         thread::sleep(Duration::from_millis(20));
     }
@@ -299,9 +296,9 @@ fn test_rapid_variable_changes() {
 
     // Should handle rapid changes without crashing
     let messages = frontend.drain();
-    let has_data = messages.iter().any(|msg| {
-        matches!(msg, BackendMessage::DataBatch(_))
-    });
+    let has_data = messages
+        .iter()
+        .any(|msg| matches!(msg, BackendMessage::DataBatch(_)));
     assert!(has_data, "Should handle rapid variable changes");
 
     frontend.stop_collection();

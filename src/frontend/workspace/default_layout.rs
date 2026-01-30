@@ -27,9 +27,9 @@ pub fn build_default_layout(workspace: &mut Workspace) -> DockState<super::PaneI
     let mut dock = DockState::new(vec![timeseries_id]);
 
     // Split left 25% for variable browser
-    let [_right, left] = dock
-        .main_surface_mut()
-        .split_left(NodeIndex::root(), 0.25, vec![browser_id]);
+    let [_right, left] =
+        dock.main_surface_mut()
+            .split_left(NodeIndex::root(), 0.25, vec![browser_id]);
 
     // Split the left panel: browser on top (60%), variable list below (40%)
     dock.main_surface_mut()

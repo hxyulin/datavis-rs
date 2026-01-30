@@ -7,9 +7,7 @@ use std::collections::HashMap;
 use egui::{Color32, Ui};
 use egui_plot::{HLine, PlotPoint, Polygon, VLine};
 
-use crate::frontend::dialogs::{
-    ExportConfigState, TriggerConfigState, ValueEditorState,
-};
+use crate::frontend::dialogs::{ExportConfigState, TriggerConfigState, ValueEditorState};
 use crate::frontend::markers::{MarkerManager, MarkerType};
 use crate::frontend::pane_trait::Pane;
 use crate::frontend::plot::{PlotCursor, PlotStatistics};
@@ -196,7 +194,8 @@ pub fn render_dialogs(
             };
 
             let current_value = shared
-                .topics.variable_data
+                .topics
+                .variable_data
                 .get(&var_id)
                 .and_then(|d| d.last())
                 .map(|p| p.raw_value);
@@ -258,7 +257,8 @@ pub fn render_dialogs(
     // Export config dialog
     if state.export_config_open {
         let total_samples: usize = shared
-            .topics.variable_data
+            .topics
+            .variable_data
             .values()
             .map(|d| d.data_points.len())
             .sum();
@@ -370,7 +370,8 @@ fn render_toolbar_simple(
                 (60.0, "1m"),
             ];
             let current = shared.settings.display_time_window;
-            let label = SIMPLE_PRESETS.iter()
+            let label = SIMPLE_PRESETS
+                .iter()
                 .find(|&&(s, _)| (s - current).abs() < 0.01)
                 .map(|&(_, l)| l.to_string())
                 .unwrap_or_else(|| format!("{:.1}s", current));
@@ -379,11 +380,10 @@ fn render_toolbar_simple(
                 .width(50.0)
                 .show_ui(ui, |ui| {
                     for &(secs, label) in SIMPLE_PRESETS {
-                        if ui.selectable_value(
-                            &mut shared.settings.display_time_window,
-                            secs,
-                            label,
-                        ).clicked() {
+                        if ui
+                            .selectable_value(&mut shared.settings.display_time_window, secs, label)
+                            .clicked()
+                        {
                             shared.settings.autoscale_x = true;
                             shared.settings.follow_latest = true;
                         }
@@ -479,7 +479,10 @@ fn render_toolbar_advanced(
                 format!("(target: {} Hz)", shared.config.collection.poll_rate_hz),
             );
         }
-        ui.label(format!("| Success: {:.1}%", shared.topics.stats.success_rate()));
+        ui.label(format!(
+            "| Success: {:.1}%",
+            shared.topics.stats.success_rate()
+        ));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.checkbox(&mut state.advanced_mode, "Advanced");
@@ -518,11 +521,10 @@ fn render_toolbar_advanced(
             .width(60.0)
             .show_ui(ui, |ui| {
                 for &(secs, label) in TIME_PRESETS {
-                    if ui.selectable_value(
-                        &mut shared.settings.display_time_window,
-                        secs,
-                        label,
-                    ).clicked() {
+                    if ui
+                        .selectable_value(&mut shared.settings.display_time_window, secs, label)
+                        .clicked()
+                    {
                         shared.settings.autoscale_x = true;
                         shared.settings.follow_latest = true;
                     }
@@ -781,11 +783,8 @@ fn render_toolbar_advanced(
                 state.markers.clear();
             }
         }
-
     });
-
 }
-
 
 // ============================================================================
 // Plot
@@ -876,17 +875,22 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
 
             if let Some(data) = data {
                 let raw_points = data.as_plot_points();
-                let points = if let Some((cached_len, cached)) = state.decimation_cache.get(&var.id) {
+                let points = if let Some((cached_len, cached)) = state.decimation_cache.get(&var.id)
+                {
                     if *cached_len == raw_points.len() {
                         cached.clone()
                     } else {
                         let decimated = decimate_points(&raw_points, MAX_RENDER_POINTS);
-                        state.decimation_cache.insert(var.id, (raw_points.len(), decimated.clone()));
+                        state
+                            .decimation_cache
+                            .insert(var.id, (raw_points.len(), decimated.clone()));
                         decimated
                     }
                 } else {
                     let decimated = decimate_points(&raw_points, MAX_RENDER_POINTS);
-                    state.decimation_cache.insert(var.id, (raw_points.len(), decimated.clone()));
+                    state
+                        .decimation_cache
+                        .insert(var.id, (raw_points.len(), decimated.clone()));
                     decimated
                 };
 
@@ -943,15 +947,10 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
                         plot_ui.line(outline);
 
                         let area_points = create_area_polygon(&points);
-                        let fill_color = Color32::from_rgba_unmultiplied(
-                            color.r(),
-                            color.g(),
-                            color.b(),
-                            50,
-                        );
-                        let polygon =
-                            Polygon::new(display_name, PlotPoints::from(area_points))
-                                .fill_color(fill_color);
+                        let fill_color =
+                            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 50);
+                        let polygon = Polygon::new(display_name, PlotPoints::from(area_points))
+                            .fill_color(fill_color);
                         plot_ui.polygon(polygon);
                     }
                 }
@@ -1086,8 +1085,6 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
     }
 }
 
-
-
 // ============================================================================
 // Helper functions
 // ============================================================================
@@ -1097,7 +1094,7 @@ fn format_cursor_tooltip(state: &TimeSeriesState) -> String {
     if let Some(pos) = state.cursor.position {
         lines.push(format!("T: {:.3}s", pos.x));
     }
-    for (_id, (point, name)) in &state.cursor.nearest_points {
+    for (point, name) in state.cursor.nearest_points.values() {
         lines.push(format!("{}: {:.4}", name, point.y));
     }
     lines.join("\n")
@@ -1134,12 +1131,14 @@ fn decimate_points(points: &[[f64; 2]], max_points: usize) -> Vec<[f64; 2]> {
         if bucket.is_empty() {
             continue;
         }
-        let (min_pt, max_pt) = bucket.iter().fold((bucket[0], bucket[0]), |(min, max), pt| {
-            (
-                if pt[1] < min[1] { *pt } else { min },
-                if pt[1] > max[1] { *pt } else { max },
-            )
-        });
+        let (min_pt, max_pt) = bucket
+            .iter()
+            .fold((bucket[0], bucket[0]), |(min, max), pt| {
+                (
+                    if pt[1] < min[1] { *pt } else { min },
+                    if pt[1] > max[1] { *pt } else { max },
+                )
+            });
         if min_pt[0] < max_pt[0] {
             result.push(min_pt);
             result.push(max_pt);
@@ -1184,24 +1183,26 @@ fn create_area_polygon(points: &[[f64; 2]]) -> Vec<[f64; 2]> {
 }
 
 impl Pane for TimeSeriesState {
-    fn kind(&self) -> PaneKind { PaneKind::TimeSeries }
+    fn kind(&self) -> PaneKind {
+        PaneKind::TimeSeries
+    }
 
     fn render(&mut self, shared: &mut SharedState, ui: &mut Ui) -> Vec<AppAction> {
         render(self, shared, ui)
     }
 
-    fn render_dialogs(
-        &mut self,
-        shared: &mut SharedState,
-        ctx: &egui::Context,
-    ) -> Vec<AppAction> {
+    fn render_dialogs(&mut self, shared: &mut SharedState, ctx: &egui::Context) -> Vec<AppAction> {
         let mut actions = Vec::new();
         render_dialogs(self, shared, ctx, &mut actions);
         actions
     }
 
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]
@@ -1242,8 +1243,12 @@ mod tests {
         let mut state = TimeSeriesState::default();
 
         // Add threshold lines
-        state.threshold_lines.push(ThresholdLine::new(1, 10.0, "Low", [0, 255, 0, 255]));
-        state.threshold_lines.push(ThresholdLine::new(2, 90.0, "High", [255, 0, 0, 255]));
+        state
+            .threshold_lines
+            .push(ThresholdLine::new(1, 10.0, "Low", [0, 255, 0, 255]));
+        state
+            .threshold_lines
+            .push(ThresholdLine::new(2, 90.0, "High", [255, 0, 0, 255]));
 
         assert_eq!(state.threshold_lines.len(), 2);
         assert_eq!(state.threshold_lines[0].value, 10.0);
@@ -1267,21 +1272,29 @@ mod tests {
         let mut state = TimeSeriesState::default();
 
         // Add markers
-        state.markers.add("Event 1", Duration::from_secs(100), MarkerType::Event);
-        state.markers.add("Note", Duration::from_secs(200), MarkerType::Note);
-        state.markers.add("Event 2", Duration::from_secs(300), MarkerType::Event);
+        state
+            .markers
+            .add("Event 1", Duration::from_secs(100), MarkerType::Event);
+        state
+            .markers
+            .add("Note", Duration::from_secs(200), MarkerType::Note);
+        state
+            .markers
+            .add("Event 2", Duration::from_secs(300), MarkerType::Event);
 
         let all_markers = state.markers.all();
         assert_eq!(all_markers.len(), 3);
 
         // Filter by type
-        let event_markers: Vec<_> = all_markers.iter()
+        let event_markers: Vec<_> = all_markers
+            .iter()
             .filter(|m| m.marker_type == MarkerType::Event)
             .collect();
         assert_eq!(event_markers.len(), 2);
 
         // Filter by time window
-        let windowed: Vec<_> = all_markers.iter()
+        let windowed: Vec<_> = all_markers
+            .iter()
             .filter(|m| m.time >= Duration::from_secs(150) && m.time <= Duration::from_secs(250))
             .collect();
         assert_eq!(windowed.len(), 1);
@@ -1344,27 +1357,33 @@ mod tests {
         let mut state = TimeSeriesState::default();
 
         // Add statistics for variables
-        state.variable_statistics.insert(1, PlotStatistics {
-            min: 0.0,
-            max: 100.0,
-            mean: 50.0,
-            std_dev: 10.0,
-            rms: 51.0,
-            count: 1000,
-            time_start: Some(0.0),
-            time_end: Some(10.0),
-        });
+        state.variable_statistics.insert(
+            1,
+            PlotStatistics {
+                min: 0.0,
+                max: 100.0,
+                mean: 50.0,
+                std_dev: 10.0,
+                rms: 51.0,
+                count: 1000,
+                time_start: Some(0.0),
+                time_end: Some(10.0),
+            },
+        );
 
-        state.variable_statistics.insert(2, PlotStatistics {
-            min: -10.0,
-            max: 10.0,
-            mean: 0.5,
-            std_dev: 5.0,
-            rms: 5.1,
-            count: 500,
-            time_start: Some(0.0),
-            time_end: Some(5.0),
-        });
+        state.variable_statistics.insert(
+            2,
+            PlotStatistics {
+                min: -10.0,
+                max: 10.0,
+                mean: 0.5,
+                std_dev: 5.0,
+                rms: 5.1,
+                count: 500,
+                time_start: Some(0.0),
+                time_end: Some(5.0),
+            },
+        );
 
         assert_eq!(state.variable_statistics.len(), 2);
 
@@ -1493,12 +1512,20 @@ mod tests {
     fn test_multiple_threshold_lines_ordering() {
         let mut state = TimeSeriesState::default();
 
-        state.threshold_lines.push(ThresholdLine::new(1, 50.0, "Middle", [0, 255, 0, 255]));
-        state.threshold_lines.push(ThresholdLine::new(2, 10.0, "Low", [0, 0, 255, 255]));
-        state.threshold_lines.push(ThresholdLine::new(3, 90.0, "High", [255, 0, 0, 255]));
+        state
+            .threshold_lines
+            .push(ThresholdLine::new(1, 50.0, "Middle", [0, 255, 0, 255]));
+        state
+            .threshold_lines
+            .push(ThresholdLine::new(2, 10.0, "Low", [0, 0, 255, 255]));
+        state
+            .threshold_lines
+            .push(ThresholdLine::new(3, 90.0, "High", [255, 0, 0, 255]));
 
         // Can be reordered by value
-        state.threshold_lines.sort_by(|a, b| a.value.partial_cmp(&b.value).unwrap());
+        state
+            .threshold_lines
+            .sort_by(|a, b| a.value.partial_cmp(&b.value).unwrap());
 
         assert_eq!(state.threshold_lines[0].value, 10.0);
         assert_eq!(state.threshold_lines[1].value, 50.0);

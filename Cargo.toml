@@ -78,6 +78,7 @@ rfd = "0.15"
 
 # Native OS menus
 muda = "0.17"
+raw-window-handle = "0.6"
 
 # Internationalization
 rust-i18n = "3"

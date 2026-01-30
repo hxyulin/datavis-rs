@@ -66,7 +66,12 @@ impl PortId {
 
 impl fmt::Debug for PortId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "PortId(node={}, port={})", self.node().0, self.port_index())
+        write!(
+            f,
+            "PortId(node={}, port={})",
+            self.node().0,
+            self.port_index()
+        )
     }
 }
 

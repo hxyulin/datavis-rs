@@ -2,6 +2,8 @@
 //!
 //! Run with: cargo bench
 
+#![allow(dead_code, clippy::approx_constant)] // Benchmark code may have unused fields and test values
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::collections::VecDeque;
 use std::time::Duration;

@@ -30,9 +30,9 @@
 //! - `prev()` / `prev_raw()` - Previous values for derivative calculations
 
 use crate::backend::converter_engine::ConverterEngine;
-use crate::backend::{BackendCommand, BackendMessage, ProbeBackend};
 use crate::backend::probe_trait::DebugProbe;
 use crate::backend::read_manager::DependentReadPlanner;
+use crate::backend::{BackendCommand, BackendMessage, ProbeBackend};
 use crate::config::AppConfig;
 use crate::types::{CollectionStats, ConnectionStatus, Variable};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
@@ -122,11 +122,14 @@ impl DataRouter {
 
     /// Route data to global + per-pane streams
     /// This will be used in Phase 2 when we switch to the new data flow
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::type_complexity)]
     pub fn route(
         &self,
         data: Vec<(u32, Duration, f64, f64)>,
-    ) -> (Vec<(u32, Duration, f64, f64)>, HashMap<u64, Vec<(u32, Duration, f64, f64)>>) {
+    ) -> (
+        Vec<(u32, Duration, f64, f64)>,
+        HashMap<u64, Vec<(u32, Duration, f64, f64)>>,
+    ) {
         let global = data.clone(); // All panes see global data
 
         let mut per_pane = HashMap::new();
@@ -337,7 +340,8 @@ impl BackendWorker {
                 script,
             } => {
                 // Update converter engine
-                self.converter_engine.update_converter(var_id, &var_name, script.clone());
+                self.converter_engine
+                    .update_converter(var_id, &var_name, script.clone());
 
                 // Also update the variable's converter_script field if it exists
                 if let Some(var) = self.variables.get_mut(&var_id) {
@@ -453,7 +457,8 @@ impl BackendWorker {
         let id = var.id;
 
         // Update converter engine
-        self.converter_engine.update_converter(id, &var.name, var.converter_script.clone());
+        self.converter_engine
+            .update_converter(id, &var.name, var.converter_script.clone());
 
         self.variables.insert(id, var);
         self.send_variable_list();
@@ -557,20 +562,28 @@ impl BackendWorker {
             }
 
             // Update planner's timestamp cache
-            let updated_vars: Vec<Variable> = pointer_vars.iter()
+            let updated_vars: Vec<Variable> = pointer_vars
+                .iter()
                 .filter_map(|v| self.variables.get(&v.id).cloned())
                 .collect();
-            self.dependent_read_planner.update_pointer_cache(&updated_vars);
+            self.dependent_read_planner
+                .update_pointer_cache(&updated_vars);
         }
 
         // Resolve dependent variable addresses using cached pointer values
-        let resolved_vars: Vec<Variable> = data_vars.iter()
+        let resolved_vars: Vec<Variable> = data_vars
+            .iter()
             .map(|v| {
                 // Get latest state from variables map
-                self.variables.get(&v.id).cloned().unwrap_or_else(|| v.clone())
+                self.variables
+                    .get(&v.id)
+                    .cloned()
+                    .unwrap_or_else(|| v.clone())
             })
             .collect();
-        data_vars = self.dependent_read_planner.resolve_addresses(&resolved_vars);
+        data_vars = self
+            .dependent_read_planner
+            .resolve_addresses(&resolved_vars);
 
         // Stage 2: Read data variables (with resolved addresses)
         let read_results = self.probe.read_variables(&data_vars);
@@ -907,18 +920,14 @@ mod tests {
         assert!(!worker.is_mock_probe);
 
         // Switch to mock probe
-        cmd_tx
-            .send(BackendCommand::UseMockProbe(true))
-            .unwrap();
+        cmd_tx.send(BackendCommand::UseMockProbe(true)).unwrap();
         worker.process_commands();
 
         assert!(worker.is_mock_probe);
         assert!(worker.is_using_mock());
 
         // Switch back to real probe
-        cmd_tx
-            .send(BackendCommand::UseMockProbe(false))
-            .unwrap();
+        cmd_tx.send(BackendCommand::UseMockProbe(false)).unwrap();
         worker.process_commands();
 
         assert!(!worker.is_mock_probe);

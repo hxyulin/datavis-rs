@@ -123,10 +123,7 @@ impl Dialog for PreferencesDialog {
                 ui.end_row();
 
                 ui.label(format!("{}:", t!("pref_font_scale")));
-                ui.add(
-                    egui::Slider::new(&mut state.font_scale, 0.5..=2.0)
-                        .step_by(0.1),
-                );
+                ui.add(egui::Slider::new(&mut state.font_scale, 0.5..=2.0).step_by(0.1));
                 ui.end_row();
             });
 
@@ -172,9 +169,7 @@ impl Dialog for PreferencesDialog {
         ui.separator();
         ui.horizontal(|ui| {
             if ui.button(t!("dialog_apply")).clicked() {
-                return DialogAction::CloseWithAction(PreferencesAction::Apply(
-                    state.clone(),
-                ));
+                return DialogAction::CloseWithAction(PreferencesAction::Apply(state.clone()));
             }
             if ui.button(t!("dialog_cancel")).clicked() {
                 return DialogAction::Close;

@@ -154,8 +154,7 @@ impl DataPacket {
         let to_copy = (src.len as usize).min(remaining);
         if to_copy > 0 {
             let start = self.len as usize;
-            self.samples[start..start + to_copy]
-                .copy_from_slice(&src.samples[..to_copy]);
+            self.samples[start..start + to_copy].copy_from_slice(&src.samples[..to_copy]);
             self.len += to_copy as u16;
         }
     }
@@ -311,13 +310,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // Intentionally using 3.14 as test value, not PI
     fn test_config_value() {
         assert_eq!(ConfigValue::Bool(true).as_bool(), Some(true));
         assert_eq!(ConfigValue::Int(42).as_int(), Some(42));
         assert_eq!(ConfigValue::Float(3.14).as_float(), Some(3.14));
-        assert_eq!(
-            ConfigValue::String("hello".into()).as_str(),
-            Some("hello")
-        );
+        assert_eq!(ConfigValue::String("hello".into()).as_str(), Some("hello"));
     }
 }

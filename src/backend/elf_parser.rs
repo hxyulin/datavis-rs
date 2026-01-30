@@ -94,7 +94,7 @@ impl SymbolInfo {
 
     /// Check if this symbol can be read (has a valid address)
     pub fn is_readable(&self) -> bool {
-        self.status.as_ref().map_or(true, |s| s.is_readable())
+        self.status.as_ref().is_none_or(|s| s.is_readable())
     }
 
     /// Get the reason why this symbol cannot be read, if applicable
@@ -317,19 +317,19 @@ impl ElfInfo {
     /// Check if a symbol is expandable (has members)
     pub fn is_symbol_expandable(&self, symbol: &SymbolInfo) -> bool {
         self.symbol_type_handle(symbol)
-            .map_or(false, |h| h.is_expandable())
+            .is_some_and(|h| h.is_expandable())
     }
 
     /// Check if a symbol is complex (struct, union, array)
     pub fn is_symbol_complex(&self, symbol: &SymbolInfo) -> bool {
         self.symbol_type_handle(symbol)
-            .map_or(false, |h| h.is_struct_or_union())
+            .is_some_and(|h| h.is_struct_or_union())
     }
 
     /// Check if a symbol can be added as a watchable variable
     pub fn is_symbol_addable(&self, symbol: &SymbolInfo) -> bool {
         self.symbol_type_handle(symbol)
-            .map_or(true, |h| h.is_addable())
+            .is_none_or(|h| h.is_addable())
     }
 
     /// Get the type name for a symbol

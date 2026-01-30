@@ -133,11 +133,7 @@ impl Dialog for PersistenceSettingsDialog {
                     egui::ComboBox::from_id_salt("persist_settings_format")
                         .selected_text(state.format.to_string())
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut state.format,
-                                PersistenceFormat::Csv,
-                                "CSV",
-                            );
+                            ui.selectable_value(&mut state.format, PersistenceFormat::Csv, "CSV");
                             ui.selectable_value(
                                 &mut state.format,
                                 PersistenceFormat::JsonLines,
@@ -153,14 +149,12 @@ impl Dialog for PersistenceSettingsDialog {
 
                     ui.label("Max File Size:");
                     ui.horizontal(|ui| {
-                        let mut size_gb =
-                            state.max_file_size as f64 / (1024.0 * 1024.0 * 1024.0);
+                        let mut size_gb = state.max_file_size as f64 / (1024.0 * 1024.0 * 1024.0);
                         if ui
                             .add(egui::Slider::new(&mut size_gb, 0.1..=2.0).suffix(" GB"))
                             .changed()
                         {
-                            state.max_file_size =
-                                (size_gb * 1024.0 * 1024.0 * 1024.0) as u64;
+                            state.max_file_size = (size_gb * 1024.0 * 1024.0 * 1024.0) as u64;
                         }
                         ui.label(format!(
                             "({})",
@@ -171,10 +165,7 @@ impl Dialog for PersistenceSettingsDialog {
                 });
 
             ui.add_space(4.0);
-            ui.checkbox(
-                &mut state.include_variable_name,
-                "Include variable name",
-            );
+            ui.checkbox(&mut state.include_variable_name, "Include variable name");
             ui.checkbox(
                 &mut state.include_variable_address,
                 "Include variable address",

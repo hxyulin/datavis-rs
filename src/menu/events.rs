@@ -9,7 +9,7 @@ use super::ids::MenuId;
 #[derive(Debug, Clone)]
 pub enum MenuEvent {
     /// Standard action that can be converted to AppAction
-    Action(AppAction),
+    Action(Box<AppAction>),
     /// Toggle toolbar visibility
     ToggleToolbar,
     /// Toggle status bar visibility
@@ -49,7 +49,7 @@ impl MenuEvent {
     pub fn from_menu_id(id: &MenuId) -> Option<Self> {
         match id {
             // File menu
-            MenuId::FileNewProject => Some(MenuEvent::Action(AppAction::NewProject)),
+            MenuId::FileNewProject => Some(MenuEvent::Action(Box::new(AppAction::NewProject))),
             MenuId::FileOpenProject => Some(MenuEvent::OpenProject),
             MenuId::FileQuit => Some(MenuEvent::Quit),
 
@@ -62,25 +62,25 @@ impl MenuEvent {
             // View menu
             MenuId::ViewToolbar => Some(MenuEvent::ToggleToolbar),
             MenuId::ViewStatusBar => Some(MenuEvent::ToggleStatusBar),
-            MenuId::ViewVariableBrowser => {
-                Some(MenuEvent::Action(AppAction::OpenPane(PaneKind::VariableBrowser)))
-            }
-            MenuId::ViewVariableList => {
-                Some(MenuEvent::Action(AppAction::OpenPane(PaneKind::VariableList)))
-            }
-            MenuId::ViewSessionCapture => {
-                Some(MenuEvent::Action(AppAction::OpenPane(PaneKind::Recorder)))
-            }
-            MenuId::ViewNewTimeSeries => {
-                Some(MenuEvent::Action(AppAction::NewVisualizer(PaneKind::TimeSeries)))
-            }
-            MenuId::ViewNewWatcher => {
-                Some(MenuEvent::Action(AppAction::NewVisualizer(PaneKind::Watcher)))
-            }
-            MenuId::ViewNewFft => {
-                Some(MenuEvent::Action(AppAction::NewVisualizer(PaneKind::FftView)))
-            }
-            MenuId::ViewResetLayout => Some(MenuEvent::Action(AppAction::ResetLayout)),
+            MenuId::ViewVariableBrowser => Some(MenuEvent::Action(Box::new(AppAction::OpenPane(
+                PaneKind::VariableBrowser,
+            )))),
+            MenuId::ViewVariableList => Some(MenuEvent::Action(Box::new(AppAction::OpenPane(
+                PaneKind::VariableList,
+            )))),
+            MenuId::ViewSessionCapture => Some(MenuEvent::Action(Box::new(AppAction::OpenPane(
+                PaneKind::Recorder,
+            )))),
+            MenuId::ViewNewTimeSeries => Some(MenuEvent::Action(Box::new(
+                AppAction::NewVisualizer(PaneKind::TimeSeries),
+            ))),
+            MenuId::ViewNewWatcher => Some(MenuEvent::Action(Box::new(AppAction::NewVisualizer(
+                PaneKind::Watcher,
+            )))),
+            MenuId::ViewNewFft => Some(MenuEvent::Action(Box::new(AppAction::NewVisualizer(
+                PaneKind::FftView,
+            )))),
+            MenuId::ViewResetLayout => Some(MenuEvent::Action(Box::new(AppAction::ResetLayout))),
 
             // Tools menu
             MenuId::ToolsConnectionSettings => Some(MenuEvent::OpenConnectionSettings),

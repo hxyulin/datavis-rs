@@ -54,6 +54,12 @@ pub struct Workspace {
     registry: HashMap<PaneKind, PaneKindInfo>,
 }
 
+impl Default for Workspace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Workspace {
     /// Create a new workspace with the pane registry.
     pub fn new() -> Self {
@@ -82,14 +88,7 @@ impl Workspace {
             .expect("PaneKind not found in registry");
 
         self.pane_states.insert(id, state);
-        self.pane_entries.insert(
-            id,
-            PaneEntry {
-                id,
-                kind,
-                title,
-            },
-        );
+        self.pane_entries.insert(id, PaneEntry { id, kind, title });
 
         id
     }
@@ -164,14 +163,14 @@ impl Workspace {
     /// Returns true if restoration succeeded.
     pub fn restore_layout(&mut self, layout: &crate::config::SerializedWorkspaceLayout) -> bool {
         // First, parse the dock state
-        let dock_state: egui_dock::DockState<PaneId> =
-            match serde_json::from_str(&layout.dock_json) {
-                Ok(state) => state,
-                Err(e) => {
-                    tracing::warn!("Failed to deserialize dock state: {}", e);
-                    return false;
-                }
-            };
+        let dock_state: egui_dock::DockState<PaneId> = match serde_json::from_str(&layout.dock_json)
+        {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!("Failed to deserialize dock state: {}", e);
+                return false;
+            }
+        };
 
         // Clear existing panes
         self.pane_states.clear();
@@ -229,7 +228,10 @@ impl Workspace {
         // Set the dock state
         self.dock_state = dock_state;
 
-        tracing::info!("Restored workspace layout with {} panes", layout.panes.len());
+        tracing::info!(
+            "Restored workspace layout with {} panes",
+            layout.panes.len()
+        );
         true
     }
 }

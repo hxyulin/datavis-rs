@@ -82,7 +82,9 @@ fn build_project_menu(state: &MenuBarState) -> Submenu {
         ))
         .unwrap();
 
-    project_menu.append(&PredefinedMenuItem::separator()).unwrap();
+    project_menu
+        .append(&PredefinedMenuItem::separator())
+        .unwrap();
 
     // Recent Projects submenu
     if !state.recent_projects.is_empty() {

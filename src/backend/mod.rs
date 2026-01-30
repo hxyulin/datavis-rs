@@ -62,7 +62,9 @@ pub mod worker;
 use crate::config::ProbeConfig;
 use std::collections::{HashMap, HashSet};
 
-pub use dwarf_parser::{DwarfDiagnostics, DwarfParseResult, DwarfParser, ParsedSymbol, VariableStatus};
+pub use dwarf_parser::{
+    DwarfDiagnostics, DwarfParseResult, DwarfParser, ParsedSymbol, VariableStatus,
+};
 pub use elf_parser::{demangle_symbol, ElfInfo, ElfParser, SymbolInfo, SymbolType};
 pub use type_table::{
     BaseClassDef, DwarfTypeKey, EnumDef, EnumVariant as TypeTableEnumVariant, ForwardDeclKind,

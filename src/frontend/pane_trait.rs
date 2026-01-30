@@ -20,11 +20,7 @@ pub trait Pane: Any {
     fn render(&mut self, shared: &mut SharedState, ui: &mut Ui) -> Vec<AppAction>;
 
     /// Render modal dialogs owned by this pane (called after dock rendering).
-    fn render_dialogs(
-        &mut self,
-        _shared: &mut SharedState,
-        _ctx: &Context,
-    ) -> Vec<AppAction> {
+    fn render_dialogs(&mut self, _shared: &mut SharedState, _ctx: &Context) -> Vec<AppAction> {
         Vec::new()
     }
 

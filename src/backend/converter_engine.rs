@@ -55,9 +55,7 @@ impl ConverterEngine {
                 let converted = if let Some(converter) = self.converters.get(var_id) {
                     // Build execution context from previous state
                     let ctx = if let Some(state) = self.prev_state.get(var_id) {
-                        let dt_secs = timestamp
-                            .saturating_sub(state.prev_time)
-                            .as_secs_f64();
+                        let dt_secs = timestamp.saturating_sub(state.prev_time).as_secs_f64();
                         ExecutionContext::new(
                             timestamp.as_secs_f64(),
                             dt_secs,
@@ -221,11 +219,7 @@ mod tests {
         let mut engine = ConverterEngine::new();
 
         // ADC to voltage: 12-bit (0-4095), 3.3V reference
-        engine.update_converter(
-            1,
-            "adc_voltage",
-            Some("value * 3.3 / 4095.0".to_string()),
-        );
+        engine.update_converter(1, "adc_voltage", Some("value * 3.3 / 4095.0".to_string()));
 
         let results = vec![(1, Duration::from_secs(0), 2048.0)];
         let converted = engine.apply_converters(&results);
@@ -277,7 +271,11 @@ mod tests {
         let results2 = vec![(1, Duration::from_millis(10), 20.0)];
         let converted2 = engine.apply_converters(&results2);
         let filtered = converted2[0].3;
-        assert!(filtered > 10.0 && filtered < 20.0, "filtered = {}", filtered);
+        assert!(
+            filtered > 10.0 && filtered < 20.0,
+            "filtered = {}",
+            filtered
+        );
     }
 
     #[test]
@@ -322,10 +320,12 @@ mod tests {
     fn test_add_remove_variable() {
         let mut engine = ConverterEngine::new();
 
-        let mut var = Variable::default();
-        var.id = 1;
-        var.name = "test".to_string();
-        var.converter_script = Some("value * 3.0".to_string());
+        let var = Variable {
+            id: 1,
+            name: "test".to_string(),
+            converter_script: Some("value * 3.0".to_string()),
+            ..Default::default()
+        };
 
         engine.add_variable(&var);
         assert_eq!(engine.converter_count(), 1);

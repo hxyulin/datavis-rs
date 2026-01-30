@@ -55,9 +55,9 @@ fn test_backend_connect_with_mock_probe() {
 
     // Check for connection messages
     let messages = frontend.drain();
-    let has_connection_status = messages.iter().any(|msg| {
-        matches!(msg, BackendMessage::ConnectionStatus(_))
-    });
+    let has_connection_status = messages
+        .iter()
+        .any(|msg| matches!(msg, BackendMessage::ConnectionStatus(_)));
     assert!(has_connection_status, "Should receive connection status");
 
     // Cleanup
@@ -88,7 +88,10 @@ fn test_backend_disconnect() {
     // Check status
     let messages = frontend.drain();
     let has_disconnect = messages.iter().any(|msg| {
-        matches!(msg, BackendMessage::ConnectionStatus(ConnectionStatus::Disconnected))
+        matches!(
+            msg,
+            BackendMessage::ConnectionStatus(ConnectionStatus::Disconnected)
+        )
     });
     assert!(has_disconnect, "Should receive disconnected status");
 
@@ -119,9 +122,9 @@ fn test_collection_start_stop_cycle() {
 
     // Should receive data
     let messages = frontend.drain();
-    let has_data = messages.iter().any(|msg| {
-        matches!(msg, BackendMessage::DataBatch(_))
-    });
+    let has_data = messages
+        .iter()
+        .any(|msg| matches!(msg, BackendMessage::DataBatch(_)));
     assert!(has_data, "Should receive data during collection");
 
     // Stop collection
@@ -136,9 +139,9 @@ fn test_collection_start_stop_cycle() {
     let messages_after_stop = frontend.drain();
 
     // Should not receive new data batches after stopping
-    let has_new_data = messages_after_stop.iter().any(|msg| {
-        matches!(msg, BackendMessage::DataBatch(_))
-    });
+    let has_new_data = messages_after_stop
+        .iter()
+        .any(|msg| matches!(msg, BackendMessage::DataBatch(_)));
     // This might still be true due to timing, so just verify it doesn't panic
     let _ = has_new_data;
 
@@ -166,9 +169,9 @@ fn test_stats_reporting() {
     thread::sleep(Duration::from_millis(600)); // Stats sent every 500ms
 
     let messages = frontend.drain();
-    let has_stats = messages.iter().any(|msg| {
-        matches!(msg, BackendMessage::Stats(_))
-    });
+    let has_stats = messages
+        .iter()
+        .any(|msg| matches!(msg, BackendMessage::Stats(_)));
     assert!(has_stats, "Should receive statistics updates");
 
     frontend.stop_collection();
@@ -235,9 +238,9 @@ fn test_clear_data_command() {
 
     // Verify command was processed (no connection error)
     let messages = frontend.drain();
-    let has_error = messages.iter().any(|msg| {
-        matches!(msg, BackendMessage::ConnectionError(_))
-    });
+    let has_error = messages
+        .iter()
+        .any(|msg| matches!(msg, BackendMessage::ConnectionError(_)));
     assert!(!has_error, "Clear data should not produce errors");
 
     frontend.stop_collection();

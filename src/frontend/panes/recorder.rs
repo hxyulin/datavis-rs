@@ -172,10 +172,7 @@ fn render_recording_controls(
                     state.max_frames.to_string()
                 };
                 if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut max_frames_str)
-                            .desired_width(80.0),
-                    )
+                    .add(egui::TextEdit::singleline(&mut max_frames_str).desired_width(80.0))
                     .changed()
                 {
                     state.max_frames = max_frames_str.parse().unwrap_or(0);
@@ -227,36 +224,34 @@ fn render_playback_controls(state: &mut RecorderPaneState, ui: &mut Ui) {
     if state.session_player.has_recording() {
         let player_state = state.session_player.state();
 
-        ui.horizontal(|ui| {
-            match player_state {
-                SessionState::Playing => {
-                    ui.colored_label(egui::Color32::from_rgb(100, 255, 100), "▶ PLAY");
-                    if ui.button("⏸").clicked() {
-                        state.session_player.pause();
-                    }
-                    if ui.button("⏹").clicked() {
-                        state.session_player.stop();
-                    }
+        ui.horizontal(|ui| match player_state {
+            SessionState::Playing => {
+                ui.colored_label(egui::Color32::from_rgb(100, 255, 100), "▶ PLAY");
+                if ui.button("⏸").clicked() {
+                    state.session_player.pause();
                 }
-                SessionState::Paused => {
-                    ui.colored_label(egui::Color32::from_rgb(255, 255, 100), "⏸ PAUSED");
-                    if ui.button("▶").clicked() {
-                        state.session_player.play();
-                    }
-                    if ui.button("⏹").clicked() {
-                        state.session_player.stop();
-                    }
+                if ui.button("⏹").clicked() {
+                    state.session_player.stop();
                 }
-                SessionState::Stopped => {
-                    if ui.button("▶ Play").clicked() {
-                        state.session_player.play();
-                    }
-                    if ui.button("Unload").clicked() {
-                        state.session_player.unload();
-                    }
-                }
-                _ => {}
             }
+            SessionState::Paused => {
+                ui.colored_label(egui::Color32::from_rgb(255, 255, 100), "⏸ PAUSED");
+                if ui.button("▶").clicked() {
+                    state.session_player.play();
+                }
+                if ui.button("⏹").clicked() {
+                    state.session_player.stop();
+                }
+            }
+            SessionState::Stopped => {
+                if ui.button("▶ Play").clicked() {
+                    state.session_player.play();
+                }
+                if ui.button("Unload").clicked() {
+                    state.session_player.unload();
+                }
+            }
+            _ => {}
         });
 
         let progress = state.session_player.progress();
@@ -315,7 +310,11 @@ fn render_playback_controls(state: &mut RecorderPaneState, ui: &mut Ui) {
     }
 }
 
-fn render_saved_recordings(state: &mut RecorderPaneState, shared: &mut SharedState<'_>, ui: &mut Ui) {
+fn render_saved_recordings(
+    state: &mut RecorderPaneState,
+    shared: &mut SharedState<'_>,
+    ui: &mut Ui,
+) {
     let recordings = &mut shared.topics.completed_recordings;
     ui.label(format!("Saved Recordings ({})", recordings.len()));
 
@@ -379,12 +378,14 @@ fn render_export_tab(
     ui: &mut Ui,
     _actions: &mut Vec<AppAction>,
 ) {
-
     // --- Status ---
     ui.horizontal(|ui| {
         if shared.topics.exporter_active {
             ui.colored_label(egui::Color32::from_rgb(100, 255, 100), "● Active");
-            ui.label(format!("{} rows written", shared.topics.exporter_rows_written));
+            ui.label(format!(
+                "{} rows written",
+                shared.topics.exporter_rows_written
+            ));
         } else {
             ui.label("Inactive");
         }
@@ -495,12 +496,18 @@ fn render_export_tab(
 }
 
 impl Pane for RecorderPaneState {
-    fn kind(&self) -> PaneKind { PaneKind::Recorder }
+    fn kind(&self) -> PaneKind {
+        PaneKind::Recorder
+    }
 
     fn render(&mut self, shared: &mut SharedState, ui: &mut Ui) -> Vec<AppAction> {
         render(self, shared, ui)
     }
 
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

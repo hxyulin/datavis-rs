@@ -103,8 +103,7 @@ pub fn render(
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
-            ui.label(filename)
-                .on_hover_text(path.display().to_string());
+            ui.label(filename).on_hover_text(path.display().to_string());
         } else {
             ui.label("(none)");
         }
@@ -120,10 +119,7 @@ pub fn render(
 
     if shared.elf_info.is_some() {
         ui.horizontal(|ui| {
-            ui.label(format!(
-                "{} variables available",
-                shared.elf_symbols.len()
-            ));
+            ui.label(format!("{} variables available", shared.elf_symbols.len()));
         });
     }
 
@@ -271,11 +267,8 @@ fn render_diagnostics_summary(ui: &mut Ui, diagnostics: &crate::backend::DwarfDi
     }
 
     if diagnostics.implicit_value > 0 {
-        ui.label(format!(
-            "Implicit values: {}",
-            diagnostics.implicit_value
-        ))
-        .on_hover_text("Computed values (DW_OP_stack_value)");
+        ui.label(format!("Implicit values: {}", diagnostics.implicit_value))
+            .on_hover_text("Computed values (DW_OP_stack_value)");
     }
 
     if diagnostics.multi_piece > 0 {
@@ -367,10 +360,7 @@ fn render_type_tree(
         .map(|h| h.is_expandable())
         .unwrap_or(false);
 
-    let is_addable = type_handle
-        .as_ref()
-        .map(|h| h.is_addable())
-        .unwrap_or(true);
+    let is_addable = type_handle.as_ref().map(|h| h.is_addable()).unwrap_or(true);
 
     let underlying = type_handle.as_ref().map(|h| h.underlying());
 
@@ -382,15 +372,14 @@ fn render_type_tree(
     let members = if is_pointer {
         // For pointers, get members from the pointee type
         underlying.as_ref().and_then(|h| {
-            h.pointee_underlying().and_then(|pointee| {
-                pointee.members().map(|m| (m.to_vec(), pointee.clone()))
-            })
+            h.pointee_underlying()
+                .and_then(|pointee| pointee.members().map(|m| (m.to_vec(), pointee.clone())))
         })
     } else {
         // For non-pointers, get members directly
-        underlying.as_ref().and_then(|h| {
-            h.members().map(|m| (m.to_vec(), h.clone()))
-        })
+        underlying
+            .as_ref()
+            .and_then(|h| h.members().map(|m| (m.to_vec(), h.clone())))
     };
 
     let array_info = if is_pointer {
@@ -439,7 +428,11 @@ fn render_type_tree(
             } else {
                 "Expand to see members/elements"
             };
-            if ui.small_button(expand_icon).on_hover_text(expand_tooltip).clicked() {
+            if ui
+                .small_button(expand_icon)
+                .on_hover_text(expand_tooltip)
+                .clicked()
+            {
                 *toggle_expand_path = Some(path.to_string());
             }
         } else {
@@ -487,39 +480,46 @@ fn render_type_tree(
         }
 
         // "Add all" button for expandable (struct/array) types with children
-        if can_expand && !is_pointer {
-            if ui.small_button("+all").on_hover_text("Add struct with all fields").clicked() {
-                let parent_type = type_handle
-                    .as_ref()
-                    .map(|h| h.to_variable_type())
-                    .unwrap_or(crate::types::VariableType::U32);
-                let parent_var = Variable::new(name, address, parent_type);
-                let children = collect_children_from_type(&type_handle, name, address);
-                struct_add_actions.push(AppAction::AddStructVariable {
-                    parent: parent_var,
-                    children,
-                });
-            }
+        if can_expand
+            && !is_pointer
+            && ui
+                .small_button("+all")
+                .on_hover_text("Add struct with all fields")
+                .clicked()
+        {
+            let parent_type = type_handle
+                .as_ref()
+                .map(|h| h.to_variable_type())
+                .unwrap_or(crate::types::VariableType::U32);
+            let parent_var = Variable::new(name, address, parent_type);
+            let children = collect_children_from_type(&type_handle, name, address);
+            struct_add_actions.push(AppAction::AddStructVariable {
+                parent: parent_var,
+                children,
+            });
         }
 
         // "Add all" button for pointer types (Phase 2 feature)
-        if can_expand && is_pointer {
-            if ui.small_button("+all")
-                .on_hover_text("Add pointer with auto-dereferencing children (updates pointer at 1 Hz)")
+        if can_expand
+            && is_pointer
+            && ui
+                .small_button("+all")
+                .on_hover_text(
+                    "Add pointer with auto-dereferencing children (updates pointer at 1 Hz)",
+                )
                 .clicked()
-            {
-                let parent_type = type_handle
-                    .as_ref()
-                    .map(|h| h.to_variable_type())
-                    .unwrap_or(crate::types::VariableType::U32);
-                let pointer_var = Variable::new(name, address, parent_type);
-                let children = collect_pointer_children(&type_handle, name);
-                struct_add_actions.push(AppAction::AddPointerVariable {
-                    pointer: pointer_var,
-                    children,
-                    pointer_poll_rate_hz: 1, // Default 1 Hz for pointer updates
-                });
-            }
+        {
+            let parent_type = type_handle
+                .as_ref()
+                .map(|h| h.to_variable_type())
+                .unwrap_or(crate::types::VariableType::U32);
+            let pointer_var = Variable::new(name, address, parent_type);
+            let children = collect_pointer_children(&type_handle, name);
+            struct_add_actions.push(AppAction::AddPointerVariable {
+                pointer: pointer_var,
+                children,
+                pointer_poll_rate_hz: 1, // Default 1 Hz for pointer updates
+            });
         }
     });
 
@@ -621,11 +621,8 @@ fn collect_children_from_type(
 
             if member_underlying.is_expandable() && !member_underlying.is_pointer_or_reference() {
                 // Recurse into nested structs
-                let nested = collect_children_from_type(
-                    &Some(member_type),
-                    &full_name,
-                    member_addr,
-                );
+                let nested =
+                    collect_children_from_type(&Some(member_type), &full_name, member_addr);
                 children.extend(nested);
             } else if member_type.is_addable() {
                 children.push(ChildVariableSpec {
@@ -639,7 +636,10 @@ fn collect_children_from_type(
 
     // Array elements
     if !underlying.is_pointer_or_reference() && underlying.is_array() {
-        let count = underlying.array_count().unwrap_or(0).min(MAX_ARRAY_ELEMENTS);
+        let count = underlying
+            .array_count()
+            .unwrap_or(0)
+            .min(MAX_ARRAY_ELEMENTS);
         let elem_size = underlying.element_size().unwrap_or(0);
         let elem_type = underlying.element_type();
         if count > 0 && elem_size > 0 {
@@ -649,11 +649,7 @@ fn collect_children_from_type(
                 if let Some(ref et) = elem_type {
                     let et_underlying = et.underlying();
                     if et_underlying.is_expandable() && !et_underlying.is_pointer_or_reference() {
-                        let nested = collect_children_from_type(
-                            &elem_type,
-                            &full_name,
-                            elem_addr,
-                        );
+                        let nested = collect_children_from_type(&elem_type, &full_name, elem_addr);
                         children.extend(nested);
                     } else if et.is_addable() {
                         children.push(ChildVariableSpec {
@@ -677,7 +673,6 @@ fn collect_pointer_children(
     type_handle: &Option<TypeHandle>,
     parent_name: &str,
 ) -> Vec<crate::frontend::state::PointerChildSpec> {
-
     let mut children = Vec::new();
     let Some(handle) = type_handle else {
         return children;
@@ -732,7 +727,10 @@ fn collect_pointer_children_recursive(
 
     // Array elements
     if !type_handle.is_pointer_or_reference() && type_handle.is_array() {
-        let count = type_handle.array_count().unwrap_or(0).min(MAX_ARRAY_ELEMENTS);
+        let count = type_handle
+            .array_count()
+            .unwrap_or(0)
+            .min(MAX_ARRAY_ELEMENTS);
         let elem_size = type_handle.element_size().unwrap_or(0);
         let elem_type = type_handle.element_type();
         if count > 0 && elem_size > 0 {
@@ -742,12 +740,7 @@ fn collect_pointer_children_recursive(
                 if let Some(ref et) = elem_type {
                     let et_underlying = et.underlying();
                     if et_underlying.is_expandable() && !et_underlying.is_pointer_or_reference() {
-                        collect_pointer_children_recursive(
-                            et,
-                            &full_name,
-                            elem_offset,
-                            children,
-                        );
+                        collect_pointer_children_recursive(et, &full_name, elem_offset, children);
                     } else if et.is_addable() {
                         children.push(PointerChildSpec {
                             name: full_name,
@@ -762,12 +755,18 @@ fn collect_pointer_children_recursive(
 }
 
 impl Pane for VariableBrowserState {
-    fn kind(&self) -> PaneKind { PaneKind::VariableBrowser }
+    fn kind(&self) -> PaneKind {
+        PaneKind::VariableBrowser
+    }
 
     fn render(&mut self, shared: &mut SharedState, ui: &mut Ui) -> Vec<AppAction> {
         render(self, shared, ui)
     }
 
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

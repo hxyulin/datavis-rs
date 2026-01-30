@@ -183,10 +183,8 @@ impl IconToggle {
             if let Some(ref tooltip) = self.tooltip_on {
                 return response.on_hover_text(tooltip);
             }
-        } else {
-            if let Some(ref tooltip) = self.tooltip_off {
-                return response.on_hover_text(tooltip);
-            }
+        } else if let Some(ref tooltip) = self.tooltip_off {
+            return response.on_hover_text(tooltip);
         }
 
         response

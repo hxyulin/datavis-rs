@@ -48,8 +48,8 @@ use probe_rs::{config::Registry, probe::list::Lister, MemoryInterface, Permissio
 use std::time::{Duration, Instant};
 
 // Re-export ProbeStats from probe_trait for backwards compatibility
-pub use super::probe_trait::ProbeStats;
 use super::probe_trait::DebugProbe;
+pub use super::probe_trait::ProbeStats;
 
 /// Information about a detected probe
 #[derive(Debug, Clone)]
@@ -93,7 +93,6 @@ pub struct ProbeBackend {
     /// Statistics
     stats: ProbeStats,
 }
-
 
 impl ProbeBackend {
     /// Create a new probe backend with the given configuration
@@ -530,7 +529,11 @@ impl ProbeBackend {
                     // Extract values for each variable in this region
                     for &var_idx in &region.variable_indices {
                         let variable = &variables[var_idx];
-                        if let Some(value) = read_manager.extract_value(variable, region, &self.read_buffer[..region.size]) {
+                        if let Some(value) = read_manager.extract_value(
+                            variable,
+                            region,
+                            &self.read_buffer[..region.size],
+                        ) {
                             self.stats.successful_reads += 1;
                             results[var_idx] = Ok(value);
                         } else {

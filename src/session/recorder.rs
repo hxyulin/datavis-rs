@@ -37,7 +37,7 @@ impl SessionRecorder {
             state: SessionState::Idle,
             start_time: None,
             recording: SessionRecording::new(),
-            max_frames: 0, // Unlimited by default
+            max_frames: 0,                              // Unlimited by default
             sample_interval: Duration::from_millis(10), // 100 Hz max recording rate
             last_recorded: HashMap::new(),
         }

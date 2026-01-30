@@ -615,10 +615,8 @@ impl TypeTable {
                     _ => (false, 0),
                 };
 
-                if matches_kind {
-                    if best.map_or(true, |(_, best_count)| member_count > best_count) {
-                        best = Some((id, member_count));
-                    }
+                if matches_kind && best.is_none_or(|(_, best_count)| member_count > best_count) {
+                    best = Some((id, member_count));
                 }
             }
         }
@@ -895,8 +893,10 @@ impl TypeTable {
 
     /// Get statistics about the type table
     pub fn stats(&self) -> TypeTableStats {
-        let mut stats = TypeTableStats::default();
-        stats.total_types = self.types.len();
+        let mut stats = TypeTableStats {
+            total_types: self.types.len(),
+            ..Default::default()
+        };
 
         for def in &self.types {
             match def {

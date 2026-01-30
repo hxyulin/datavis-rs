@@ -7,9 +7,7 @@ use std::collections::HashSet;
 
 use egui::{Color32, Ui};
 
-use crate::frontend::dialogs::{
-    ConverterEditorState, ValueEditorState, VariableDetailState,
-};
+use crate::frontend::dialogs::{ConverterEditorState, ValueEditorState, VariableDetailState};
 use crate::frontend::pane_trait::Pane;
 use crate::frontend::state::{AppAction, SharedState};
 use crate::frontend::workspace::PaneKind;
@@ -66,6 +64,7 @@ fn short_display_name(var: &Variable) -> &str {
 }
 
 /// Accumulated deferred actions from tree rendering
+#[derive(Default)]
 struct DeferredActions {
     var_to_remove: Option<u32>,
     var_to_edit_converter: Option<(u32, String)>,
@@ -77,23 +76,6 @@ struct DeferredActions {
     toggle_parent: Option<u32>,
     parent_toggle_enabled: Option<(u32, bool)>,
     rename_action: Option<(u32, String)>,
-}
-
-impl Default for DeferredActions {
-    fn default() -> Self {
-        Self {
-            var_to_remove: None,
-            var_to_edit_converter: None,
-            var_to_open_detail: None,
-            var_toggle_enabled: None,
-            var_toggle_graph: None,
-            var_cycle_plot_style: None,
-            var_update_color: None,
-            toggle_parent: None,
-            parent_toggle_enabled: None,
-            rename_action: None,
-        }
-    }
 }
 
 /// Render the variable list pane
@@ -158,7 +140,10 @@ pub fn render(
                 var.enabled = enabled;
                 actions.push(AppAction::UpdateVariable(var.clone()));
             }
-            let child_ids: Vec<u32> = shared.config.variables.values()
+            let child_ids: Vec<u32> = shared
+                .config
+                .variables
+                .values()
                 .filter(|v| v.parent_id == Some(parent_id))
                 .map(|v| v.id)
                 .collect();
@@ -242,7 +227,8 @@ fn render_variable_tree(
     advanced_mode: bool,
     deferred: &mut DeferredActions,
 ) {
-    let children: Vec<&Variable> = variables.iter()
+    let children: Vec<&Variable> = variables
+        .iter()
         .filter(|v| v.parent_id == Some(var.id))
         .collect();
     let has_children = !children.is_empty();
@@ -257,20 +243,23 @@ fn render_variable_tree(
         if !is_collapsed {
             for child in &children {
                 render_variable_tree(
-                    ui, child, depth + 1, variables, state, shared, advanced_mode, deferred,
+                    ui,
+                    child,
+                    depth + 1,
+                    variables,
+                    state,
+                    shared,
+                    advanced_mode,
+                    deferred,
                 );
             }
         }
     } else {
         // Leaf variable (or root without children)
         if advanced_mode {
-            render_variable_card_advanced(
-                state, shared, ui, var, indent, deferred,
-            );
+            render_variable_card_advanced(state, shared, ui, var, indent, deferred);
         } else {
-            render_variable_card_simple(
-                ui, var, shared, indent, deferred,
-            );
+            render_variable_card_simple(ui, var, shared, indent, deferred);
         }
     }
 }
@@ -285,9 +274,8 @@ fn render_parent_header(
     state: &mut VariableListState,
     deferred: &mut DeferredActions,
 ) {
-    let var_color = Color32::from_rgba_unmultiplied(
-        var.color[0], var.color[1], var.color[2], var.color[3],
-    );
+    let var_color =
+        Color32::from_rgba_unmultiplied(var.color[0], var.color[1], var.color[2], var.color[3]);
 
     let frame = egui::Frame::new()
         .fill(ui.visuals().widgets.noninteractive.bg_fill)
@@ -312,10 +300,8 @@ fn render_parent_header(
             // Name or rename editor
             if state.rename_var_id == Some(var.id) {
                 // Inline rename mode
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut state.rename_buffer)
-                        .desired_width(150.0),
-                );
+                let response = ui
+                    .add(egui::TextEdit::singleline(&mut state.rename_buffer).desired_width(150.0));
                 if response.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     if !state.rename_buffer.is_empty() {
                         deferred.rename_action = Some((var.id, state.rename_buffer.clone()));
@@ -331,8 +317,9 @@ fn render_parent_header(
                 let name_response = ui.add(
                     egui::Label::new(
                         egui::RichText::new(format!("{} ({} fields)", var.name, children.len()))
-                            .strong()
-                    ).sense(egui::Sense::click()),
+                            .strong(),
+                    )
+                    .sense(egui::Sense::click()),
                 );
                 if name_response.double_clicked() {
                     state.rename_var_id = Some(var.id);
@@ -342,15 +329,21 @@ fn render_parent_header(
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("×").on_hover_text("Remove struct and all fields").clicked() {
+                if ui
+                    .small_button("×")
+                    .on_hover_text("Remove struct and all fields")
+                    .clicked()
+                {
                     deferred.var_to_remove = Some(var.id);
                 }
 
                 // Parent enable/disable toggle
                 let mut enabled = var.enabled;
-                if ui.checkbox(&mut enabled, "").on_hover_text(
-                    "Toggle sampling for parent and all children"
-                ).changed() {
+                if ui
+                    .checkbox(&mut enabled, "")
+                    .on_hover_text("Toggle sampling for parent and all children")
+                    .changed()
+                {
                     deferred.parent_toggle_enabled = Some((var.id, enabled));
                 }
             });
@@ -365,12 +358,8 @@ fn render_variable_card_simple(
     indent: f32,
     deferred: &mut DeferredActions,
 ) {
-    let var_color = Color32::from_rgba_unmultiplied(
-        var.color[0],
-        var.color[1],
-        var.color[2],
-        var.color[3],
-    );
+    let var_color =
+        Color32::from_rgba_unmultiplied(var.color[0], var.color[1], var.color[2], var.color[3]);
 
     let frame = egui::Frame::new()
         .fill(ui.visuals().widgets.noninteractive.bg_fill)
@@ -431,11 +420,7 @@ fn render_variable_card_simple(
                         } else {
                             format!("{:.3} {}", point.converted_value, var.unit)
                         };
-                        ui.label(
-                            egui::RichText::new(value_text)
-                                .monospace()
-                                .color(var_color),
-                        );
+                        ui.label(egui::RichText::new(value_text).monospace().color(var_color));
                     } else {
                         ui.label(egui::RichText::new("—").color(Color32::GRAY));
                     }
@@ -456,12 +441,8 @@ fn render_variable_card_advanced(
     indent: f32,
     deferred: &mut DeferredActions,
 ) {
-    let var_color = Color32::from_rgba_unmultiplied(
-        var.color[0],
-        var.color[1],
-        var.color[2],
-        var.color[3],
-    );
+    let var_color =
+        Color32::from_rgba_unmultiplied(var.color[0], var.color[1], var.color[2], var.color[3]);
 
     let frame = egui::Frame::new()
         .fill(ui.visuals().widgets.noninteractive.bg_fill)
@@ -475,16 +456,12 @@ fn render_variable_card_advanced(
             ui.add_space(indent);
 
             let swatch_size = egui::vec2(24.0, 24.0);
-            let (rect, swatch_response) =
-                ui.allocate_exact_size(swatch_size, egui::Sense::click());
+            let (rect, swatch_response) = ui.allocate_exact_size(swatch_size, egui::Sense::click());
             ui.painter().rect_filled(rect, 4.0, var_color);
             ui.painter().rect_stroke(
                 rect,
                 4.0,
-                egui::Stroke::new(
-                    1.0,
-                    ui.visuals().widgets.noninteractive.fg_stroke.color,
-                ),
+                egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.fg_stroke.color),
                 egui::StrokeKind::Outside,
             );
 
@@ -520,8 +497,7 @@ fn render_variable_card_advanced(
                 ui.add_space(4.0);
 
                 let style_text = var.plot_style.display_name();
-                let style_btn =
-                    ui.add(egui::Button::new(egui::RichText::new(style_text).small()));
+                let style_btn = ui.add(egui::Button::new(egui::RichText::new(style_text).small()));
                 if style_btn.clicked() {
                     deferred.var_cycle_plot_style = Some(var.id);
                 }
@@ -550,9 +526,7 @@ fn render_variable_card_advanced(
                     ("Sample", Color32::GRAY)
                 };
                 let sample_btn = ui.add(egui::Button::new(
-                    egui::RichText::new(sample_text)
-                        .small()
-                        .color(sample_color),
+                    egui::RichText::new(sample_text).small().color(sample_color),
                 ));
                 if sample_btn.clicked() {
                     deferred.var_toggle_enabled = Some((var.id, !var.enabled));
@@ -578,9 +552,11 @@ fn render_variable_card_advanced(
                             ui.colored_label(Color32::RED, "READ ERROR");
                         }
                         PointerState::Valid(addr) => {
-                            ui.label(egui::RichText::new(format!("→ 0x{:08X}", addr))
-                                .monospace()
-                                .size(14.0));
+                            ui.label(
+                                egui::RichText::new(format!("→ 0x{:08X}", addr))
+                                    .monospace()
+                                    .size(14.0),
+                            );
                         }
                         PointerState::Unread => {
                             ui.colored_label(Color32::GRAY, "pending...");
@@ -614,10 +590,8 @@ fn render_variable_card_advanced(
                         );
 
                         if can_edit && value_response.double_clicked() {
-                            state.value_editor_state =
-                                ValueEditorState::for_variable(var.id);
-                            state.value_editor_state.input =
-                                format!("{}", point.raw_value);
+                            state.value_editor_state = ValueEditorState::for_variable(var.id);
+                            state.value_editor_state.input = format!("{}", point.raw_value);
                             state.value_editor_open = true;
                         }
 
@@ -720,9 +694,8 @@ fn render_variable_card_advanced(
                     ];
 
                     for (color, name) in presets {
-                        let c = Color32::from_rgba_unmultiplied(
-                            color[0], color[1], color[2], color[3],
-                        );
+                        let c =
+                            Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]);
                         if ui
                             .add(
                                 egui::Button::new("")
@@ -787,9 +760,7 @@ pub fn render_dialogs(
             ) {
                 match action {
                     ConverterEditorAction::Save { var_id, script } => {
-                        if let Some(var) =
-                            shared.config.variables.get_mut(&var_id)
-                        {
+                        if let Some(var) = shared.config.variables.get_mut(&var_id) {
                             var.converter_script = script;
                             actions.push(AppAction::UpdateVariable(var.clone()));
                         }
@@ -812,7 +783,8 @@ pub fn render_dialogs(
             };
 
             let current_value = shared
-                .topics.variable_data
+                .topics
+                .variable_data
                 .get(&var_id)
                 .and_then(|d| d.last())
                 .map(|p| p.raw_value);
@@ -848,7 +820,8 @@ pub fn render_dialogs(
                 match shared.config.find_variable(var_id) {
                     Some(var) => {
                         let value = shared
-                            .topics.variable_data
+                            .topics
+                            .variable_data
                             .get(&var_id)
                             .and_then(|d| d.last())
                             .map(|p| p.converted_value);
@@ -905,22 +878,24 @@ pub fn render_dialogs(
 }
 
 impl Pane for VariableListState {
-    fn kind(&self) -> PaneKind { PaneKind::VariableList }
+    fn kind(&self) -> PaneKind {
+        PaneKind::VariableList
+    }
 
     fn render(&mut self, shared: &mut SharedState, ui: &mut Ui) -> Vec<AppAction> {
         render(self, shared, ui)
     }
 
-    fn render_dialogs(
-        &mut self,
-        shared: &mut SharedState,
-        ctx: &egui::Context,
-    ) -> Vec<AppAction> {
+    fn render_dialogs(&mut self, shared: &mut SharedState, ctx: &egui::Context) -> Vec<AppAction> {
         let mut actions = Vec::new();
         render_dialogs(self, shared, ctx, &mut actions);
         actions
     }
 
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

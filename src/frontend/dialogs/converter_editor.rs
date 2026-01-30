@@ -85,8 +85,12 @@ impl Dialog for ConverterEditorDialog {
 
         ui.vertical(|ui| {
             // Script editor
-            ScriptEditor::new(&mut state.script, &mut state.editor_state, "converter_editor_dialog")
-                .show(ui);
+            ScriptEditor::new(
+                &mut state.script,
+                &mut state.editor_state,
+                "converter_editor_dialog",
+            )
+            .show(ui);
 
             ui.separator();
 

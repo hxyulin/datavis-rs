@@ -56,7 +56,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libgl1-mesa-dev
+          sudo apt-get install -y \
+            libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libgl1-mesa-dev \
+            libgtk-4-dev libglib2.0-dev
 
       - name: Run lib tests
         run: cargo test --lib --all-features --verbose
@@ -80,7 +82,9 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libgl1-mesa-dev
+          sudo apt-get install -y \
+            libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libgl1-mesa-dev \
+            libgtk-4-dev libglib2.0-dev
 
       - name: Install tarpaulin
         run: cargo install cargo-tarpaulin
@@ -110,7 +114,9 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libgl1-mesa-dev
+          sudo apt-get install -y \
+            libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libgl1-mesa-dev \
+            libgtk-4-dev libglib2.0-dev
 
       - name: Run clippy
         run: cargo clippy --all-features --all-targets -- -D warnings

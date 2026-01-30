@@ -385,6 +385,7 @@ pub struct CollectionControlPanel;
 
 impl CollectionControlPanel {
     /// Render collection controls
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         ui: &mut Ui,
         connected: bool,
@@ -475,10 +476,8 @@ impl TimeWindowPanel {
                 if ui.button("Manual Y Scale").clicked() {
                     on_toggle_auto_scale();
                 }
-            } else {
-                if ui.button("Auto Y Scale").clicked() {
-                    on_toggle_auto_scale();
-                }
+            } else if ui.button("Auto Y Scale").clicked() {
+                on_toggle_auto_scale();
             }
         });
     }

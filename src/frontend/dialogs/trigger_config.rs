@@ -276,10 +276,8 @@ impl Dialog for TriggerConfigDialog {
                     ));
                 }
 
-                if ctx.is_triggered {
-                    if ui.button("Reset").clicked() {
-                        action = DialogAction::Action(TriggerConfigAction::Reset);
-                    }
+                if ctx.is_triggered && ui.button("Reset").clicked() {
+                    action = DialogAction::Action(TriggerConfigAction::Reset);
                 }
             }
 
@@ -288,10 +286,9 @@ impl Dialog for TriggerConfigDialog {
                     action = DialogAction::Close;
                 }
                 if ui.button("Apply").clicked() {
-                    action =
-                        DialogAction::CloseWithAction(TriggerConfigAction::UpdateSettings(
-                            state.to_settings(),
-                        ));
+                    action = DialogAction::CloseWithAction(TriggerConfigAction::UpdateSettings(
+                        state.to_settings(),
+                    ));
                 }
             });
         });

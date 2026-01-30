@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn test_variable_data_insertion() {
-        let mut topics = Topics::default();
+        let topics = Topics::default();
 
         // Just test the HashMap operations, not VariableData construction
         assert_eq!(topics.variable_data.len(), 0);
@@ -235,6 +235,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn test_project_metadata() {
         let mut topics = Topics::default();
 

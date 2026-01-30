@@ -299,7 +299,7 @@ impl PlotView {
 
     /// Render data lines for all enabled variables
     fn render_data_lines(&self, plot_ui: &mut PlotUi, variable_data: &HashMap<u32, VariableData>) {
-        for (_id, data) in variable_data {
+        for data in variable_data.values() {
             if !data.variable.enabled || data.data_points.is_empty() {
                 continue;
             }
@@ -716,7 +716,7 @@ impl PlotCursor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Variable, VariableData, DataPoint};
+    use crate::types::{DataPoint, Variable, VariableData};
     use std::time::Duration;
 
     #[test]
@@ -1093,7 +1093,7 @@ mod tests {
 
         // Disabling autoscale_x should disable follow_latest
         view.auto_scale_x = false;
-        assert!(view.auto_scale_x == false);
+        assert!(!view.auto_scale_x);
 
         // Re-enabling should re-enable follow_latest
         view.toggle_autoscale_x();
@@ -1219,6 +1219,7 @@ mod tests {
         }
 
         #[test]
+        #[allow(clippy::field_reassign_with_default)]
         fn test_time_delta_symmetry(
             t1 in -100.0f64..100.0,
             t2 in -100.0f64..100.0
@@ -1241,6 +1242,7 @@ mod tests {
         }
 
         #[test]
+        #[allow(clippy::field_reassign_with_default)]
         fn test_value_delta_consistency(
             v1 in -1000.0f64..1000.0,
             v2 in -1000.0f64..1000.0

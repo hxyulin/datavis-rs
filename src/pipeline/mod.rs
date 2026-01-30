@@ -16,10 +16,7 @@ pub mod id;
 pub mod packet;
 pub mod variable_tree;
 
-pub use bridge::{
-    PipelineBridge, PipelineCommand, SinkMessage,
-    VariableNodeSnapshot,
-};
+pub use bridge::{PipelineBridge, PipelineCommand, SinkMessage, VariableNodeSnapshot};
 pub use error::{PipelineError, PipelineResult};
 pub use id::{NodeId, VarId};
 pub use packet::{ConfigValue, DataPacket, PipelineEvent, Sample, MAX_PACKET_VARS};

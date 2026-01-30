@@ -182,7 +182,7 @@ impl MockVariableConfig {
 fn rand_simple() -> f64 {
     use std::cell::Cell;
     thread_local! {
-        static SEED: Cell<u64> = Cell::new(12345);
+        static SEED: Cell<u64> = const { Cell::new(12345) };
     }
     SEED.with(|seed| {
         let mut s = seed.get();

@@ -104,7 +104,10 @@ impl UiSessionState {
                             return state;
                         }
                         Err(e) => {
-                            tracing::warn!("Failed to parse UI session state: {}, using defaults", e);
+                            tracing::warn!(
+                                "Failed to parse UI session state: {}, using defaults",
+                                e
+                            );
                         }
                     }
                 }

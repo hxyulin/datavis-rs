@@ -168,7 +168,12 @@ pub enum PlotStyle {
 impl PlotStyle {
     /// Get all available plot styles
     pub fn all() -> &'static [PlotStyle] {
-        &[PlotStyle::Line, PlotStyle::Scatter, PlotStyle::Step, PlotStyle::Area]
+        &[
+            PlotStyle::Line,
+            PlotStyle::Scatter,
+            PlotStyle::Step,
+            PlotStyle::Area,
+        ]
     }
 
     /// Get display name for this plot style
@@ -418,7 +423,7 @@ impl Variable {
     /// Uses the golden ratio to spread hues evenly across the color wheel
     pub fn generate_color(index: u32) -> [u8; 4] {
         // Use golden ratio conjugate for optimal hue distribution
-        const GOLDEN_RATIO: f32 = 0.618033988749895;
+        const GOLDEN_RATIO: f32 = 0.618_034;
 
         // Start with a nice initial hue and spread using golden ratio
         let hue = ((index as f32 * GOLDEN_RATIO) % 1.0) * 360.0;
@@ -434,10 +439,18 @@ impl Variable {
     /// Generate a shade/tint of a base color for child variable differentiation.
     /// `child_index` determines the shade variant.
     /// Uses HSV adjustments: varies saturation and value around the parent's base color.
-    pub fn generate_child_color(parent_color: [u8; 4], child_index: usize, child_count: usize) -> [u8; 4] {
+    pub fn generate_child_color(
+        parent_color: [u8; 4],
+        child_index: usize,
+        child_count: usize,
+    ) -> [u8; 4] {
         let (h, _s, _v) = rgb_to_hsv(parent_color);
         let count = child_count.max(1) as f32;
-        let t = if child_count <= 1 { 0.5 } else { child_index as f32 / (count - 1.0) };
+        let t = if child_count <= 1 {
+            0.5
+        } else {
+            child_index as f32 / (count - 1.0)
+        };
         // Vary saturation from 0.4 to 0.9 and value from 1.0 to 0.6
         let new_s = (0.4 + t * 0.5).clamp(0.3, 0.95);
         let new_v = (1.0 - t * 0.4).clamp(0.5, 1.0);
@@ -875,6 +888,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // Intentionally using 3.14 as test value, not PI
     fn test_variable_type_parse() {
         let bytes_u32: [u8; 4] = 1000u32.to_le_bytes();
         assert_eq!(VariableType::U32.parse_to_f64(&bytes_u32), Some(1000.0));

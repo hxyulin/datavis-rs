@@ -25,7 +25,7 @@
 //! }
 //! ```
 
-use crate::types::{Variable, PointerState};
+use crate::types::{PointerState, Variable};
 use std::time::Instant;
 
 /// Default gap threshold for combining reads (64 bytes)
@@ -144,7 +144,12 @@ impl ReadManager {
     /// # Returns
     /// The parsed value if the variable falls within the region and data is valid,
     /// or `None` if the variable is outside the region or parsing fails.
-    pub fn extract_value(&self, variable: &Variable, region: &ReadRegion, data: &[u8]) -> Option<f64> {
+    pub fn extract_value(
+        &self,
+        variable: &Variable,
+        region: &ReadRegion,
+        data: &[u8],
+    ) -> Option<f64> {
         // Check if variable address is within the region
         if variable.address < region.address {
             return None;
@@ -305,20 +310,24 @@ impl DependentReadPlanner {
         }
 
         // Resolve dependent variable addresses
-        variables.iter().map(|var| {
-            if let Some(ptr_meta) = &var.pointer_metadata {
-                if let Some(parent_id) = ptr_meta.pointer_parent_id {
-                    // This is a dependent variable
-                    if let Some(&parent_addr) = pointer_addresses.get(&parent_id) {
-                        // Resolve: parent_address + offset
-                        let mut resolved = var.clone();
-                        resolved.address = parent_addr.wrapping_add(ptr_meta.offset_from_pointer);
-                        return resolved;
+        variables
+            .iter()
+            .map(|var| {
+                if let Some(ptr_meta) = &var.pointer_metadata {
+                    if let Some(parent_id) = ptr_meta.pointer_parent_id {
+                        // This is a dependent variable
+                        if let Some(&parent_addr) = pointer_addresses.get(&parent_id) {
+                            // Resolve: parent_address + offset
+                            let mut resolved = var.clone();
+                            resolved.address =
+                                parent_addr.wrapping_add(ptr_meta.offset_from_pointer);
+                            return resolved;
+                        }
                     }
                 }
-            }
-            var.clone()
-        }).collect()
+                var.clone()
+            })
+            .collect()
     }
 
     /// Update pointer state based on read value
@@ -342,10 +351,10 @@ impl DependentReadPlanner {
         // Determine pointer state
         ptr_meta.pointer_state = if addr == 0 {
             PointerState::Null
-        } else if addr < 0x1000 || addr > 0xFFFF_FFFF_0000_0000 {
+        } else if !(0x1000..=0xFFFF_FFFF_0000_0000).contains(&addr) {
             // Suspicious addresses (very low or very high)
             PointerState::Invalid(addr)
-        } else if addr % 4 != 0 {
+        } else if !addr.is_multiple_of(4) {
             // Unaligned pointer (suspicious for 32/64-bit architectures)
             PointerState::Invalid(addr)
         } else {
@@ -472,9 +481,9 @@ mod tests {
 
         // Create test data: 12 bytes, with a U32 value of 0x12345678 at offset 4
         let data: Vec<u8> = vec![
-            0x00, 0x00, 0x00, 0x00,  // offset 0-3
-            0x78, 0x56, 0x34, 0x12,  // offset 4-7 (little endian 0x12345678)
-            0xFF, 0xFF, 0xFF, 0xFF,  // offset 8-11
+            0x00, 0x00, 0x00, 0x00, // offset 0-3
+            0x78, 0x56, 0x34, 0x12, // offset 4-7 (little endian 0x12345678)
+            0xFF, 0xFF, 0xFF, 0xFF, // offset 8-11
         ];
 
         let value = manager.extract_value(&var, &region, &data);
@@ -680,6 +689,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // Intentionally using 3.14159 as test value, not PI
     fn test_extract_f32_value() {
         let manager = ReadManager::new(64);
         let var = create_test_variable("float_val", 0x2000_0000, VariableType::F32);
@@ -702,9 +712,15 @@ mod tests {
     #[test]
     fn test_max_coverage_single_read() {
         let manager = ReadManager::new(1024); // Large threshold
-        // Create many small variables that should all fit in one read
+                                              // Create many small variables that should all fit in one read
         let vars: Vec<_> = (0..10)
-            .map(|i| create_test_variable(&format!("var{}", i), 0x2000_0000 + (i * 4), VariableType::U32))
+            .map(|i| {
+                create_test_variable(
+                    &format!("var{}", i),
+                    0x2000_0000 + (i * 4),
+                    VariableType::U32,
+                )
+            })
             .collect();
 
         let regions = manager.plan_reads(&vars);

@@ -172,17 +172,17 @@ impl Dialog for VariableChangeDialog {
                                 old_address,
                                 new_address,
                             } => {
-                                ui.label(format!(
-                                    "0x{:08X} -> 0x{:08X}",
-                                    old_address, new_address
-                                ));
+                                ui.label(format!("0x{:08X} -> 0x{:08X}", old_address, new_address));
                             }
                             VariableChangeType::TypeChanged {
                                 old_type,
                                 new_type,
                                 new_type_name,
                             } => {
-                                ui.label(format!("{} -> {} ({})", old_type, new_type, new_type_name));
+                                ui.label(format!(
+                                    "{} -> {} ({})",
+                                    old_type, new_type, new_type_name
+                                ));
                             }
                             VariableChangeType::NotFound => {
                                 ui.label("Not found in ELF");

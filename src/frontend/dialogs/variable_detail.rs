@@ -152,7 +152,11 @@ impl Dialog for VariableDetailDialog {
 
                 // Show in graph
                 ui.label("Show in Graph:");
-                ui.label(if ctx.show_in_graph { "✓ Yes" } else { "✗ No" });
+                ui.label(if ctx.show_in_graph {
+                    "✓ Yes"
+                } else {
+                    "✗ No"
+                });
                 ui.end_row();
             });
 

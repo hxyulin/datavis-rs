@@ -37,7 +37,10 @@ fn test_parse_basic_c_elf() {
     );
 
     // Verify type table has content
-    assert!(!result.type_table.is_empty(), "Type table should have entries");
+    assert!(
+        !result.type_table.is_empty(),
+        "Type table should have entries"
+    );
 
     // Check diagnostics
     assert!(
@@ -55,10 +58,7 @@ fn test_parse_struct_elf() {
     let result = DwarfParser::parse_bytes(TEST_STRUCT_ELF).expect("Should parse test_struct.elf");
 
     // Look for struct variables
-    let sensor_struct = result
-        .symbols
-        .iter()
-        .find(|s| s.name == "sensor_struct");
+    let sensor_struct = result.symbols.iter().find(|s| s.name == "sensor_struct");
 
     assert!(
         sensor_struct.is_some(),
@@ -79,10 +79,7 @@ fn test_parse_struct_elf() {
     }
 
     // Check for nested struct
-    let device_config = result
-        .symbols
-        .iter()
-        .find(|s| s.name == "device_config");
+    let device_config = result.symbols.iter().find(|s| s.name == "device_config");
     assert!(
         device_config.is_some(),
         "Should find device_config with nested struct"
@@ -91,8 +88,7 @@ fn test_parse_struct_elf() {
 
 #[test]
 fn test_parse_pointer_elf() {
-    let result = DwarfParser::parse_bytes(TEST_POINTER_ELF)
-        .expect("Should parse test_pointer.elf");
+    let result = DwarfParser::parse_bytes(TEST_POINTER_ELF).expect("Should parse test_pointer.elf");
 
     // Look for pointer variables
     let pointers = ["data_ptr", "float_ptr", "double_ptr", "null_ptr"];
@@ -109,8 +105,8 @@ fn test_parse_pointer_elf() {
 
 #[test]
 fn test_parse_complex_c_elf() {
-    let result = DwarfParser::parse_bytes(TEST_COMPLEX_C_ELF)
-        .expect("Should parse test_complex_c.elf");
+    let result =
+        DwarfParser::parse_bytes(TEST_COMPLEX_C_ELF).expect("Should parse test_complex_c.elf");
 
     // Check for complex C features
     let complex_vars = ["packed_data", "bitfield_data", "data_union", "nested"];
@@ -189,13 +185,12 @@ fn test_variable_address_ranges() {
             if let Some(a) = addr {
                 // RAM (0x20000000+) or Flash (0x08000000+) or special (0x00000000)
                 let valid_range = a == 0
-                    || (a >= 0x08000000 && a < 0x08100000)
-                    || (a >= 0x20000000 && a < 0x20100000);
+                    || (0x08000000..0x08100000).contains(&a)
+                    || (0x20000000..0x20100000).contains(&a);
                 assert!(
                     valid_range,
                     "Address 0x{:08x} for {} outside valid ranges",
-                    a,
-                    symbol.name
+                    a, symbol.name
                 );
             }
         }
@@ -237,10 +232,7 @@ fn test_enum_parsing() {
     let result = DwarfParser::parse_bytes(TEST_ARM_ELF).expect("Should parse");
 
     // Check for enum variable
-    let current_state = result
-        .symbols
-        .iter()
-        .find(|s| s.name == "current_state");
+    let current_state = result.symbols.iter().find(|s| s.name == "current_state");
 
     // Enum might be present depending on debug info
     if current_state.is_some() {
@@ -278,7 +270,7 @@ fn test_name_to_type_mapping_completeness() {
             || symbol
                 .mangled_name
                 .as_ref()
-                .map_or(false, |n| result.name_to_type.contains_key(n));
+                .is_some_and(|n| result.name_to_type.contains_key(n));
 
         assert!(
             has_mapping,

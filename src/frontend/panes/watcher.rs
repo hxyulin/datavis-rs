@@ -144,14 +144,20 @@ pub fn render(
 }
 
 impl Pane for WatcherState {
-    fn kind(&self) -> PaneKind { PaneKind::Watcher }
+    fn kind(&self) -> PaneKind {
+        PaneKind::Watcher
+    }
 
     fn render(&mut self, shared: &mut SharedState, ui: &mut Ui) -> Vec<AppAction> {
         render(self, shared, ui)
     }
 
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]
@@ -167,6 +173,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn test_watcher_state_toggles() {
         let mut state = WatcherState::default();
 
@@ -192,6 +199,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn test_watcher_state_independent_flags() {
         let mut state = WatcherState::default();
 

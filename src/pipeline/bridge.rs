@@ -35,10 +35,7 @@ pub enum SinkMessage {
     ConnectionError(String),
 
     /// A node encountered an error.
-    NodeError {
-        node_id: NodeId,
-        message: String,
-    },
+    NodeError { node_id: NodeId, message: String },
 
     /// A recording has been completed.
     RecordingComplete(SessionRecording),
@@ -65,10 +62,7 @@ pub enum SinkMessage {
     },
 
     /// Exporter status update (active, rows written).
-    ExporterStatus {
-        active: bool,
-        rows_written: u64,
-    },
+    ExporterStatus { active: bool, rows_written: u64 },
 
     /// Snapshot of the variable tree for UI display.
     VariableTreeSnapshot(Vec<VariableNodeSnapshot>),
@@ -92,7 +86,6 @@ pub struct VariableNodeSnapshot {
     pub is_leaf: bool,
     pub enabled: bool,
 }
-
 
 /// Commands sent from the UI thread to the pipeline.
 #[derive(Debug, Clone)]
@@ -165,11 +158,15 @@ impl PipelineBridge {
     pub fn new() -> (Self, Receiver<PipelineCommand>, Sender<SinkMessage>) {
         let (cmd_tx, cmd_rx) = bounded(CMD_CHANNEL_CAPACITY);
         let (msg_tx, msg_rx) = bounded(MSG_CHANNEL_CAPACITY);
-        (Self {
-            frontend_receiver: None,
-            cmd_tx,
-            msg_rx
-        }, cmd_rx, msg_tx)
+        (
+            Self {
+                frontend_receiver: None,
+                cmd_tx,
+                msg_rx,
+            },
+            cmd_rx,
+            msg_tx,
+        )
     }
 
     /// Create a PipelineBridge from a FrontendReceiver (new backend)
@@ -193,8 +190,10 @@ impl PipelineBridge {
     pub fn drain(&self) -> Vec<SinkMessage> {
         // If using new backend, drain from frontend_receiver and convert
         if let Some(ref receiver) = self.frontend_receiver {
-            return receiver.drain().into_iter()
-                .filter_map(|msg| Self::convert_backend_message(msg))
+            return receiver
+                .drain()
+                .into_iter()
+                .filter_map(Self::convert_backend_message)
                 .collect();
         }
 
@@ -210,7 +209,7 @@ impl PipelineBridge {
     pub fn try_recv(&self) -> Option<SinkMessage> {
         // If using new backend, try_recv from frontend_receiver and convert
         if let Some(ref receiver) = self.frontend_receiver {
-            return receiver.try_recv().and_then(|msg| Self::convert_backend_message(msg));
+            return receiver.try_recv().and_then(Self::convert_backend_message);
         }
 
         // Otherwise use old channel
@@ -225,30 +224,35 @@ impl PipelineBridge {
         match msg {
             BackendMessage::DataBatch(data) => {
                 // Convert u32 IDs to VarId
-                let converted: Vec<_> = data.into_iter()
+                let converted: Vec<_> = data
+                    .into_iter()
                     .map(|(id, ts, raw, conv)| (VarId(id), ts, raw, conv))
                     .collect();
                 Some(SinkMessage::DataBatch(converted))
             }
             BackendMessage::DataUpdate(update) => {
                 // Convert DataUpdate to DataBatch for now
-                let converted: Vec<_> = update.global.into_iter()
+                let converted: Vec<_> = update
+                    .global
+                    .into_iter()
                     .map(|(id, ts, raw, conv)| (VarId(id), ts, raw, conv))
                     .collect();
                 Some(SinkMessage::DataBatch(converted))
             }
-            BackendMessage::Stats(stats) => {
-                Some(SinkMessage::Stats(stats))
-            }
-            BackendMessage::ConnectionStatus(status) => {
-                Some(SinkMessage::ConnectionStatus(status))
-            }
-            BackendMessage::ConnectionError(error) => {
-                Some(SinkMessage::ConnectionError(error))
-            }
-            BackendMessage::DataPoint { variable_id, timestamp, raw_value, converted_value } => {
-                Some(SinkMessage::DataBatch(vec![(VarId(variable_id), timestamp, raw_value, converted_value)]))
-            }
+            BackendMessage::Stats(stats) => Some(SinkMessage::Stats(stats)),
+            BackendMessage::ConnectionStatus(status) => Some(SinkMessage::ConnectionStatus(status)),
+            BackendMessage::ConnectionError(error) => Some(SinkMessage::ConnectionError(error)),
+            BackendMessage::DataPoint {
+                variable_id,
+                timestamp,
+                raw_value,
+                converted_value,
+            } => Some(SinkMessage::DataBatch(vec![(
+                VarId(variable_id),
+                timestamp,
+                raw_value,
+                converted_value,
+            )])),
             BackendMessage::ReadError { variable_id, error } => {
                 Some(SinkMessage::ReadError { variable_id, error })
             }
@@ -258,12 +262,8 @@ impl PipelineBridge {
             BackendMessage::WriteError { variable_id, error } => {
                 Some(SinkMessage::WriteError { variable_id, error })
             }
-            BackendMessage::VariableList(vars) => {
-                Some(SinkMessage::VariableList(vars))
-            }
-            BackendMessage::ProbeList(probes) => {
-                Some(SinkMessage::ProbeList(probes))
-            }
+            BackendMessage::VariableList(vars) => Some(SinkMessage::VariableList(vars)),
+            BackendMessage::ProbeList(probes) => Some(SinkMessage::ProbeList(probes)),
             BackendMessage::Shutdown => None,
         }
     }
@@ -275,9 +275,15 @@ impl PipelineBridge {
         use crate::backend::BackendCommand;
 
         match cmd {
-            PipelineCommand::Connect { selector, target, probe_config } => {
-                BackendCommand::Connect { selector, target, probe_config }
-            }
+            PipelineCommand::Connect {
+                selector,
+                target,
+                probe_config,
+            } => BackendCommand::Connect {
+                selector,
+                target,
+                probe_config,
+            },
             PipelineCommand::Disconnect => BackendCommand::Disconnect,
             PipelineCommand::Start => BackendCommand::StartCollection,
             PipelineCommand::Stop => BackendCommand::StopCollection,

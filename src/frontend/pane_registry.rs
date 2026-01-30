@@ -6,8 +6,8 @@
 
 use crate::frontend::pane_trait::Pane;
 use crate::frontend::panes::{
-    FftViewState, RecorderPaneState,
-    TimeSeriesState, VariableBrowserState, VariableListState, WatcherState,
+    FftViewState, RecorderPaneState, TimeSeriesState, VariableBrowserState, VariableListState,
+    WatcherState,
 };
 use crate::frontend::workspace::PaneKind;
 
