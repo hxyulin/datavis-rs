@@ -131,9 +131,12 @@ fn main() -> eframe::Result<()> {
                     use raw_window_handle::RawWindowHandle;
                     if let RawWindowHandle::Win32(win32_handle) = handle.as_raw() {
                         unsafe {
-                            menu.init_for_hwnd(win32_handle.hwnd.get() as isize);
+                            if let Err(e) = menu.init_for_hwnd(win32_handle.hwnd.get() as isize) {
+                                tracing::warn!("Failed to initialize native menu for Windows: {}", e);
+                            } else {
+                                tracing::info!("Native menu bar initialized for Windows");
+                            }
                         }
-                        tracing::info!("Native menu bar initialized for Windows");
                     }
                 }
             }

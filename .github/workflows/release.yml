@@ -137,6 +137,39 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Convert version for MSI
+        shell: pwsh
+        run: |
+          # Get version from tag or workflow input
+          $version = "${{ inputs.version || github.ref_name }}"
+
+          # Remove 'v' prefix
+          $version = $version -replace '^v', ''
+
+          # Convert semantic version to MSI format (X.Y.Z.W)
+          # Examples:
+          #   0.1.0-alpha.1 -> 0.1.0.1
+          #   0.1.0-beta.3  -> 0.1.0.3
+          #   0.1.0-rc.5    -> 0.1.0.5
+          #   0.1.0         -> 0.1.0.0
+          if ($version -match '^(\d+\.\d+\.\d+)(?:-(alpha|beta|rc)\.(\d+))?$') {
+              $base = $matches[1]
+              $prerelease_num = if ($matches[3]) { $matches[3] } else { "0" }
+              $msi_version = "$base.$prerelease_num"
+          } else {
+              Write-Error "Version format not recognized: $version"
+              exit 1
+          }
+
+          Write-Host "Original version: $version"
+          Write-Host "MSI version: $msi_version"
+
+          # Update Cargo.toml with MSI-compatible version
+          # This replaces both [package] version and [package.metadata.packager] version
+          $cargo_toml = Get-Content Cargo.toml -Raw
+          $cargo_toml = $cargo_toml -replace 'version = "\d+\.\d+\.\d+(-\w+\.\d+)?"', "version = `"$msi_version`""
+          $cargo_toml | Set-Content Cargo.toml
+
       - name: Install cargo-packager
         run: cargo install cargo-packager --locked
 
