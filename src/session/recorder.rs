@@ -160,6 +160,7 @@ impl SessionRecorder {
             self.recording.frames.push(RecordedFrame {
                 timestamp: current_time,
                 values: frame_values,
+                tag: None,
             });
         }
     }
@@ -195,6 +196,7 @@ impl SessionRecorder {
         self.recording.frames.push(RecordedFrame {
             timestamp: elapsed,
             values,
+            tag: None,
         });
 
         self.last_recorded.insert(var_id, elapsed);

@@ -117,6 +117,9 @@ pub struct RecordedFrame {
     pub timestamp: Duration,
     /// Variable ID to data point mapping
     pub values: HashMap<u32, RecordedValue>,
+    /// Optional user-provided tag for this frame
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 /// A recorded value for a single variable at a point in time
@@ -259,6 +262,7 @@ mod tests {
         recording.frames.push(RecordedFrame {
             timestamp: Duration::from_millis(100),
             values: HashMap::new(),
+            tag: None,
         });
 
         assert!(!recording.is_empty());
@@ -273,6 +277,7 @@ mod tests {
             recording.frames.push(RecordedFrame {
                 timestamp: Duration::from_millis(i * 100),
                 values: HashMap::new(),
+                tag: None,
             });
         }
 

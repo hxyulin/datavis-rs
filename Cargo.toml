@@ -43,7 +43,7 @@ egui_dock = { version = "0.18", features = ["serde"] }
 egui_plot = "0.34"
 
 # SWD/Debug Probe Interface
-probe-rs = "0.30"
+probe-rs = "0.31"
 
 # Scripting Engine for Variable Converters
 rhai = { version = "1.23", features = ["sync"] }
@@ -59,6 +59,7 @@ toml = "0.8"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 # Error Handling
 thiserror = "2.0"

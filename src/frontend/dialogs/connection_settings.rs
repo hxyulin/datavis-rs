@@ -17,6 +17,8 @@ pub struct ConnectionSettingsState {
     pub memory_access_mode: MemoryAccessMode,
     pub usb_timeout_ms: u64,
     pub bulk_read_gap_threshold: usize,
+    pub max_bulk_read_size: usize,
+    pub disable_bulk_reads: bool,
 }
 
 impl Default for ConnectionSettingsState {
@@ -29,6 +31,8 @@ impl Default for ConnectionSettingsState {
             memory_access_mode: defaults.memory_access_mode,
             usb_timeout_ms: defaults.usb_timeout_ms,
             bulk_read_gap_threshold: defaults.bulk_read_gap_threshold,
+            max_bulk_read_size: defaults.max_bulk_read_size,
+            disable_bulk_reads: defaults.disable_bulk_reads,
         }
     }
 }
@@ -43,6 +47,8 @@ impl ConnectionSettingsState {
             memory_access_mode: config.memory_access_mode,
             usb_timeout_ms: config.usb_timeout_ms,
             bulk_read_gap_threshold: config.bulk_read_gap_threshold,
+            max_bulk_read_size: config.max_bulk_read_size,
+            disable_bulk_reads: config.disable_bulk_reads,
         }
     }
 }
@@ -172,6 +178,22 @@ impl Dialog for ConnectionSettingsDialog {
                                 .range(0..=1024)
                                 .speed(8),
                         );
+                        ui.end_row();
+
+                        ui.label("Max Bulk Read Size (bytes):");
+                        ui.add(
+                            egui::DragValue::new(&mut state.max_bulk_read_size)
+                                .range(0..=4096)
+                                .speed(32),
+                        );
+                        ui.end_row();
+
+                        ui.label("Disable Bulk Reads:");
+                        ui.checkbox(&mut state.disable_bulk_reads, "")
+                            .on_hover_text(
+                                "Read each variable individually instead of grouping. \
+                                 Helps with probes that have issues with larger reads.",
+                            );
                         ui.end_row();
                     });
             });

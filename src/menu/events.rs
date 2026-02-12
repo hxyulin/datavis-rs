@@ -26,6 +26,8 @@ pub enum MenuEvent {
     OpenElfSymbols,
     /// Open help dialog
     OpenHelp,
+    /// Open log directory in file manager
+    OpenLogDirectory,
     /// Open keyboard shortcuts
     OpenShortcuts,
     /// Open about dialog
@@ -92,6 +94,7 @@ impl MenuEvent {
 
             // Help menu
             MenuId::HelpGettingStarted => Some(MenuEvent::OpenHelp),
+            MenuId::HelpOpenLogDirectory => Some(MenuEvent::OpenLogDirectory),
             MenuId::HelpShortcuts => Some(MenuEvent::OpenShortcuts),
             MenuId::HelpAbout => Some(MenuEvent::OpenAbout),
         }

@@ -2,6 +2,8 @@
 //!
 //! Sits below the dock workspace area.
 
+use std::time::Duration;
+
 use egui::{Color32, RichText, Ui};
 
 use crate::frontend::topics::Topics;
@@ -84,6 +86,29 @@ pub fn render_status_bar(ui: &mut Ui, ctx: &StatusBarContext<'_>) {
             format!("Data: {:.2} KB", kb)
         };
         ui.label(RichText::new(data_text).small());
+
+        // === Poll stall warning ===
+        if ctx.topics.connection_status == ConnectionStatus::Connected {
+            if let Some(last_update) = ctx.topics.last_stats_update {
+                let stale_secs = last_update.elapsed().as_secs_f64();
+                if stale_secs > 2.0 {
+                    ui.separator();
+                    let stall_color = if stale_secs > 5.0 {
+                        Color32::RED
+                    } else {
+                        Color32::YELLOW
+                    };
+                    ui.colored_label(
+                        stall_color,
+                        RichText::new(format!("Poll stalled ({:.0}s ago)", stale_secs))
+                            .small()
+                            .strong(),
+                    );
+                    // Request repaint so the timer keeps updating
+                    ui.ctx().request_repaint_after(Duration::from_millis(500));
+                }
+            }
+        }
 
         // === Error message (right-aligned) ===
         if let Some(error) = ctx.last_error {

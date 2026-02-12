@@ -331,6 +331,16 @@ fn build_help_menu() -> Submenu {
         ))
         .unwrap();
 
+    // Open Log Directory
+    help_menu
+        .append(&MenuItem::with_id(
+            MenuId::HelpOpenLogDirectory.to_muda_id(),
+            t!("menu_help_open_log_directory"),
+            true,
+            None::<Accelerator>,
+        ))
+        .unwrap();
+
     help_menu.append(&PredefinedMenuItem::separator()).unwrap();
 
     // Keyboard Shortcuts

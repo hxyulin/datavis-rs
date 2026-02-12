@@ -549,6 +549,7 @@ impl DataVisApp {
                 }
                 SinkMessage::Stats(stats) => {
                     self.topics.stats = stats;
+                    self.topics.last_stats_update = Some(Instant::now());
                 }
                 SinkMessage::VariableList(vars) => {
                     for var in vars {
@@ -1385,6 +1386,20 @@ impl DataVisApp {
             MenuEvent::OpenHelp => {
                 self.help_open = true;
             }
+            MenuEvent::OpenLogDirectory => {
+                if let Some(log_dir) = crate::config::log_dir() {
+                    if log_dir.exists() {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("open").arg(&log_dir).spawn();
+                        #[cfg(target_os = "linux")]
+                        let _ = std::process::Command::new("xdg-open").arg(&log_dir).spawn();
+                        #[cfg(target_os = "windows")]
+                        let _ = std::process::Command::new("explorer").arg(&log_dir).spawn();
+                    } else {
+                        tracing::warn!("Log directory does not exist: {:?}", log_dir);
+                    }
+                }
+            }
             MenuEvent::OpenShortcuts => {
                 // TODO: Implement shortcuts dialog
                 self.help_open = true;
@@ -1644,6 +1659,10 @@ impl DataVisApp {
                 ui.menu_button("Help", |ui| {
                     if ui.button("Getting Started").clicked() {
                         self.help_open = true;
+                        ui.close();
+                    }
+                    if ui.button("Open Log Directory").clicked() {
+                        self.handle_menu_event(crate::menu::MenuEvent::OpenLogDirectory);
                         ui.close();
                     }
                     ui.separator();
@@ -1945,6 +1964,8 @@ impl DataVisApp {
                         self.config.probe.memory_access_mode = state.memory_access_mode;
                         self.config.probe.usb_timeout_ms = state.usb_timeout_ms;
                         self.config.probe.bulk_read_gap_threshold = state.bulk_read_gap_threshold;
+                        self.config.probe.max_bulk_read_size = state.max_bulk_read_size;
+                        self.config.probe.disable_bulk_reads = state.disable_bulk_reads;
                         if self.config.probe.memory_access_mode != old_mode {
                             self.handle_action(AppAction::SetMemoryAccessMode(
                                 self.config.probe.memory_access_mode,

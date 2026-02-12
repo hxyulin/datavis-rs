@@ -70,6 +70,10 @@ pub struct Topics {
     /// Track when global data was last updated
     pub global_data_freshness: Option<Instant>,
 
+    /// Track when the last stats update was received from the backend.
+    /// Used to detect poll-thread stalls (e.g., probe read hanging).
+    pub last_stats_update: Option<Instant>,
+
     /// Staleness threshold (default 3 seconds)
     pub staleness_threshold: Duration,
 }
@@ -93,6 +97,7 @@ impl Default for Topics {
             elf_generation: 0,
             pane_data_freshness: HashMap::new(),
             global_data_freshness: None,
+            last_stats_update: None,
             staleness_threshold: Duration::from_secs(3),
         }
     }

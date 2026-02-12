@@ -492,7 +492,11 @@ impl ProbeBackend {
         };
 
         // Use ReadManager to plan bulk reads
-        let read_manager = ReadManager::new(gap_threshold);
+        let read_manager = ReadManager::with_config(
+            gap_threshold,
+            self.config.max_bulk_read_size,
+            self.config.disable_bulk_reads,
+        );
         let regions = read_manager.plan_reads(variables);
 
         // Track bulk read statistics

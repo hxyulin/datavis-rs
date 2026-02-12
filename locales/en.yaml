@@ -41,6 +41,7 @@ menu_tools_preferences: "Preferences..."
 # Menu: Help
 menu_help: "Help"
 menu_help_getting_started: "Getting Started"
+menu_help_open_log_directory: "Open Log Directory"
 menu_help_shortcuts: "Keyboard Shortcuts"
 menu_help_about: "About DataVis"
 

@@ -16,14 +16,42 @@ use datavis_rs::{
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 fn main() -> eframe::Result<()> {
-    // Initialize logging
-    tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,datavis_rs=trace")),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // Initialize logging with dual output: stderr + daily-rolling log file
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,datavis_rs=trace"));
+
+    let registry = tracing_subscriber::registry().with(env_filter);
+
+    // Try to set up file logging; hold the guard so logs flush on shutdown
+    let _guard: Option<tracing_appender::non_blocking::WorkerGuard>;
+
+    if let Some(log_dir) = datavis_rs::config::log_dir() {
+        if let Err(e) = std::fs::create_dir_all(&log_dir) {
+            eprintln!("Failed to create log directory: {e}");
+            _guard = None;
+            registry
+                .with(tracing_subscriber::fmt::layer())
+                .init();
+        } else {
+            let file_appender = tracing_appender::rolling::daily(&log_dir, "datavis-rs.log");
+            let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+            _guard = Some(guard);
+
+            registry
+                .with(tracing_subscriber::fmt::layer()) // stderr with colors
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(non_blocking)
+                        .with_ansi(false), // plain text for file
+                )
+                .init();
+        }
+    } else {
+        _guard = None;
+        registry
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    };
 
     tracing::info!("Starting DataVis-RS");
 

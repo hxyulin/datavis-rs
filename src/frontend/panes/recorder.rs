@@ -4,13 +4,15 @@
 //! saved recordings list, playback controls, and file export controls.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use egui::Ui;
 
 use crate::frontend::pane_trait::Pane;
 use crate::frontend::state::{AppAction, SharedState};
 use crate::frontend::workspace::PaneKind;
-use crate::session::{SessionPlayer, SessionRecording, SessionState};
+use crate::session::types::{RecordedFrame, RecordedValue, SessionMetadata, SessionRecording};
+use crate::session::{SessionPlayer, SessionState};
 
 /// Export layout modes (formerly from pipeline::nodes::exporter_sink)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +71,14 @@ pub struct RecorderPaneState {
     /// Playback controller.
     pub session_player: SessionPlayer,
 
+    // --- Snapshot fields ---
+    /// Accumulated snapshot frames.
+    pub snapshot_frames: Vec<RecordedFrame>,
+    /// Timestamp of first snapshot (used as t=0 for offsets).
+    pub snapshot_start_time: Option<Instant>,
+    /// Tag input for the next snapshot.
+    pub snapshot_tag: String,
+
     // --- Exporter fields ---
     /// Output file path for export.
     pub export_path: String,
@@ -88,6 +98,9 @@ impl Default for RecorderPaneState {
             max_frames: 0,
             sample_interval_ms: 10,
             session_player: SessionPlayer::new(),
+            snapshot_frames: Vec::new(),
+            snapshot_start_time: None,
+            snapshot_tag: String::new(),
             export_path: String::new(),
             export_format: ExportFormat::Csv,
             export_layout: ExportLayout::Long,
@@ -133,6 +146,10 @@ fn render_record_tab(
 ) {
     // --- Recording controls ---
     render_recording_controls(state, shared, ui, actions);
+    ui.separator();
+
+    // --- Snapshot controls (always visible) ---
+    render_snapshot_controls(state, shared, ui);
     ui.separator();
 
     // --- Playback controls ---
@@ -216,6 +233,91 @@ fn render_recording_controls(
             ui.label(format!("State: {}", recorder_state.display_name()));
         }
     }
+}
+
+fn render_snapshot_controls(
+    state: &mut RecorderPaneState,
+    shared: &mut SharedState<'_>,
+    ui: &mut Ui,
+) {
+    ui.label("Snapshots");
+
+    let has_data = !shared.topics.variable_data.is_empty();
+
+    ui.horizontal(|ui| {
+        ui.label("Tag:");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.snapshot_tag)
+                .hint_text("optional tag...")
+                .desired_width(120.0),
+        );
+    });
+
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(has_data, egui::Button::new("Take Snapshot"))
+            .clicked()
+        {
+            take_snapshot(state, shared);
+        }
+
+        if !state.snapshot_frames.is_empty() {
+            ui.label(format!("{} captured", state.snapshot_frames.len()));
+        }
+    });
+
+    if !state.snapshot_frames.is_empty() {
+        ui.horizontal(|ui| {
+            if ui.button("Clear All Snapshots").clicked() {
+                state.snapshot_frames.clear();
+                state.snapshot_start_time = None;
+            }
+            if ui.button("Save as Recording").clicked() {
+                let recording = build_snapshot_recording(state);
+                shared.topics.completed_recordings.push(recording);
+                state.snapshot_frames.clear();
+                state.snapshot_start_time = None;
+            }
+        });
+    }
+}
+
+/// Take a single snapshot of all current variable values.
+fn take_snapshot(state: &mut RecorderPaneState, shared: &SharedState<'_>) {
+    let now = Instant::now();
+    let start = *state.snapshot_start_time.get_or_insert(now);
+    let timestamp = now.duration_since(start);
+
+    let mut values = HashMap::new();
+    for (&var_id, var_data) in &shared.topics.variable_data {
+        if let Some(dp) = var_data.last() {
+            values.insert(var_id, RecordedValue::from(dp));
+        }
+    }
+
+    let tag = if state.snapshot_tag.is_empty() {
+        None
+    } else {
+        Some(state.snapshot_tag.clone())
+    };
+
+    state
+        .snapshot_frames
+        .push(RecordedFrame { timestamp, values, tag });
+}
+
+/// Build a `SessionRecording` from the accumulated snapshot frames.
+fn build_snapshot_recording(state: &RecorderPaneState) -> SessionRecording {
+    let name = if state.session_name.is_empty() {
+        "Snapshot Session".to_string()
+    } else {
+        state.session_name.clone()
+    };
+
+    let mut recording = SessionRecording::with_metadata(SessionMetadata::new(name));
+    recording.frames = state.snapshot_frames.clone();
+    recording.finalize();
+    recording
 }
 
 fn render_playback_controls(state: &mut RecorderPaneState, ui: &mut Ui) {

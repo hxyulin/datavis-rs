@@ -39,6 +39,10 @@ pub const DEFAULT_GAP_THRESHOLD: usize = 64;
 pub struct ReadManager {
     /// Maximum gap between addresses to combine into single read
     gap_threshold: usize,
+    /// Maximum size of a single read region in bytes. 0 = no limit.
+    max_read_size: usize,
+    /// When true, each variable gets its own read (no grouping).
+    disable_bulk: bool,
 }
 
 /// A planned memory read region
@@ -62,7 +66,25 @@ impl ReadManager {
     ///   into a single read. Larger values create bigger reads but may read unnecessary
     ///   memory. Default is 64 bytes.
     pub fn new(gap_threshold: usize) -> Self {
-        Self { gap_threshold }
+        Self {
+            gap_threshold,
+            max_read_size: 0,
+            disable_bulk: false,
+        }
+    }
+
+    /// Create a read manager with full configuration
+    ///
+    /// # Arguments
+    /// * `gap_threshold` - Maximum gap in bytes between variable addresses to combine
+    /// * `max_read_size` - Maximum size of a single read region (0 = no limit)
+    /// * `disable_bulk` - When true, each variable gets its own individual read
+    pub fn with_config(gap_threshold: usize, max_read_size: usize, disable_bulk: bool) -> Self {
+        Self {
+            gap_threshold,
+            max_read_size,
+            disable_bulk,
+        }
     }
 
     /// Get the current gap threshold
@@ -87,6 +109,19 @@ impl ReadManager {
             return Vec::new();
         }
 
+        // When bulk reads are disabled, return one region per variable
+        if self.disable_bulk {
+            return variables
+                .iter()
+                .enumerate()
+                .map(|(i, v)| ReadRegion {
+                    address: v.address,
+                    size: v.var_type.size_bytes(),
+                    variable_indices: vec![i],
+                })
+                .collect();
+        }
+
         // Create (index, address, size) tuples and sort by address
         let mut indexed: Vec<(usize, u64, usize)> = variables
             .iter()
@@ -102,10 +137,16 @@ impl ReadManager {
 
         for &(idx, addr, size) in &indexed[1..] {
             let var_end = addr + size as u64;
+            let merged_size = (current_end.max(var_end) - current_start) as usize;
 
-            // Check if this variable can be merged with current region
-            // We merge if the variable starts within the gap threshold of the current end
-            if addr <= current_end + self.gap_threshold as u64 {
+            // Check if this variable can be merged with current region:
+            // 1. Must be within the gap threshold of the current end
+            // 2. Merged region must not exceed max_read_size (if set)
+            let within_gap = addr <= current_end + self.gap_threshold as u64;
+            let within_size =
+                self.max_read_size == 0 || merged_size <= self.max_read_size;
+
+            if within_gap && within_size {
                 // Extend current region
                 current_end = current_end.max(var_end);
                 current_indices.push(idx);
@@ -190,7 +231,11 @@ impl ReadManager {
 
 impl Default for ReadManager {
     fn default() -> Self {
-        Self::new(DEFAULT_GAP_THRESHOLD)
+        Self {
+            gap_threshold: DEFAULT_GAP_THRESHOLD,
+            max_read_size: 0,
+            disable_bulk: false,
+        }
     }
 }
 

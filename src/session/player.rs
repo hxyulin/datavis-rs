@@ -348,6 +348,7 @@ mod tests {
             recording.frames.push(RecordedFrame {
                 timestamp: Duration::from_millis(i * 100),
                 values: HashMap::new(),
+                tag: None,
             });
         }
         recording

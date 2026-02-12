@@ -99,6 +99,11 @@ pub fn app_state_path() -> Option<PathBuf> {
     app_data_dir().map(|p| p.join(APP_STATE_FILE))
 }
 
+/// Get the log directory path
+pub fn log_dir() -> Option<PathBuf> {
+    app_data_dir().map(|p| p.join("logs"))
+}
+
 // ==================== Recent Project Entry ====================
 
 /// Information about a recently opened project
@@ -668,6 +673,21 @@ pub struct ProbeConfig {
     /// Default: 64 bytes.
     #[serde(default = "default_bulk_read_gap")]
     pub bulk_read_gap_threshold: usize,
+
+    /// Maximum size of a single bulk read in bytes.
+    /// Regions larger than this will be split into multiple reads.
+    /// Lower values improve compatibility with CMSIS-DAP probes that may hang
+    /// on large USB transfers. Default: 256 bytes. Set to 0 to disable the limit.
+    #[serde(default = "default_max_bulk_read_size")]
+    pub max_bulk_read_size: usize,
+
+    /// Disable bulk read optimization entirely.
+    /// When true, each variable is read individually instead of being grouped
+    /// into larger bulk reads. This restores pre-bulk-read behavior and can
+    /// help with probes (especially wireless CMSIS-DAP) that have issues with
+    /// larger reads. Default: false.
+    #[serde(default)]
+    pub disable_bulk_reads: bool,
 }
 
 fn default_usb_timeout_ms() -> u64 {
@@ -676,6 +696,10 @@ fn default_usb_timeout_ms() -> u64 {
 
 fn default_bulk_read_gap() -> usize {
     64
+}
+
+fn default_max_bulk_read_size() -> usize {
+    256
 }
 
 impl Default for ProbeConfig {
@@ -690,6 +714,8 @@ impl Default for ProbeConfig {
             memory_access_mode: MemoryAccessMode::default(),
             usb_timeout_ms: default_usb_timeout_ms(),
             bulk_read_gap_threshold: default_bulk_read_gap(),
+            max_bulk_read_size: default_max_bulk_read_size(),
+            disable_bulk_reads: false,
         }
     }
 }

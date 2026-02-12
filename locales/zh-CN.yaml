@@ -41,6 +41,7 @@ menu_tools_preferences: "偏好设置..."
 # Menu: Help
 menu_help: "帮助"
 menu_help_getting_started: "快速入门"
+menu_help_open_log_directory: "打开日志目录"
 menu_help_shortcuts: "键盘快捷键"
 menu_help_about: "关于DataVis"
 

@@ -37,6 +37,7 @@ pub enum MenuId {
 
     // Help
     HelpGettingStarted,
+    HelpOpenLogDirectory,
     HelpShortcuts,
     HelpAbout,
 }
@@ -81,6 +82,7 @@ impl MenuId {
             Self::ToolsPersistence => "tools_persistence",
             Self::ToolsPreferences => "tools_preferences",
             Self::HelpGettingStarted => "help_getting_started",
+            Self::HelpOpenLogDirectory => "help_open_log_directory",
             Self::HelpShortcuts => "help_shortcuts",
             Self::HelpAbout => "help_about",
         }
@@ -110,6 +112,7 @@ impl MenuId {
             "tools_persistence" => Some(Self::ToolsPersistence),
             "tools_preferences" => Some(Self::ToolsPreferences),
             "help_getting_started" => Some(Self::HelpGettingStarted),
+            "help_open_log_directory" => Some(Self::HelpOpenLogDirectory),
             "help_shortcuts" => Some(Self::HelpShortcuts),
             "help_about" => Some(Self::HelpAbout),
             s if s.starts_with("project_recent_") => {
