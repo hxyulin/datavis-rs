@@ -56,7 +56,6 @@
 //! cargo run --features mock-probe
 //! ```
 
-use crate::config::MemoryAccessMode;
 use crate::error::{DataVisError, Result};
 use crate::types::{Variable, VariableType};
 use std::collections::HashMap;
@@ -323,8 +322,6 @@ pub struct MockProbeBackend {
     pattern_only_mode: bool,
     /// Probe statistics
     stats: ProbeStats,
-    /// Memory access mode
-    memory_access_mode: MemoryAccessMode,
     /// Simulated halt state
     halted: bool,
 }
@@ -346,7 +343,6 @@ impl MockProbeBackend {
             read_delay_us: 100,      // Simulate 100us read time
             pattern_only_mode: true, // Default to pattern mode for interesting data
             stats: ProbeStats::default(),
-            memory_access_mode: MemoryAccessMode::Background,
             halted: false,
         }
     }
@@ -649,14 +645,6 @@ impl DebugProbe for MockProbeBackend {
 
     fn stats_mut(&mut self) -> &mut ProbeStats {
         &mut self.stats
-    }
-
-    fn memory_access_mode(&self) -> MemoryAccessMode {
-        self.memory_access_mode
-    }
-
-    fn set_memory_access_mode(&mut self, mode: MemoryAccessMode) {
-        self.memory_access_mode = mode;
     }
 }
 

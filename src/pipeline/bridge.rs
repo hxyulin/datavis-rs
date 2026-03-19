@@ -3,7 +3,7 @@
 //! `PipelineBridge` provides the same API surface as the old `FrontendReceiver`,
 //! allowing the UI code to transition with minimal changes.
 
-use crate::config::{MemoryAccessMode, ProbeConfig};
+use crate::config::ProbeConfig;
 use crate::pipeline::id::{NodeId, VarId};
 use crate::pipeline::packet::ConfigValue;
 use crate::session::types::{SessionRecording, SessionState};
@@ -112,8 +112,6 @@ pub enum PipelineCommand {
     WriteVariable { id: u32, value: f64 },
     /// Set the global poll rate.
     SetPollRate(u32),
-    /// Set memory access mode.
-    SetMemoryAccessMode(MemoryAccessMode),
     /// Clear all collected data.
     ClearData,
     /// Request current statistics.
@@ -295,7 +293,6 @@ impl PipelineBridge {
             }
             PipelineCommand::ClearData => BackendCommand::ClearData,
             PipelineCommand::SetPollRate(rate) => BackendCommand::SetPollRate(rate),
-            PipelineCommand::SetMemoryAccessMode(mode) => BackendCommand::SetMemoryAccessMode(mode),
             PipelineCommand::Shutdown => BackendCommand::Shutdown,
             #[cfg(feature = "mock-probe")]
             PipelineCommand::UseMockProbe(use_mock) => BackendCommand::UseMockProbe(use_mock),

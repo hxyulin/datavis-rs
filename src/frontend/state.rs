@@ -92,8 +92,6 @@ pub enum AppAction {
     StopCollection,
     /// Refresh available probes list
     RefreshProbes,
-    /// Set memory access mode
-    SetMemoryAccessMode(crate::config::MemoryAccessMode),
     /// Set poll rate
     SetPollRate(u32),
     /// Use mock probe (feature-gated)

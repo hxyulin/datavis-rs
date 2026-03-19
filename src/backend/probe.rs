@@ -41,10 +41,11 @@
 //! let value = probe.read_variable(&my_variable)?;
 //! ```
 
-use crate::config::{AppConfig, ConnectUnderReset, MemoryAccessMode, ProbeConfig, ProbeProtocol};
+use crate::config::{AppConfig, ConnectUnderReset, ProbeConfig, ProbeProtocol};
 use crate::error::{DataVisError, Result};
 use crate::types::{Variable, VariableType};
-use probe_rs::{config::Registry, probe::list::Lister, MemoryInterface, Permissions, Session};
+use probe_rs::architecture::arm::FullyQualifiedApAddress;
+use probe_rs::{config::Registry, probe::list::Lister, Permissions, Session};
 use std::time::{Duration, Instant};
 
 // Re-export ProbeStats from probe_trait for backwards compatibility
@@ -364,6 +365,20 @@ impl ProbeBackend {
         self.session.is_some()
     }
 
+    /// Get an ARM AP memory interface for direct memory access without halting the core.
+    ///
+    /// Uses AP 0 (the standard Cortex-M memory AP) via the Debug Access Port.
+    /// Takes `&mut Session` (not `&mut self`) so `self.read_buffer` can be borrowed alongside.
+    fn arm_memory_interface(
+        session: &mut Session,
+    ) -> Result<Box<dyn probe_rs::architecture::arm::memory::ArmMemoryInterface + '_>> {
+        let ap = FullyQualifiedApAddress::v1_with_default_dp(0);
+        let arm_iface = session
+            .get_arm_interface()
+            .map_err(probe_rs::Error::from)?;
+        Ok(arm_iface.memory_interface(&ap).map_err(probe_rs::Error::from)?)
+    }
+
     /// Read a variable's value from memory
     pub fn read_variable(&mut self, variable: &Variable) -> Result<f64> {
         let session = self
@@ -378,11 +393,13 @@ impl ProbeBackend {
 
         let start = Instant::now();
 
-        // Get the first core (core 0)
-        let mut core = session.core(0)?;
+        // Read memory via ARM AP (non-intrusive, doesn't halt the core)
+        let mut memory = Self::arm_memory_interface(session)?;
 
         // Read memory
-        let result = core.read(variable.address, &mut self.read_buffer[..size]);
+        let result = memory
+            .read(variable.address, &mut self.read_buffer[..size])
+            .map_err(probe_rs::Error::from);
 
         let read_time = start.elapsed();
         self.stats.last_read_time_us = read_time.as_micros() as u64;
@@ -410,13 +427,11 @@ impl ProbeBackend {
     }
 
     /// Read multiple variables efficiently (batched read)
-    /// This acquires the core once and uses bulk read optimization to group
-    /// adjacent memory addresses into single larger reads.
+    /// This acquires the ARM AP memory interface once and uses bulk read optimization
+    /// to group adjacent memory addresses into single larger reads.
     ///
-    /// The memory_access_mode controls how reads are performed:
-    /// - Background: Read while target is running (non-intrusive but slower)
-    /// - Halted: Halt target before reading, resume after (faster but intrusive)
-    /// - HaltedPersistent: Keep target halted (fastest, use when target doesn't need to run)
+    /// Reads are performed via the ARM Debug Access Port (DAP) which accesses memory
+    /// directly through AP 0 without halting the CPU core.
     pub fn read_variables(&mut self, variables: &[Variable]) -> Vec<Result<f64>> {
         use super::read_manager::ReadManager;
 
@@ -434,60 +449,24 @@ impl ProbeBackend {
             }
         };
 
-        let access_mode = self.config.memory_access_mode;
         let gap_threshold = self.config.bulk_read_gap_threshold;
 
         tracing::trace!(
-            "Reading {} variables with access mode: {:?}, gap_threshold: {}",
+            "Reading {} variables via ARM AP, gap_threshold: {}",
             variables.len(),
-            access_mode,
             gap_threshold
         );
         let start = Instant::now();
 
-        // Get core once for all reads
-        let mut core = match session.core(0) {
-            Ok(c) => c,
+        // Get ARM AP memory interface (non-intrusive, doesn't halt the core)
+        let mut memory = match Self::arm_memory_interface(session) {
+            Ok(m) => m,
             Err(e) => {
-                let error_msg = format!("Failed to access core: {}", e);
+                let error_msg = format!("Failed to access ARM AP: {}", e);
                 return variables
                     .iter()
                     .map(|_| Err(DataVisError::Config(error_msg.clone())))
                     .collect();
-            }
-        };
-
-        // For Halted mode, halt the core before reading
-        let was_running = match access_mode {
-            MemoryAccessMode::Halted => {
-                // Check if core is currently running
-                let is_running = core.status().map(|s| !s.is_halted()).unwrap_or(false);
-                tracing::trace!("Halted mode: core is_running={}", is_running);
-                if is_running {
-                    if let Err(e) = core.halt(Duration::from_millis(100)) {
-                        tracing::warn!("Failed to halt core for read: {}", e);
-                    } else {
-                        tracing::trace!("Halted core for batch read");
-                    }
-                }
-                is_running
-            }
-            MemoryAccessMode::HaltedPersistent => {
-                // For persistent halt, halt if not already halted but don't resume
-                let is_running = core.status().map(|s| !s.is_halted()).unwrap_or(false);
-                tracing::trace!("HaltedPersistent mode: core is_running={}", is_running);
-                if is_running {
-                    if let Err(e) = core.halt(Duration::from_millis(100)) {
-                        tracing::warn!("Failed to halt core for read: {}", e);
-                    } else {
-                        tracing::info!("Halted core persistently for reads");
-                    }
-                }
-                false // Never resume in persistent mode
-            }
-            MemoryAccessMode::Background => {
-                tracing::trace!("Background mode: reading while target runs");
-                false // No halt needed
             }
         };
 
@@ -526,7 +505,10 @@ impl ProbeBackend {
                 self.read_buffer.resize(region.size, 0);
             }
 
-            match core.read(region.address, &mut self.read_buffer[..region.size]) {
+            match memory
+                .read(region.address, &mut self.read_buffer[..region.size])
+                .map_err(probe_rs::Error::from)
+            {
                 Ok(()) => {
                     total_bytes += region.size;
 
@@ -562,15 +544,6 @@ impl ProbeBackend {
             }
         }
 
-        // For Halted mode (non-persistent), resume the core after reading
-        if was_running {
-            if let Err(e) = core.run() {
-                tracing::warn!("Failed to resume core after read: {}", e);
-            } else {
-                tracing::trace!("Resumed core after batch read");
-            }
-        }
-
         let read_time = start.elapsed();
         let read_time_us = read_time.as_micros() as u64;
 
@@ -578,18 +551,6 @@ impl ProbeBackend {
         self.stats.record_success(read_time_us, total_bytes as u64);
 
         results
-    }
-
-    /// Get the current memory access mode
-    pub fn memory_access_mode(&self) -> MemoryAccessMode {
-        self.config.memory_access_mode
-    }
-
-    /// Set the memory access mode
-    pub fn set_memory_access_mode(&mut self, mode: MemoryAccessMode) {
-        let old_mode = self.config.memory_access_mode;
-        self.config.memory_access_mode = mode;
-        tracing::info!("Memory access mode changed: {:?} -> {:?}", old_mode, mode);
     }
 
     /// Check if the target core is currently halted
@@ -614,8 +575,10 @@ impl ProbeBackend {
 
         let start = Instant::now();
 
-        let mut core = session.core(0)?;
-        core.read(address, &mut buffer)?;
+        let mut memory = Self::arm_memory_interface(session)?;
+        memory
+            .read(address, &mut buffer)
+            .map_err(probe_rs::Error::from)?;
 
         let read_time = start.elapsed();
         self.stats.last_read_time_us = read_time.as_micros() as u64;
@@ -633,8 +596,10 @@ impl ProbeBackend {
             .as_mut()
             .ok_or_else(|| DataVisError::Config("Not connected to probe".to_string()))?;
 
-        let mut core = session.core(0)?;
-        core.write_8(address, data)?;
+        let mut memory = Self::arm_memory_interface(session)?;
+        memory
+            .write_8(address, data)
+            .map_err(probe_rs::Error::from)?;
 
         Ok(())
     }
@@ -665,8 +630,10 @@ impl ProbeBackend {
             }
         };
 
-        let mut core = session.core(0)?;
-        core.write_8(variable.address, &bytes)?;
+        let mut memory = Self::arm_memory_interface(session)?;
+        memory
+            .write_8(variable.address, &bytes)
+            .map_err(probe_rs::Error::from)?;
 
         Ok(())
     }
@@ -805,14 +772,6 @@ impl DebugProbe for ProbeBackend {
 
     fn stats_mut(&mut self) -> &mut ProbeStats {
         &mut self.stats
-    }
-
-    fn memory_access_mode(&self) -> MemoryAccessMode {
-        ProbeBackend::memory_access_mode(self)
-    }
-
-    fn set_memory_access_mode(&mut self, mode: MemoryAccessMode) {
-        ProbeBackend::set_memory_access_mode(self, mode)
     }
 }
 

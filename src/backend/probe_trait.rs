@@ -3,7 +3,6 @@
 //! This module provides a common trait for all debug probe implementations,
 //! enabling both real hardware probes (via probe-rs) and mock probes for testing.
 
-use crate::config::MemoryAccessMode;
 use crate::error::Result;
 use crate::types::Variable;
 use std::collections::VecDeque;
@@ -232,12 +231,6 @@ pub trait DebugProbe: Send {
     fn reset_stats(&mut self) {
         self.stats_mut().reset();
     }
-
-    /// Get the current memory access mode
-    fn memory_access_mode(&self) -> MemoryAccessMode;
-
-    /// Set the memory access mode
-    fn set_memory_access_mode(&mut self, mode: MemoryAccessMode);
 }
 
 /// Information about a detected probe (for listing)
