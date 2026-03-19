@@ -653,12 +653,6 @@ pub struct ProbeConfig {
     /// Whether to halt the target on connect
     pub halt_on_connect: bool,
 
-    /// Memory access mode for reading variables
-    /// - Background: Read while target is running (non-intrusive but slower)
-    /// - Halted: Halt target during reads (faster but stops execution)
-    #[serde(default)]
-    pub memory_access_mode: MemoryAccessMode,
-
     /// USB/HID communication timeout in milliseconds.
     /// Default: 1000ms. Increase for slow wireless probes (e.g., wireless CMSIS-DAP).
     /// Note: This is a configuration placeholder - probe-rs currently uses hardcoded
@@ -688,6 +682,24 @@ pub struct ProbeConfig {
     /// larger reads. Default: false.
     #[serde(default)]
     pub disable_bulk_reads: bool,
+
+    /// Backend type selection
+    #[serde(default)]
+    pub backend_type: BackendType,
+
+    /// OpenOCD binary path override (None = use bundled/PATH)
+    #[serde(default)]
+    pub openocd_path: Option<String>,
+
+    /// OpenOCD interface override (e.g., "stlink", "cmsis-dap")
+    /// When None, auto-detected from probe type
+    #[serde(default)]
+    pub openocd_interface: Option<String>,
+
+    /// OpenOCD target config override (e.g., "stm32f4x")
+    /// When None, derived from target_chip via family prefix mapping
+    #[serde(default)]
+    pub openocd_target: Option<String>,
 }
 
 fn default_usb_timeout_ms() -> u64 {
@@ -711,54 +723,14 @@ impl Default for ProbeConfig {
             protocol: ProbeProtocol::Swd,
             connect_under_reset: ConnectUnderReset::default(),
             halt_on_connect: false,
-            memory_access_mode: MemoryAccessMode::default(),
             usb_timeout_ms: default_usb_timeout_ms(),
             bulk_read_gap_threshold: default_bulk_read_gap(),
             max_bulk_read_size: default_max_bulk_read_size(),
             disable_bulk_reads: false,
-        }
-    }
-}
-
-/// Memory access mode for reading variables
-///
-/// # Non-Intrusive Reads (Background Mode)
-/// For ARM Cortex-M targets, memory reads through the Debug Access Port (DAP)
-/// do not halt the CPU. This means Background mode provides truly non-intrusive
-/// access for most use cases. The target program continues running while reads occur.
-///
-/// # When to Use Each Mode
-/// - **Background**: Default choice. Best for monitoring running code without
-///   affecting timing or behavior. Memory reads happen via DAP without halting.
-/// - **Halted**: Use if you see inconsistent reads due to race conditions with
-///   multi-byte values being updated mid-read (tearing). The target is briefly
-///   stopped during each read batch.
-/// - **HaltedPersistent**: Use for maximum read speed when the target doesn't
-///   need to run during data collection. Best for analyzing static memory state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum MemoryAccessMode {
-    /// Read memory while target is running (non-intrusive)
-    /// For ARM Cortex-M, this uses DAP access which doesn't halt the CPU.
-    /// This is the default and recommended mode for most use cases.
-    #[default]
-    Background,
-
-    /// Halt target before reading, resume after (faster, but intrusive)
-    /// The target is briefly stopped during each read batch.
-    /// Use this if you experience read tearing with multi-byte values.
-    Halted,
-
-    /// Halt target and keep it halted (fastest, fully intrusive)
-    /// Use for maximum read speed when target execution is not needed.
-    HaltedPersistent,
-}
-
-impl std::fmt::Display for MemoryAccessMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MemoryAccessMode::Background => write!(f, "Background (Running)"),
-            MemoryAccessMode::Halted => write!(f, "Halted (Per-batch)"),
-            MemoryAccessMode::HaltedPersistent => write!(f, "Halted (Persistent)"),
+            backend_type: BackendType::default(),
+            openocd_path: None,
+            openocd_interface: None,
+            openocd_target: None,
         }
     }
 }
@@ -803,6 +775,23 @@ impl std::fmt::Display for ProbeProtocol {
         match self {
             ProbeProtocol::Swd => write!(f, "SWD"),
             ProbeProtocol::Jtag => write!(f, "JTAG"),
+        }
+    }
+}
+
+/// Backend type for debug probe communication
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum BackendType {
+    #[default]
+    ProbeRs,
+    OpenOcd,
+}
+
+impl std::fmt::Display for BackendType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BackendType::ProbeRs => write!(f, "probe-rs"),
+            BackendType::OpenOcd => write!(f, "OpenOCD"),
         }
     }
 }

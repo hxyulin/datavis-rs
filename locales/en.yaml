@@ -107,7 +107,6 @@ conn_settings_title: "Connection Settings"
 conn_settings_speed: "Speed (kHz)"
 conn_settings_connect_under_reset: "Connect Under Reset"
 conn_settings_halt_on_connect: "Halt on Connect"
-conn_settings_memory_access_mode: "Memory Access Mode"
 conn_settings_usb_timeout: "USB Timeout (ms)"
 conn_settings_bulk_read_gap: "Bulk Read Gap Threshold"
 
@@ -154,6 +153,19 @@ help_shortcut_space: "Start/Stop collection"
 help_shortcut_save: "Save project"
 help_shortcut_clear: "Clear data"
 help_shortcut_pause: "Pause/Resume (while collecting)"
+
+# OpenOCD backend
+backend_type: "Backend"
+backend_probe_rs: "probe-rs"
+backend_openocd: "OpenOCD"
+openocd_path: "OpenOCD Path"
+openocd_path_hint: "Leave empty to use bundled or system PATH"
+openocd_interface: "Interface Override"
+openocd_target: "Target Override"
+openocd_manual_interface: "Probe Interface"
+openocd_starting: "Starting OpenOCD..."
+openocd_connection_failed: "Failed to connect to OpenOCD"
+openocd_chip_not_mapped: "Could not determine OpenOCD target for chip. Please specify in Settings."
 
 # Units
 unit_hz: "Hz"

@@ -5,7 +5,7 @@
 
 use egui::Ui;
 
-use crate::config::{ConnectUnderReset, MemoryAccessMode, ProbeConfig};
+use crate::config::{BackendType, ConnectUnderReset, ProbeConfig};
 use crate::frontend::dialogs::{Dialog, DialogAction, DialogState, DialogWindowConfig};
 
 /// State for the connection settings dialog
@@ -14,11 +14,14 @@ pub struct ConnectionSettingsState {
     pub speed_khz: u32,
     pub connect_under_reset: ConnectUnderReset,
     pub halt_on_connect: bool,
-    pub memory_access_mode: MemoryAccessMode,
     pub usb_timeout_ms: u64,
     pub bulk_read_gap_threshold: usize,
     pub max_bulk_read_size: usize,
     pub disable_bulk_reads: bool,
+    pub backend_type: BackendType,
+    pub openocd_path: String,
+    pub openocd_interface: String,
+    pub openocd_target: String,
 }
 
 impl Default for ConnectionSettingsState {
@@ -28,11 +31,14 @@ impl Default for ConnectionSettingsState {
             speed_khz: defaults.speed_khz,
             connect_under_reset: defaults.connect_under_reset,
             halt_on_connect: defaults.halt_on_connect,
-            memory_access_mode: defaults.memory_access_mode,
             usb_timeout_ms: defaults.usb_timeout_ms,
             bulk_read_gap_threshold: defaults.bulk_read_gap_threshold,
             max_bulk_read_size: defaults.max_bulk_read_size,
             disable_bulk_reads: defaults.disable_bulk_reads,
+            backend_type: defaults.backend_type,
+            openocd_path: defaults.openocd_path.unwrap_or_default(),
+            openocd_interface: defaults.openocd_interface.unwrap_or_default(),
+            openocd_target: defaults.openocd_target.unwrap_or_default(),
         }
     }
 }
@@ -44,11 +50,14 @@ impl ConnectionSettingsState {
             speed_khz: config.speed_khz,
             connect_under_reset: config.connect_under_reset,
             halt_on_connect: config.halt_on_connect,
-            memory_access_mode: config.memory_access_mode,
             usb_timeout_ms: config.usb_timeout_ms,
             bulk_read_gap_threshold: config.bulk_read_gap_threshold,
             max_bulk_read_size: config.max_bulk_read_size,
             disable_bulk_reads: config.disable_bulk_reads,
+            backend_type: config.backend_type,
+            openocd_path: config.openocd_path.clone().unwrap_or_default(),
+            openocd_interface: config.openocd_interface.clone().unwrap_or_default(),
+            openocd_target: config.openocd_target.clone().unwrap_or_default(),
         }
     }
 }
@@ -93,6 +102,23 @@ impl Dialog for ConnectionSettingsDialog {
             .num_columns(2)
             .spacing([10.0, 8.0])
             .show(ui, |ui| {
+                ui.label("Backend:");
+                egui::ComboBox::from_id_salt("conn_settings_backend")
+                    .selected_text(state.backend_type.to_string())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut state.backend_type,
+                            BackendType::ProbeRs,
+                            "probe-rs",
+                        );
+                        ui.selectable_value(
+                            &mut state.backend_type,
+                            BackendType::OpenOcd,
+                            "OpenOCD",
+                        );
+                    });
+                ui.end_row();
+
                 ui.label("Speed (kHz):");
                 ui.add(
                     egui::DragValue::new(&mut state.speed_khz)
@@ -131,31 +157,44 @@ impl Dialog for ConnectionSettingsDialog {
                 ui.label("Halt on Connect:");
                 ui.checkbox(&mut state.halt_on_connect, "");
                 ui.end_row();
-
-                ui.label("Memory Access:");
-                egui::ComboBox::from_id_salt("conn_settings_memory_access")
-                    .selected_text(state.memory_access_mode.to_string())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut state.memory_access_mode,
-                            MemoryAccessMode::Background,
-                            "Background (Running)",
-                        );
-                        ui.selectable_value(
-                            &mut state.memory_access_mode,
-                            MemoryAccessMode::Halted,
-                            "Halted (Per-batch)",
-                        );
-                        ui.selectable_value(
-                            &mut state.memory_access_mode,
-                            MemoryAccessMode::HaltedPersistent,
-                            "Halted (Persistent)",
-                        );
-                    });
-                ui.end_row();
             });
 
         ui.add_space(4.0);
+
+        // OpenOCD-specific settings (visible when backend is OpenOCD)
+        if state.backend_type == BackendType::OpenOcd {
+            egui::CollapsingHeader::new("OpenOCD")
+                .default_open(true)
+                .show(ui, |ui| {
+                    egui::Grid::new("conn_settings_openocd_grid")
+                        .num_columns(2)
+                        .spacing([10.0, 8.0])
+                        .show(ui, |ui| {
+                            ui.label("OpenOCD Path:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut state.openocd_path)
+                                    .hint_text("Bundled / System PATH"),
+                            );
+                            ui.end_row();
+
+                            ui.label("Interface Override:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut state.openocd_interface)
+                                    .hint_text("Auto-detect from probe"),
+                            );
+                            ui.end_row();
+
+                            ui.label("Target Override:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut state.openocd_target)
+                                    .hint_text("Auto-detect from chip"),
+                            );
+                            ui.end_row();
+                        });
+                });
+
+            ui.add_space(4.0);
+        }
 
         egui::CollapsingHeader::new("Advanced")
             .default_open(false)

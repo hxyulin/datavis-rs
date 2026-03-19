@@ -107,7 +107,6 @@ conn_settings_title: "连接设置"
 conn_settings_speed: "速度 (kHz)"
 conn_settings_connect_under_reset: "复位下连接"
 conn_settings_halt_on_connect: "连接时暂停"
-conn_settings_memory_access_mode: "内存访问模式"
 conn_settings_usb_timeout: "USB超时 (ms)"
 conn_settings_bulk_read_gap: "批量读取间隔阈值"
 
@@ -154,6 +153,19 @@ help_shortcut_space: "开始/停止采集"
 help_shortcut_save: "保存项目"
 help_shortcut_clear: "清除数据"
 help_shortcut_pause: "暂停/继续（采集时）"
+
+# OpenOCD 后端
+backend_type: "后端"
+backend_probe_rs: "probe-rs"
+backend_openocd: "OpenOCD"
+openocd_path: "OpenOCD 路径"
+openocd_path_hint: "留空以使用内置或系统 PATH"
+openocd_interface: "接口覆盖"
+openocd_target: "目标覆盖"
+openocd_manual_interface: "探针接口"
+openocd_starting: "正在启动 OpenOCD..."
+openocd_connection_failed: "无法连接到 OpenOCD"
+openocd_chip_not_mapped: "无法确定芯片的 OpenOCD 目标配置，请在设置中指定。"
 
 # Units
 unit_hz: "Hz"

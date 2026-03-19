@@ -659,10 +659,6 @@ impl DataVisApp {
                 tracing::debug!("Refreshing probe list...");
                 self.frontend.send_command(PipelineCommand::RefreshProbes);
             }
-            AppAction::SetMemoryAccessMode(mode) => {
-                self.frontend
-                    .send_command(PipelineCommand::SetMemoryAccessMode(mode));
-            }
             AppAction::SetPollRate(rate) => {
                 self.frontend
                     .send_command(PipelineCommand::SetPollRate(rate));
@@ -1960,17 +1956,27 @@ impl DataVisApp {
                         self.config.probe.speed_khz = state.speed_khz;
                         self.config.probe.connect_under_reset = state.connect_under_reset;
                         self.config.probe.halt_on_connect = state.halt_on_connect;
-                        let old_mode = self.config.probe.memory_access_mode;
-                        self.config.probe.memory_access_mode = state.memory_access_mode;
                         self.config.probe.usb_timeout_ms = state.usb_timeout_ms;
                         self.config.probe.bulk_read_gap_threshold = state.bulk_read_gap_threshold;
                         self.config.probe.max_bulk_read_size = state.max_bulk_read_size;
                         self.config.probe.disable_bulk_reads = state.disable_bulk_reads;
-                        if self.config.probe.memory_access_mode != old_mode {
-                            self.handle_action(AppAction::SetMemoryAccessMode(
-                                self.config.probe.memory_access_mode,
-                            ));
-                        }
+                        self.config.probe.backend_type = state.backend_type;
+                        self.config.probe.openocd_path = if state.openocd_path.is_empty() {
+                            None
+                        } else {
+                            Some(state.openocd_path)
+                        };
+                        self.config.probe.openocd_interface = if state.openocd_interface.is_empty()
+                        {
+                            None
+                        } else {
+                            Some(state.openocd_interface)
+                        };
+                        self.config.probe.openocd_target = if state.openocd_target.is_empty() {
+                            None
+                        } else {
+                            Some(state.openocd_target)
+                        };
                     }
                 }
             }

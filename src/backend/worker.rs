@@ -32,8 +32,8 @@
 use crate::backend::converter_engine::ConverterEngine;
 use crate::backend::probe_trait::DebugProbe;
 use crate::backend::read_manager::DependentReadPlanner;
-use crate::backend::{BackendCommand, BackendMessage, ProbeBackend};
-use crate::config::AppConfig;
+use crate::backend::{BackendCommand, BackendMessage, OpenOcdProbe, ProbeBackend};
+use crate::config::{AppConfig, BackendType};
 use crate::types::{CollectionStats, ConnectionStatus, Variable};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use std::collections::HashMap;
@@ -198,7 +198,10 @@ impl BackendWorker {
         running: Arc<AtomicBool>,
     ) -> Self {
         let poll_rate_hz = config.collection.poll_rate_hz;
-        let probe: Box<dyn DebugProbe> = Box::new(ProbeBackend::from_app_config(&config));
+        let probe: Box<dyn DebugProbe> = match config.probe.backend_type {
+            BackendType::ProbeRs => Box::new(ProbeBackend::from_app_config(&config)),
+            BackendType::OpenOcd => Box::new(OpenOcdProbe::new(config.probe.clone())),
+        };
 
         Self {
             config,
@@ -303,9 +306,6 @@ impl BackendWorker {
             BackendCommand::SetPollRate(hz) => {
                 self.poll_rate_hz = hz.max(1);
             }
-            BackendCommand::SetMemoryAccessMode(mode) => {
-                self.probe.set_memory_access_mode(mode);
-            }
             BackendCommand::RequestStats => {
                 self.send_stats();
             }
@@ -326,7 +326,10 @@ impl BackendWorker {
                     self.is_mock_probe = true;
                     tracing::info!("Switched to mock probe");
                 } else if !use_mock && self.is_mock_probe {
-                    self.probe = Box::new(ProbeBackend::from_app_config(&self.config));
+                    self.probe = match self.config.probe.backend_type {
+                        BackendType::ProbeRs => Box::new(ProbeBackend::from_app_config(&self.config)),
+                        BackendType::OpenOcd => Box::new(OpenOcdProbe::new(self.config.probe.clone())),
+                    };
                     self.is_mock_probe = false;
                     tracing::info!("Switched to real probe");
                 }
@@ -669,7 +672,7 @@ impl BackendWorker {
     /// Send statistics to UI (using try_send for backpressure)
     fn send_stats(&mut self) {
         let mut stats = self.stats.clone();
-        stats.memory_access_mode = self.probe.memory_access_mode().to_string();
+        stats.memory_access_mode = "AP Direct".to_string();
         self.try_send_message(BackendMessage::Stats(stats));
     }
 

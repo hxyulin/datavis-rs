@@ -53,6 +53,7 @@ pub mod dwarf_parser;
 pub mod elf_parser;
 #[cfg(feature = "mock-probe")]
 pub mod mock_probe;
+pub mod openocd;
 pub mod probe;
 pub mod probe_trait;
 pub mod read_manager;
@@ -74,6 +75,7 @@ pub use type_table::{
 
 #[cfg(feature = "mock-probe")]
 pub use mock_probe::{MockDataPattern, MockProbeBackend, MockProbeInfo, MockVariableConfig};
+pub use openocd::OpenOcdProbe;
 pub use probe::{ProbeBackend, ProbeInfo};
 pub use probe_trait::{DebugProbe, DetectedProbeInfo, ProbeStats};
 pub use read_manager::{ReadManager, ReadRegion, DEFAULT_GAP_THRESHOLD};
@@ -132,8 +134,6 @@ pub enum BackendCommand {
     ClearData,
     /// Set the polling rate in Hz
     SetPollRate(u32),
-    /// Set memory access mode (Background, Halted, HaltedPersistent)
-    SetMemoryAccessMode(crate::config::MemoryAccessMode),
     /// Request current statistics
     RequestStats,
     /// Shutdown the backend
