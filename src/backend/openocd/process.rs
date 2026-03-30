@@ -189,10 +189,14 @@ fn find_openocd_binary(config: &ProbeConfig) -> Result<String> {
 fn find_bundled_openocd() -> Option<String> {
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
 
-    // macOS: <exe_dir>/../Resources/openocd/bin/openocd
+    // macOS: .app bundle layout, then portable layout
     #[cfg(target_os = "macos")]
     {
         let path = exe_dir.join("../Resources/openocd/bin/openocd");
+        if path.exists() {
+            return path.to_str().map(|s| s.to_string());
+        }
+        let path = exe_dir.join("openocd/bin/openocd");
         if path.exists() {
             return path.to_str().map(|s| s.to_string());
         }
@@ -222,11 +226,20 @@ fn find_bundled_openocd() -> Option<String> {
 /// Find scripts directory for bundled OpenOCD
 fn find_scripts_dir(openocd_bin: &str) -> Option<String> {
     let bin_path = std::path::Path::new(openocd_bin);
-    // Scripts are typically at ../share/openocd/scripts relative to the binary
-    let scripts_dir = bin_path.parent()?.parent()?.join("share/openocd/scripts");
-    if scripts_dir.exists() {
-        return scripts_dir.to_str().map(|s| s.to_string());
+    let parent = bin_path.parent()?.parent()?;
+
+    // Standard layout: ../share/openocd/scripts
+    let standard = parent.join("share/openocd/scripts");
+    if standard.exists() {
+        return standard.to_str().map(|s| s.to_string());
     }
+
+    // xPack layout: ../openocd/scripts
+    let xpack = parent.join("openocd/scripts");
+    if xpack.exists() {
+        return xpack.to_str().map(|s| s.to_string());
+    }
+
     None
 }
 

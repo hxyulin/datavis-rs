@@ -14,6 +14,9 @@ on:
 permissions:
   contents: write
 
+env:
+  OPENOCD_VERSION: "0.12.0-7"
+
 jobs:
   build-linux:
     name: Build (Linux x86_64)
@@ -56,11 +59,26 @@ jobs:
           name: linux-appimage
           path: target/release/*.AppImage
 
-      - name: Upload portable binary
+      - name: Download OpenOCD
+        run: |
+          curl -sL "https://github.com/xpack-dev-tools/openocd-xpack/releases/download/v${OPENOCD_VERSION}/xpack-openocd-${OPENOCD_VERSION}-linux-x64.tar.gz" | tar xz
+          mv "xpack-openocd-${OPENOCD_VERSION}" openocd-bundle
+
+      - name: Create portable archive with OpenOCD
+        run: |
+          mkdir -p datavis-rs-linux-x86_64/openocd/bin
+          cp target/x86_64-unknown-linux-gnu/release/datavis-rs datavis-rs-linux-x86_64/
+          cp openocd-bundle/bin/openocd datavis-rs-linux-x86_64/openocd/bin/
+          cp -r openocd-bundle/openocd/scripts datavis-rs-linux-x86_64/openocd/scripts
+          cp -r openocd-bundle/libexec datavis-rs-linux-x86_64/openocd/libexec
+          chmod +x datavis-rs-linux-x86_64/datavis-rs datavis-rs-linux-x86_64/openocd/bin/openocd
+          tar czf datavis-rs-linux-x86_64.tar.gz datavis-rs-linux-x86_64
+
+      - name: Upload portable archive
         uses: actions/upload-artifact@v4
         with:
           name: linux-portable
-          path: target/x86_64-unknown-linux-gnu/release/datavis-rs
+          path: datavis-rs-linux-x86_64.tar.gz
 
   build-macos-aarch64:
     name: Build (macOS aarch64)
@@ -82,17 +100,46 @@ jobs:
       - name: Package
         run: cargo packager --release --formats dmg
 
+      - name: Download OpenOCD
+        run: |
+          curl -sL "https://github.com/xpack-dev-tools/openocd-xpack/releases/download/v${OPENOCD_VERSION}/xpack-openocd-${OPENOCD_VERSION}-darwin-arm64.tar.gz" | tar xz
+          mv "xpack-openocd-${OPENOCD_VERSION}" openocd-bundle
+
+      - name: Bundle OpenOCD into app
+        run: |
+          APP_PATH=$(find target/release -name "*.app" -type d | head -1)
+          if [ -n "$APP_PATH" ]; then
+            mkdir -p "$APP_PATH/Contents/Resources/openocd/bin"
+            cp openocd-bundle/bin/openocd "$APP_PATH/Contents/Resources/openocd/bin/"
+            cp -r openocd-bundle/openocd/scripts "$APP_PATH/Contents/Resources/openocd/scripts"
+            cp -r openocd-bundle/libexec "$APP_PATH/Contents/Resources/openocd/libexec"
+            chmod +x "$APP_PATH/Contents/Resources/openocd/bin/openocd"
+            # Re-create DMG with bundled OpenOCD
+            rm -f target/release/*.dmg
+            hdiutil create -volname "Data Visualizer" -srcfolder "$APP_PATH" -ov -format UDZO "target/release/Data Visualizer_aarch64.dmg"
+          fi
+
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
           name: macos-aarch64-dmg
           path: target/release/*.dmg
 
-      - name: Upload portable binary
+      - name: Create portable archive with OpenOCD
+        run: |
+          mkdir -p datavis-rs-macos-aarch64/openocd/bin
+          cp target/aarch64-apple-darwin/release/datavis-rs datavis-rs-macos-aarch64/
+          cp openocd-bundle/bin/openocd datavis-rs-macos-aarch64/openocd/bin/
+          cp -r openocd-bundle/openocd/scripts datavis-rs-macos-aarch64/openocd/scripts
+          cp -r openocd-bundle/libexec datavis-rs-macos-aarch64/openocd/libexec
+          chmod +x datavis-rs-macos-aarch64/datavis-rs datavis-rs-macos-aarch64/openocd/bin/openocd
+          tar czf datavis-rs-macos-aarch64.tar.gz datavis-rs-macos-aarch64
+
+      - name: Upload portable archive
         uses: actions/upload-artifact@v4
         with:
           name: macos-aarch64-portable
-          path: target/aarch64-apple-darwin/release/datavis-rs
+          path: datavis-rs-macos-aarch64.tar.gz
 
   build-macos-x86_64:
     name: Build (macOS x86_64)
@@ -114,17 +161,46 @@ jobs:
       - name: Package
         run: cargo packager --release --formats dmg --target x86_64-apple-darwin
 
+      - name: Download OpenOCD
+        run: |
+          curl -sL "https://github.com/xpack-dev-tools/openocd-xpack/releases/download/v${OPENOCD_VERSION}/xpack-openocd-${OPENOCD_VERSION}-darwin-x64.tar.gz" | tar xz
+          mv "xpack-openocd-${OPENOCD_VERSION}" openocd-bundle
+
+      - name: Bundle OpenOCD into app
+        run: |
+          APP_PATH=$(find target/release -name "*.app" -type d | head -1)
+          if [ -n "$APP_PATH" ]; then
+            mkdir -p "$APP_PATH/Contents/Resources/openocd/bin"
+            cp openocd-bundle/bin/openocd "$APP_PATH/Contents/Resources/openocd/bin/"
+            cp -r openocd-bundle/openocd/scripts "$APP_PATH/Contents/Resources/openocd/scripts"
+            cp -r openocd-bundle/libexec "$APP_PATH/Contents/Resources/openocd/libexec"
+            chmod +x "$APP_PATH/Contents/Resources/openocd/bin/openocd"
+            # Re-create DMG with bundled OpenOCD
+            rm -f target/release/*.dmg
+            hdiutil create -volname "Data Visualizer" -srcfolder "$APP_PATH" -ov -format UDZO "target/release/Data Visualizer_x86_64.dmg"
+          fi
+
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
           name: macos-x86_64-dmg
           path: target/release/*.dmg
 
-      - name: Upload portable binary
+      - name: Create portable archive with OpenOCD
+        run: |
+          mkdir -p datavis-rs-macos-x86_64/openocd/bin
+          cp target/x86_64-apple-darwin/release/datavis-rs datavis-rs-macos-x86_64/
+          cp openocd-bundle/bin/openocd datavis-rs-macos-x86_64/openocd/bin/
+          cp -r openocd-bundle/openocd/scripts datavis-rs-macos-x86_64/openocd/scripts
+          cp -r openocd-bundle/libexec datavis-rs-macos-x86_64/openocd/libexec
+          chmod +x datavis-rs-macos-x86_64/datavis-rs datavis-rs-macos-x86_64/openocd/bin/openocd
+          tar czf datavis-rs-macos-x86_64.tar.gz datavis-rs-macos-x86_64
+
+      - name: Upload portable archive
         uses: actions/upload-artifact@v4
         with:
           name: macos-x86_64-portable
-          path: target/x86_64-apple-darwin/release/datavis-rs
+          path: datavis-rs-macos-x86_64.tar.gz
 
   build-windows:
     name: Build (Windows x86_64)
@@ -201,11 +277,28 @@ jobs:
           name: windows-nsis
           path: target/release/*-setup.exe
 
-      - name: Upload portable exe
+      - name: Download OpenOCD
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/xpack-dev-tools/openocd-xpack/releases/download/v$env:OPENOCD_VERSION/xpack-openocd-$env:OPENOCD_VERSION-win32-x64.zip" -OutFile openocd.zip
+          Expand-Archive openocd.zip -DestinationPath .
+          Rename-Item "xpack-openocd-$env:OPENOCD_VERSION" openocd-bundle
+
+      - name: Create portable archive with OpenOCD
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "datavis-rs-windows-x86_64/openocd/bin" -Force
+          Copy-Item "target/x86_64-pc-windows-msvc/release/datavis-rs.exe" "datavis-rs-windows-x86_64/"
+          Copy-Item "openocd-bundle/bin/openocd.exe" "datavis-rs-windows-x86_64/openocd/bin/"
+          Copy-Item -Recurse "openocd-bundle/openocd/scripts" "datavis-rs-windows-x86_64/openocd/scripts"
+          Copy-Item -Recurse "openocd-bundle/libexec" "datavis-rs-windows-x86_64/openocd/libexec"
+          Compress-Archive -Path "datavis-rs-windows-x86_64" -DestinationPath "datavis-rs-windows-x86_64.zip"
+
+      - name: Upload portable archive
         uses: actions/upload-artifact@v4
         with:
           name: windows-portable
-          path: target/x86_64-pc-windows-msvc/release/datavis-rs.exe
+          path: datavis-rs-windows-x86_64.zip
 
   release:
     name: Create Release
@@ -227,23 +320,20 @@ jobs:
           # Linux
           cp artifacts/linux-deb/*.deb release/ || true
           cp artifacts/linux-appimage/*.AppImage release/ || true
-          cp artifacts/linux-portable/datavis-rs release/datavis-rs-linux-x86_64
-          chmod +x release/datavis-rs-linux-x86_64
+          cp artifacts/linux-portable/*.tar.gz release/
 
           # macOS aarch64
           cp artifacts/macos-aarch64-dmg/*.dmg release/ || true
-          cp artifacts/macos-aarch64-portable/datavis-rs release/datavis-rs-macos-aarch64
-          chmod +x release/datavis-rs-macos-aarch64
+          cp artifacts/macos-aarch64-portable/*.tar.gz release/
 
           # macOS x86_64
           cp artifacts/macos-x86_64-dmg/*.dmg release/ || true
-          cp artifacts/macos-x86_64-portable/datavis-rs release/datavis-rs-macos-x86_64
-          chmod +x release/datavis-rs-macos-x86_64
+          cp artifacts/macos-x86_64-portable/*.tar.gz release/
 
           # Windows
           cp artifacts/windows-msi/*.msi release/ || true
           cp artifacts/windows-nsis/*-setup.exe release/ || true
-          cp artifacts/windows-portable/datavis-rs.exe release/datavis-rs-windows-x86_64.exe
+          cp artifacts/windows-portable/*.zip release/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
