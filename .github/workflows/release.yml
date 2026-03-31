@@ -289,9 +289,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path "datavis-rs-windows-x86_64/openocd/bin" -Force
           Copy-Item "target/x86_64-pc-windows-msvc/release/datavis-rs.exe" "datavis-rs-windows-x86_64/"
-          Copy-Item "openocd-bundle/bin/openocd.exe" "datavis-rs-windows-x86_64/openocd/bin/"
+          Copy-Item "openocd-bundle/bin/*" "datavis-rs-windows-x86_64/openocd/bin/"
           Copy-Item -Recurse "openocd-bundle/openocd/scripts" "datavis-rs-windows-x86_64/openocd/scripts"
-          Copy-Item -Recurse "openocd-bundle/libexec" "datavis-rs-windows-x86_64/openocd/libexec"
           Compress-Archive -Path "datavis-rs-windows-x86_64" -DestinationPath "datavis-rs-windows-x86_64.zip"
 
       - name: Upload portable archive
