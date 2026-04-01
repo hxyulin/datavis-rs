@@ -61,6 +61,7 @@ use crate::types::{Variable, VariableType};
 use std::collections::HashMap;
 use std::time::Instant;
 
+use super::mock_fault::*;
 use super::probe_trait::{DebugProbe, ProbeStats};
 
 /// Pattern for generating mock data
@@ -191,6 +192,14 @@ fn rand_simple() -> f64 {
         seed.set(s);
         (s as f64) / (u64::MAX as f64)
     })
+}
+
+/// Generate a normally distributed random number using Box-Muller transform
+fn rand_normal(mean: f64, stddev: f64) -> f64 {
+    let u1 = rand_simple().max(1e-10); // avoid log(0)
+    let u2 = rand_simple();
+    let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+    mean + stddev * z
 }
 
 /// Mock memory that can be read/written
@@ -324,6 +333,16 @@ pub struct MockProbeBackend {
     stats: ProbeStats,
     /// Simulated halt state
     halted: bool,
+    /// Fault injection configuration
+    fault_config: Option<FaultConfig>,
+    /// Total number of reads performed (for periodic faults)
+    read_counter: u64,
+    /// Accumulated latency increase for degrading profiles
+    accumulated_latency_increase: f64,
+    /// Number of reads in the current second (for rate limiting)
+    reads_this_second: u32,
+    /// Start of the current rate-limit second
+    second_start: Instant,
 }
 
 impl MockProbeBackend {
@@ -344,6 +363,11 @@ impl MockProbeBackend {
             pattern_only_mode: true, // Default to pattern mode for interesting data
             stats: ProbeStats::default(),
             halted: false,
+            fault_config: None,
+            read_counter: 0,
+            accumulated_latency_increase: 0.0,
+            reads_this_second: 0,
+            second_start: Instant::now(),
         }
     }
 
@@ -369,6 +393,195 @@ impl MockProbeBackend {
     pub fn with_pattern_only_mode(mut self, enabled: bool) -> Self {
         self.pattern_only_mode = enabled;
         self
+    }
+
+    /// Set a fault injection configuration
+    pub fn with_fault_config(mut self, config: FaultConfig) -> Self {
+        self.fault_config = Some(config);
+        self
+    }
+
+    /// Set a global read failure rate
+    pub fn with_read_failure_rate(mut self, rate: f64) -> Self {
+        let config = self.fault_config.get_or_insert_with(FaultConfig::default);
+        config.global.read_failure_rate = rate;
+        self
+    }
+
+    /// Set a latency profile
+    pub fn with_latency_profile(mut self, profile: LatencyProfile) -> Self {
+        let config = self.fault_config.get_or_insert_with(FaultConfig::default);
+        config.global.latency_profile = profile;
+        self
+    }
+
+    /// Add a per-variable fault configuration
+    pub fn with_variable_fault(mut self, var_id: u32, fault: VariableFaults) -> Self {
+        let config = self.fault_config.get_or_insert_with(FaultConfig::default);
+        config.variable_faults.insert(var_id, fault);
+        self
+    }
+
+    /// Check fault injection rules and possibly return an error
+    fn check_fault(&mut self, variable: &Variable) -> Result<()> {
+        let fault_config = match &self.fault_config {
+            Some(c) => c.clone(),
+            None => return Ok(()),
+        };
+
+        self.read_counter += 1;
+
+        // Check periodic failures
+        if let Some(ref periodic) = fault_config.global.periodic_failure {
+            if periodic.every_n_reads > 0 {
+                let cycle_pos = self.read_counter % periodic.every_n_reads;
+                if cycle_pos > 0 && cycle_pos <= periodic.failure_count {
+                    return Err(self.fault_error_to_datavis(&periodic.error_kind, variable));
+                }
+            }
+        }
+
+        // Check per-variable faults
+        if let Some(var_fault) = fault_config.variable_faults.get(&variable.id) {
+            if var_fault.always_timeout {
+                return Err(DataVisError::Timeout(format!(
+                    "Simulated timeout for variable {}",
+                    variable.id
+                )));
+            }
+            if let Some(rate) = var_fault.read_failure_rate {
+                if rand_simple() < rate {
+                    return Err(DataVisError::Config(format!(
+                        "Simulated per-variable read failure for variable {}",
+                        variable.id
+                    )));
+                }
+            }
+        }
+
+        // Check global read failure rate
+        if fault_config.global.read_failure_rate > 0.0
+            && rand_simple() < fault_config.global.read_failure_rate
+        {
+            return Err(DataVisError::Config(
+                "Simulated read failure".to_string(),
+            ));
+        }
+
+        // Check disconnect rate
+        if fault_config.global.disconnect_rate > 0.0
+            && rand_simple() < fault_config.global.disconnect_rate
+        {
+            self.connected = false;
+            return Err(DataVisError::Config(
+                "Simulated disconnect".to_string(),
+            ));
+        }
+
+        // Check rate limiting
+        if fault_config.global.max_reads_per_second > 0 {
+            let now = Instant::now();
+            if now.duration_since(self.second_start).as_secs_f64() >= 1.0 {
+                self.reads_this_second = 0;
+                self.second_start = now;
+            }
+            self.reads_this_second += 1;
+            if self.reads_this_second > fault_config.global.max_reads_per_second {
+                return Err(DataVisError::Timeout(
+                    "Rate limit exceeded".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Apply simulated latency based on the configured profile
+    fn apply_fault_latency(&mut self) {
+        let fault_config = match &self.fault_config {
+            Some(c) => c,
+            None => return,
+        };
+
+        let delay_us = match &fault_config.global.latency_profile {
+            LatencyProfile::Constant(us) => *us as f64,
+            LatencyProfile::Normal { mean_us, stddev_us } => {
+                rand_normal(*mean_us as f64, *stddev_us as f64).max(0.0)
+            }
+            LatencyProfile::Uniform { min_us, max_us } => {
+                *min_us as f64 + rand_simple() * (*max_us - *min_us) as f64
+            }
+            LatencyProfile::WithSpikes {
+                base_us,
+                spike_us,
+                spike_probability,
+            } => {
+                if rand_simple() < *spike_probability {
+                    *spike_us as f64
+                } else {
+                    *base_us as f64
+                }
+            }
+            LatencyProfile::Degrading {
+                start_us,
+                increase_per_read_us,
+            } => {
+                let delay = *start_us as f64 + self.accumulated_latency_increase;
+                self.accumulated_latency_increase += increase_per_read_us;
+                delay
+            }
+        };
+
+        if delay_us > 0.0 {
+            std::thread::sleep(std::time::Duration::from_micros(delay_us as u64));
+        }
+    }
+
+    /// Optionally corrupt a read value based on fault configuration
+    fn apply_corruption(&self, value: f64, variable: &Variable) -> f64 {
+        let fault_config = match &self.fault_config {
+            Some(c) => c,
+            None => return value,
+        };
+
+        // Check per-variable corruption
+        if let Some(var_fault) = fault_config.variable_faults.get(&variable.id) {
+            if var_fault.corrupt {
+                let offset = (rand_simple() - 0.5) * 2.0 * 1000.0;
+                return value + offset;
+            }
+        }
+
+        // Check global corruption
+        if let Some(ref corruption) = fault_config.global.corruption {
+            if rand_simple() < corruption.rate {
+                let offset = (rand_simple() - 0.5) * 2.0 * corruption.magnitude;
+                return value + offset;
+            }
+        }
+
+        value
+    }
+
+    /// Convert a FaultErrorKind to a DataVisError
+    fn fault_error_to_datavis(
+        &self,
+        kind: &FaultErrorKind,
+        variable: &Variable,
+    ) -> DataVisError {
+        match kind {
+            FaultErrorKind::Timeout => {
+                DataVisError::Timeout("Simulated periodic timeout".to_string())
+            }
+            FaultErrorKind::MemoryAccess => DataVisError::MemoryAccess {
+                address: variable.address,
+                message: "Simulated periodic memory access error".to_string(),
+            },
+            FaultErrorKind::Disconnect => {
+                DataVisError::Config("Simulated periodic disconnect".to_string())
+            }
+            FaultErrorKind::Generic(msg) => DataVisError::Config(msg.clone()),
+        }
     }
 
     /// Configure a specific variable's mock behavior
@@ -407,16 +620,24 @@ impl MockProbeBackend {
             return Err(DataVisError::Config("Mock probe not connected".to_string()));
         }
 
-        // Simulate read delay
-        if self.read_delay_us > 0 {
-            std::thread::sleep(std::time::Duration::from_micros(self.read_delay_us));
+        // Fault injection: check faults before reading
+        if self.fault_config.is_some() {
+            self.check_fault(variable)?;
+            self.apply_fault_latency();
+        } else {
+            // Original read delay when no fault config is set
+            if self.read_delay_us > 0 {
+                std::thread::sleep(std::time::Duration::from_micros(self.read_delay_us));
+            }
         }
 
         let elapsed = self.start_time.elapsed().as_secs_f64();
 
         // Check if we have a specific config for this variable
         if let Some(config) = self.variable_configs.get_mut(&variable.id) {
-            return Ok(config.generate_value(elapsed));
+            let value = config.generate_value(elapsed);
+            let value = self.apply_corruption(value, variable);
+            return Ok(value);
         }
 
         // If not in pattern-only mode, try to read from mock memory first
@@ -426,6 +647,7 @@ impl MockProbeBackend {
                 .read(variable.address, variable.var_type.size_bytes())
             {
                 if let Some(value) = variable.var_type.parse_to_f64(&bytes) {
+                    let value = self.apply_corruption(value, variable);
                     return Ok(value);
                 }
             }
@@ -478,6 +700,9 @@ impl MockProbeBackend {
                 }
             }
         };
+
+        // Apply corruption if fault config is set
+        let value = self.apply_corruption(value, variable);
 
         Ok(value)
     }

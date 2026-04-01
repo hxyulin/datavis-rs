@@ -3,6 +3,7 @@
 #![allow(dead_code)] // Test utilities may not all be used in every test file
 
 pub mod builders;
+pub mod fault_helpers;
 pub mod mock_helpers;
 
 use std::time::Duration;

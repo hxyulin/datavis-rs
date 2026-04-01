@@ -31,10 +31,10 @@
 
 use crate::backend::converter_engine::ConverterEngine;
 use crate::backend::probe_trait::DebugProbe;
-use crate::backend::read_manager::DependentReadPlanner;
+use crate::backend::read_manager::{resolve_dependent_addresses, DependentReadPlanner};
 use crate::backend::{BackendCommand, BackendMessage, OpenOcdProbe, ProbeBackend};
 use crate::config::{AppConfig, BackendType};
-use crate::types::{CollectionStats, ConnectionStatus, Variable};
+use crate::types::{CollectionStats, ConnectionStatus, PointerRuntime, Variable};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -184,6 +184,8 @@ pub struct BackendWorker {
     last_stats_time: Instant,
     /// Two-stage read planner for pointer dereferencing
     dependent_read_planner: DependentReadPlanner,
+    /// Runtime state for pointer variables (transient, not serialized)
+    pointer_runtime: HashMap<u32, PointerRuntime>,
     /// Data router for per-pane filtering (Phase 2 - not yet used)
     #[allow(dead_code)]
     data_router: DataRouter,
@@ -198,10 +200,12 @@ impl BackendWorker {
         running: Arc<AtomicBool>,
     ) -> Self {
         let poll_rate_hz = config.collection.poll_rate_hz;
-        let probe: Box<dyn DebugProbe> = match config.probe.backend_type {
+        let backend_type = config.probe.backend_type;
+        let probe: Box<dyn DebugProbe> = match backend_type {
             BackendType::ProbeRs => Box::new(ProbeBackend::from_app_config(&config)),
             BackendType::OpenOcd => Box::new(OpenOcdProbe::new(config.probe.clone())),
         };
+        tracing::info!("Loaded backend: {backend_type}");
 
         Self {
             config,
@@ -221,6 +225,7 @@ impl BackendWorker {
             last_poll_time: Instant::now(),
             last_stats_time: Instant::now(),
             dependent_read_planner: DependentReadPlanner::new(),
+            pointer_runtime: HashMap::new(),
             data_router: DataRouter::new(),
         }
     }
@@ -326,12 +331,13 @@ impl BackendWorker {
                     self.is_mock_probe = true;
                     tracing::info!("Switched to mock probe");
                 } else if !use_mock && self.is_mock_probe {
-                    self.probe = match self.config.probe.backend_type {
+                    let backend_type = self.config.probe.backend_type;
+                    self.probe = match backend_type {
                         BackendType::ProbeRs => Box::new(ProbeBackend::from_app_config(&self.config)),
                         BackendType::OpenOcd => Box::new(OpenOcdProbe::new(self.config.probe.clone())),
                     };
                     self.is_mock_probe = false;
-                    tracing::info!("Switched to real probe");
+                    tracing::info!("Switched to real probe: {backend_type}");
                 }
             }
             BackendCommand::RefreshProbes => {
@@ -443,6 +449,11 @@ impl BackendWorker {
         // Add to converter engine
         self.converter_engine.add_variable(&var);
 
+        // Create pointer runtime entry if this variable has pointer metadata
+        if var.pointer_metadata.is_some() {
+            self.pointer_runtime.entry(id).or_default();
+        }
+
         self.variables.insert(id, var);
         self.send_variable_list();
     }
@@ -451,6 +462,9 @@ impl BackendWorker {
     fn remove_variable(&mut self, id: u32) {
         // Remove from converter engine
         self.converter_engine.remove_variable(id);
+
+        // Remove pointer runtime entry
+        self.pointer_runtime.remove(&id);
 
         self.variables.remove(&id);
     }
@@ -517,8 +531,9 @@ impl BackendWorker {
         self.probe.reset_stats();
         // Clear converter engine state
         self.converter_engine.clear_state();
-        // Clear pointer read planner cache
+        // Clear pointer read planner cache and runtime
         self.dependent_read_planner.clear();
+        self.pointer_runtime.clear();
     }
 
     /// Poll all enabled variables using batched reads for better performance
@@ -546,31 +561,30 @@ impl BackendWorker {
         if !pointer_vars.is_empty() {
             let pointer_results = self.probe.read_variables(&pointer_vars);
 
-            // Update pointer states and cache
+            // Update pointer runtime states
             for (var, result) in pointer_vars.iter().zip(pointer_results.iter()) {
+                let rt = self.pointer_runtime.entry(var.id).or_default();
                 match result {
                     Ok(value) => {
-                        // Update pointer state in the main variables map
-                        if let Some(var_mut) = self.variables.get_mut(&var.id) {
-                            DependentReadPlanner::update_pointer_state(var_mut, *value);
-                        }
+                        DependentReadPlanner::update_pointer_state(rt, *value);
                     }
                     Err(_) => {
-                        // Mark pointer read as failed
-                        if let Some(var_mut) = self.variables.get_mut(&var.id) {
-                            DependentReadPlanner::mark_pointer_error(var_mut);
-                        }
+                        DependentReadPlanner::mark_pointer_error(rt);
                     }
                 }
             }
 
             // Update planner's timestamp cache
-            let updated_vars: Vec<Variable> = pointer_vars
-                .iter()
-                .filter_map(|v| self.variables.get(&v.id).cloned())
-                .collect();
             self.dependent_read_planner
-                .update_pointer_cache(&updated_vars);
+                .update_pointer_cache(&pointer_vars);
+
+            // Send pointer states to UI for display
+            let states: HashMap<u32, crate::types::PointerState> = self
+                .pointer_runtime
+                .iter()
+                .map(|(&id, rt)| (id, rt.pointer_state))
+                .collect();
+            self.try_send_message(BackendMessage::PointerStates(states));
         }
 
         // Resolve dependent variable addresses using cached pointer values
@@ -584,9 +598,7 @@ impl BackendWorker {
                     .unwrap_or_else(|| v.clone())
             })
             .collect();
-        data_vars = self
-            .dependent_read_planner
-            .resolve_addresses(&resolved_vars);
+        data_vars = resolve_dependent_addresses(&resolved_vars, &self.pointer_runtime);
 
         // Stage 2: Read data variables (with resolved addresses)
         let read_results = self.probe.read_variables(&data_vars);

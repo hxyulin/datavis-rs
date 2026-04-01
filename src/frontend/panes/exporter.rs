@@ -57,7 +57,7 @@ pub fn render(
     ui: &mut Ui,
 ) -> Vec<AppAction> {
     let mut actions = Vec::new();
-    let exporter_node_id = shared.topics.exporter_node_id;
+    let exporter_node_id = shared.state.topics.exporter_node_id;
 
     ui.heading("Data Exporter");
     ui.separator();
@@ -74,9 +74,9 @@ pub fn render(
 
 fn render_status(shared: &SharedState<'_>, ui: &mut Ui) {
     ui.horizontal(|ui| {
-        if shared.topics.exporter_active {
+        if shared.state.topics.exporter_active {
             ui.colored_label(egui::Color32::from_rgb(100, 255, 100), "● Active");
-            ui.label(format!("{} rows written", shared.topics.exporter_rows_written));
+            ui.label(format!("{} rows written", shared.state.topics.exporter_rows_written));
         } else {
             ui.label("Inactive");
         }
@@ -124,7 +124,7 @@ fn render_controls(
 
     // Start/Stop
     ui.horizontal(|ui| {
-        if shared.topics.exporter_active {
+        if shared.state.topics.exporter_active {
             if ui.button("Stop Export").clicked() {
                 actions.push(AppAction::NodeConfig {
                     node_id: exporter_node_id,

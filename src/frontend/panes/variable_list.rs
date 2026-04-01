@@ -96,7 +96,7 @@ pub fn render(
     });
     ui.separator();
 
-    if shared.config.variables.is_empty() {
+    if shared.state.config.variables.is_empty() {
         ui.vertical_centered(|ui| {
             ui.add_space(50.0);
             ui.label("No variables selected yet.");
@@ -106,7 +106,7 @@ pub fn render(
         let advanced_mode = state.advanced_mode;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            let variables: Vec<_> = shared.config.variables.values().cloned().collect();
+            let variables: Vec<_> = shared.state.config.variables.values().cloned().collect();
 
             // Render root variables recursively
             let roots: Vec<&Variable> = variables.iter().filter(|v| v.is_root()).collect();
@@ -134,59 +134,46 @@ pub fn render(
             }
         }
 
-        // Handle parent enable/disable propagation to children
+        // Handle parent enable/disable propagation to entire subtree
         if let Some((parent_id, enabled)) = deferred.parent_toggle_enabled {
-            if let Some(var) = shared.config.find_variable_mut(parent_id) {
-                var.enabled = enabled;
-                actions.push(AppAction::UpdateVariable(var.clone()));
-            }
-            let child_ids: Vec<u32> = shared
-                .config
-                .variables
-                .values()
-                .filter(|v| v.parent_id == Some(parent_id))
-                .map(|v| v.id)
-                .collect();
-            for child_id in child_ids {
-                if let Some(var) = shared.config.find_variable_mut(child_id) {
-                    var.enabled = enabled;
-                    actions.push(AppAction::UpdateVariable(var.clone()));
-                }
-            }
+            actions.push(AppAction::ToggleTreeEnabled {
+                root_id: parent_id,
+                enabled,
+            });
         }
     }
 
     // Handle deferred actions
     if let Some((id, enabled)) = deferred.var_toggle_enabled {
-        if let Some(var) = shared.config.find_variable_mut(id) {
+        if let Some(var) = shared.state.config.find_variable_mut(id) {
             var.enabled = enabled;
             actions.push(AppAction::UpdateVariable(var.clone()));
         }
     }
 
     if let Some((id, show)) = deferred.var_toggle_graph {
-        if let Some(var) = shared.config.find_variable_mut(id) {
+        if let Some(var) = shared.state.config.find_variable_mut(id) {
             var.show_in_graph = show;
         }
-        if let Some(data) = shared.topics.variable_data.get_mut(&id) {
+        if let Some(data) = shared.state.topics.variable_data.get_mut(&id) {
             data.variable.show_in_graph = show;
         }
     }
 
     if let Some(id) = deferred.var_cycle_plot_style {
-        if let Some(var) = shared.config.find_variable_mut(id) {
+        if let Some(var) = shared.state.config.find_variable_mut(id) {
             var.plot_style = var.plot_style.next();
         }
-        if let Some(data) = shared.topics.variable_data.get_mut(&id) {
+        if let Some(data) = shared.state.topics.variable_data.get_mut(&id) {
             data.variable.plot_style = data.variable.plot_style.next();
         }
     }
 
     if let Some((id, color)) = deferred.var_update_color {
-        if let Some(var) = shared.config.find_variable_mut(id) {
+        if let Some(var) = shared.state.config.find_variable_mut(id) {
             var.color = color;
         }
-        if let Some(data) = shared.topics.variable_data.get_mut(&id) {
+        if let Some(data) = shared.state.topics.variable_data.get_mut(&id) {
             data.variable.color = color;
         }
     }
@@ -197,7 +184,7 @@ pub fn render(
     }
 
     if let Some(id) = deferred.var_to_open_detail {
-        if let Some(var) = shared.config.find_variable(id) {
+        if let Some(var) = shared.state.config.find_variable(id) {
             state.variable_detail_state =
                 VariableDetailState::for_variable(id, &var.name, &var.unit, var.color);
             state.variable_detail_open = true;
@@ -292,7 +279,11 @@ fn render_parent_header(
             ui.painter().rect_filled(rect, 3.0, var_color);
 
             // Expand/collapse toggle
-            let icon = if is_collapsed { ">" } else { "v" };
+            let icon = if is_collapsed {
+                crate::frontend::icons::TREE_COLLAPSED
+            } else {
+                crate::frontend::icons::TREE_EXPANDED
+            };
             if ui.small_button(icon).clicked() {
                 deferred.toggle_parent = Some(var.id);
             }
@@ -395,25 +386,26 @@ fn render_variable_card_simple(
                 }
 
                 // Display pointer state if this is a pointer variable
-                if let Some(ptr_meta) = &var.pointer_metadata {
-                    match ptr_meta.pointer_state {
-                        PointerState::Null => {
+                if var.pointer_metadata.is_some() {
+                    let state = shared.state.topics.pointer_states.get(&var.id);
+                    match state {
+                        Some(PointerState::Null) => {
                             ui.colored_label(Color32::YELLOW, "NULL");
                         }
-                        PointerState::Invalid(addr) => {
+                        Some(PointerState::Invalid(addr)) => {
                             ui.colored_label(Color32::RED, format!("INVALID: 0x{:08X}", addr));
                         }
-                        PointerState::ReadError => {
+                        Some(PointerState::ReadError) => {
                             ui.colored_label(Color32::RED, "READ ERROR");
                         }
-                        PointerState::Valid(addr) => {
+                        Some(PointerState::Valid(addr)) => {
                             ui.label(format!("→ 0x{:08X}", addr));
                         }
-                        PointerState::Unread => {
+                        Some(PointerState::Unread) | None => {
                             ui.colored_label(Color32::GRAY, "pending...");
                         }
                     }
-                } else if let Some(data) = shared.topics.variable_data.get(&var.id) {
+                } else if let Some(data) = shared.state.topics.variable_data.get(&var.id) {
                     if let Some(point) = data.last() {
                         let value_text = if var.unit.is_empty() {
                             format!("{:.3}", point.converted_value)
@@ -540,29 +532,30 @@ fn render_variable_card_advanced(
                 ui.add_space(8.0);
 
                 // Display pointer state if this is a pointer variable
-                if let Some(ptr_meta) = &var.pointer_metadata {
-                    match ptr_meta.pointer_state {
-                        PointerState::Null => {
+                if var.pointer_metadata.is_some() {
+                    let state = shared.state.topics.pointer_states.get(&var.id);
+                    match state {
+                        Some(PointerState::Null) => {
                             ui.colored_label(Color32::YELLOW, "NULL");
                         }
-                        PointerState::Invalid(addr) => {
+                        Some(PointerState::Invalid(addr)) => {
                             ui.colored_label(Color32::RED, format!("INVALID: 0x{:08X}", addr));
                         }
-                        PointerState::ReadError => {
+                        Some(PointerState::ReadError) => {
                             ui.colored_label(Color32::RED, "READ ERROR");
                         }
-                        PointerState::Valid(addr) => {
+                        Some(PointerState::Valid(addr)) => {
                             ui.label(
                                 egui::RichText::new(format!("→ 0x{:08X}", addr))
                                     .monospace()
                                     .size(14.0),
                             );
                         }
-                        PointerState::Unread => {
+                        Some(PointerState::Unread) | None => {
                             ui.colored_label(Color32::GRAY, "pending...");
                         }
                     }
-                } else if let Some(data) = shared.topics.variable_data.get(&var.id) {
+                } else if let Some(data) = shared.state.topics.variable_data.get(&var.id) {
                     if let Some(point) = data.last() {
                         let value_text = if var.unit.is_empty() {
                             format!("{:.3}", point.converted_value)
@@ -572,7 +565,7 @@ fn render_variable_card_advanced(
 
                         let is_writable = var.is_writable();
                         let is_connected =
-                            shared.topics.connection_status == ConnectionStatus::Connected;
+                            shared.state.topics.connection_status == ConnectionStatus::Connected;
                         let can_edit = is_writable && is_connected;
 
                         let value_response = ui.add(
@@ -611,7 +604,7 @@ fn render_variable_card_advanced(
         ui.horizontal(|ui| {
             ui.add_space(indent + 32.0);
 
-            let type_addr = format!("{} @ 0x{:08X}", var.var_type, var.address);
+            let type_addr = format!("{} @ {}", var.var_type, var.address());
             ui.label(
                 egui::RichText::new(type_addr)
                     .small()
@@ -740,7 +733,7 @@ pub fn render_dialogs(
     if state.converter_editor_open {
         let var_id = state.converter_editor_state.var_id;
         if let Some(var_id) = var_id {
-            let var_name = shared
+            let var_name = shared.state
                 .config
                 .find_variable(var_id)
                 .map(|v| v.name.clone())
@@ -760,7 +753,7 @@ pub fn render_dialogs(
             ) {
                 match action {
                     ConverterEditorAction::Save { var_id, script } => {
-                        if let Some(var) = shared.config.variables.get_mut(&var_id) {
+                        if let Some(var) = shared.state.config.variables.get_mut(&var_id) {
                             var.converter_script = script;
                             actions.push(AppAction::UpdateVariable(var.clone()));
                         }
@@ -774,7 +767,7 @@ pub fn render_dialogs(
     if state.value_editor_open {
         let var_id = state.value_editor_state.var_id;
         if let Some(var_id) = var_id {
-            let (var_name, var_type, is_writable) = match shared.config.find_variable(var_id) {
+            let (var_name, var_type, is_writable) = match shared.state.config.find_variable(var_id) {
                 Some(var) => (var.name.clone(), var.var_type, var.is_writable()),
                 None => {
                     state.value_editor_open = false;
@@ -782,7 +775,7 @@ pub fn render_dialogs(
                 }
             };
 
-            let current_value = shared
+            let current_value = shared.state
                 .topics
                 .variable_data
                 .get(&var_id)
@@ -793,7 +786,7 @@ pub fn render_dialogs(
                 var_name: &var_name,
                 var_type,
                 is_writable,
-                connection_status: shared.topics.connection_status,
+                connection_status: shared.state.topics.connection_status,
                 current_value,
             };
 
@@ -817,16 +810,16 @@ pub fn render_dialogs(
         let var_id = state.variable_detail_state.var_id;
         if let Some(var_id) = var_id {
             let (address, var_type, enabled, show_in_graph, current_value) =
-                match shared.config.find_variable(var_id) {
+                match shared.state.config.find_variable(var_id) {
                     Some(var) => {
-                        let value = shared
+                        let value = shared.state
                             .topics
                             .variable_data
                             .get(&var_id)
                             .and_then(|d| d.last())
                             .map(|p| p.converted_value);
                         (
-                            var.address,
+                            var.address(),
                             var.var_type.to_string(),
                             var.enabled,
                             var.show_in_graph,
@@ -860,12 +853,12 @@ pub fn render_dialogs(
                         unit,
                         color,
                     } => {
-                        if let Some(var) = shared.config.find_variable_mut(var_id) {
+                        if let Some(var) = shared.state.config.find_variable_mut(var_id) {
                             var.name = name.clone();
                             var.unit = unit.clone();
                             var.color = color;
                         }
-                        if let Some(data) = shared.topics.variable_data.get_mut(&var_id) {
+                        if let Some(data) = shared.state.topics.variable_data.get_mut(&var_id) {
                             data.variable.name = name;
                             data.variable.unit = unit;
                             data.variable.color = color;

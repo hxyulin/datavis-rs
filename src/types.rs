@@ -191,8 +191,8 @@ impl PlotStyle {
         match self {
             PlotStyle::Line => "─",
             PlotStyle::Scatter => "•",
-            PlotStyle::Step => "⌐",
-            PlotStyle::Area => "▄",
+            PlotStyle::Step => "┐",
+            PlotStyle::Area => "▤",
         }
     }
 
@@ -255,16 +255,31 @@ impl DataPoint {
     }
 }
 
-/// Metadata for pointer variables to track dereferencing state
+/// Describes how a variable's memory address is determined.
+/// Used by the UI to display the correct address representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VariableAddress {
+    /// Address is known at compile time from debug info
+    Static(u64),
+    /// Address is resolved at runtime by dereferencing a pointer chain.
+    /// Contains the currently cached address if available.
+    Dynamic(Option<u64>),
+}
+
+impl std::fmt::Display for VariableAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VariableAddress::Static(addr) => write!(f, "0x{:08X}", addr),
+            VariableAddress::Dynamic(Some(addr)) => write!(f, "0x{:08X} <dynamic>", addr),
+            VariableAddress::Dynamic(None) => write!(f, "<dynamic>"),
+        }
+    }
+}
+
+/// Metadata for pointer variables — config-only, serializable.
+/// Runtime state (cached address, pointer state, etc.) lives in `PointerRuntime`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PointerMetadata {
-    /// Last read pointer value (address it points to)
-    pub cached_address: Option<u64>,
-
-    /// Timestamp of last pointer read (not serialized)
-    #[serde(skip)]
-    pub last_pointer_read: Option<Instant>,
-
     /// How often to re-read pointer value (Hz), separate from data poll rate
     pub pointer_poll_rate_hz: u32,
 
@@ -273,9 +288,16 @@ pub struct PointerMetadata {
 
     /// Offset from dereferenced pointer (for struct members)
     pub offset_from_pointer: u64,
+}
 
-    /// Pointer validity state
-    pub pointer_state: PointerState,
+impl Default for PointerMetadata {
+    fn default() -> Self {
+        Self {
+            pointer_poll_rate_hz: 0,
+            pointer_parent_id: None,
+            offset_from_pointer: 0,
+        }
+    }
 }
 
 /// State of a pointer value
@@ -291,6 +313,61 @@ pub enum PointerState {
     Invalid(u64),
     /// Failed to read pointer
     ReadError,
+}
+
+impl Default for PointerState {
+    fn default() -> Self {
+        PointerState::Unread
+    }
+}
+
+/// Runtime state for pointer variables -- transient, not serialized.
+#[derive(Debug, Clone, Default)]
+pub struct PointerRuntime {
+    pub cached_address: Option<u64>,
+    pub last_pointer_read: Option<Instant>,
+    pub pointer_state: PointerState,
+}
+
+impl PointerRuntime {
+    /// Update state from a raw read value (interpreted as address).
+    pub fn update_from_read(&mut self, value: f64) {
+        let addr = value as u64;
+        self.cached_address = Some(addr);
+        self.pointer_state = if addr == 0 {
+            PointerState::Null
+        } else if !(0x1000..=0xFFFF_FFFF_0000_0000).contains(&addr) {
+            PointerState::Invalid(addr)
+        } else if addr % 4 != 0 {
+            PointerState::Invalid(addr)
+        } else {
+            PointerState::Valid(addr)
+        };
+    }
+
+    /// Mark pointer read as failed.
+    pub fn mark_error(&mut self) {
+        self.pointer_state = PointerState::ReadError;
+    }
+
+    /// Resolve a dependent address using cached pointer value + offset.
+    pub fn resolve_address(&self, offset: u64) -> Option<u64> {
+        self.cached_address.map(|a| a.wrapping_add(offset))
+    }
+
+    /// Check if pointer needs a refresh read based on poll rate.
+    pub fn needs_refresh(&self, poll_rate_hz: u32) -> bool {
+        if poll_rate_hz == 0 {
+            return false;
+        }
+        match self.last_pointer_read {
+            None => true,
+            Some(last) => {
+                let interval = std::time::Duration::from_secs_f64(1.0 / poll_rate_hz as f64);
+                last.elapsed() >= interval
+            }
+        }
+    }
 }
 
 /// Configuration for a variable to observe
@@ -409,6 +486,31 @@ impl Variable {
     pub fn with_plot_style(mut self, style: PlotStyle) -> Self {
         self.plot_style = style;
         self
+    }
+
+    /// Get the semantic address of this variable.
+    /// Returns `Static` for compile-time known addresses,
+    /// `Dynamic` for pointer-dependent variables resolved at runtime.
+    pub fn address(&self) -> VariableAddress {
+        match &self.pointer_metadata {
+            Some(meta) if meta.pointer_parent_id.is_some() => {
+                VariableAddress::Dynamic(None) // Runtime resolution needed
+            }
+            _ => VariableAddress::Static(self.address),
+        }
+    }
+
+    /// Get address with runtime pointer resolution.
+    pub fn address_with_runtime(&self, runtime: &std::collections::HashMap<u32, PointerRuntime>) -> VariableAddress {
+        match &self.pointer_metadata {
+            Some(meta) if meta.pointer_parent_id.is_some() => {
+                let resolved = meta.pointer_parent_id.and_then(|pid| {
+                    runtime.get(&pid).and_then(|rt| rt.resolve_address(meta.offset_from_pointer))
+                });
+                VariableAddress::Dynamic(resolved)
+            }
+            _ => VariableAddress::Static(self.address),
+        }
     }
 
     /// Set an auto-generated color based on the variable ID
@@ -1004,5 +1106,59 @@ mod tests {
         let var_raw_converter =
             Variable::new("test4", 0x2000_000C, VariableType::Raw(4)).with_converter("value");
         assert!(!var_raw_converter.is_writable());
+    }
+
+    #[test]
+    fn test_pointer_runtime_update_valid() {
+        let mut rt = PointerRuntime::default();
+        rt.update_from_read(0x2000_0100 as f64);
+        assert_eq!(rt.pointer_state, PointerState::Valid(0x2000_0100));
+        assert_eq!(rt.cached_address, Some(0x2000_0100));
+    }
+
+    #[test]
+    fn test_pointer_runtime_update_null() {
+        let mut rt = PointerRuntime::default();
+        rt.update_from_read(0.0);
+        assert_eq!(rt.pointer_state, PointerState::Null);
+    }
+
+    #[test]
+    fn test_pointer_runtime_update_unaligned() {
+        let mut rt = PointerRuntime::default();
+        rt.update_from_read(0x2000_0003 as f64);
+        assert_eq!(rt.pointer_state, PointerState::Invalid(0x2000_0003));
+    }
+
+    #[test]
+    fn test_pointer_runtime_resolve() {
+        let mut rt = PointerRuntime::default();
+        rt.cached_address = Some(0x3000);
+        assert_eq!(rt.resolve_address(8), Some(0x3008));
+    }
+
+    #[test]
+    fn test_pointer_runtime_resolve_none() {
+        let rt = PointerRuntime::default();
+        assert_eq!(rt.resolve_address(8), None);
+    }
+
+    #[test]
+    fn test_pointer_runtime_needs_refresh_never_read() {
+        let rt = PointerRuntime::default();
+        assert!(rt.needs_refresh(1));
+    }
+
+    #[test]
+    fn test_pointer_runtime_needs_refresh_zero_rate() {
+        let rt = PointerRuntime::default();
+        assert!(!rt.needs_refresh(0));
+    }
+
+    #[test]
+    fn test_pointer_runtime_mark_error() {
+        let mut rt = PointerRuntime::default();
+        rt.mark_error();
+        assert_eq!(rt.pointer_state, PointerState::ReadError);
     }
 }

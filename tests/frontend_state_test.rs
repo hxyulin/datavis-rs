@@ -6,7 +6,7 @@ mod common;
 
 use datavis_rs::config::settings::RuntimeSettings;
 use datavis_rs::config::{AppConfig, AppState, DataPersistenceConfig};
-use datavis_rs::frontend::state::SharedState;
+use datavis_rs::frontend::state::{SharedContext, SharedMut, SharedState};
 use datavis_rs::frontend::topics::Topics;
 use datavis_rs::pipeline::bridge::PipelineBridge;
 use std::time::{Duration, Instant};
@@ -22,18 +22,22 @@ fn create_test_shared_state<'a>(
     last_error: &'a mut Option<String>,
 ) -> SharedState<'a> {
     SharedState {
-        frontend: bridge,
-        config,
-        settings,
-        app_state,
-        elf_info: None,
-        elf_symbols: &[],
-        elf_file_path: None,
-        persistence_config,
-        last_error,
-        display_time: 0.0,
-        topics,
-        current_pane_id: None,
+        ctx: SharedContext {
+            frontend: bridge,
+            elf_info: None,
+            elf_symbols: &[],
+            elf_file_path: None,
+            display_time: 0.0,
+            current_pane_id: None,
+        },
+        state: SharedMut {
+            config,
+            settings,
+            app_state,
+            persistence_config,
+            last_error,
+            topics,
+        },
     }
 }
 

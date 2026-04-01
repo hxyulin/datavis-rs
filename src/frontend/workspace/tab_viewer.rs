@@ -11,7 +11,7 @@ use crate::backend::{ElfInfo, ElfSymbol};
 use crate::config::settings::RuntimeSettings;
 use crate::config::{AppConfig, AppState, DataPersistenceConfig};
 use crate::frontend::pane_trait::Pane;
-use crate::frontend::state::{AppAction, SharedState};
+use crate::frontend::state::{AppAction, SharedContext, SharedMut, SharedState};
 use crate::frontend::topics::Topics;
 use crate::pipeline::bridge::PipelineBridge;
 
@@ -60,18 +60,22 @@ impl egui_dock::TabViewer for WorkspaceTabViewer<'_> {
 
         // Construct SharedState from individual borrows
         let mut shared = SharedState {
-            frontend: self.frontend,
-            config: self.config,
-            settings: self.settings,
-            app_state: self.app_state,
-            elf_info: self.elf_info,
-            elf_symbols: self.elf_symbols,
-            elf_file_path: self.elf_file_path,
-            persistence_config: self.persistence_config,
-            last_error: self.last_error,
-            display_time: self.display_time,
-            topics: self.topics,
-            current_pane_id: Some(*tab),
+            ctx: SharedContext {
+                frontend: self.frontend,
+                elf_info: self.elf_info,
+                elf_symbols: self.elf_symbols,
+                elf_file_path: self.elf_file_path,
+                display_time: self.display_time,
+                current_pane_id: Some(*tab),
+            },
+            state: SharedMut {
+                config: self.config,
+                settings: self.settings,
+                app_state: self.app_state,
+                persistence_config: self.persistence_config,
+                last_error: self.last_error,
+                topics: self.topics,
+            },
         };
 
         // Polymorphic dispatch via Pane trait

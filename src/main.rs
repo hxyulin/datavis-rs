@@ -53,7 +53,46 @@ fn main() -> eframe::Result<()> {
             .init();
     };
 
-    tracing::info!("Starting DataVis-RS");
+    tracing::info!("Starting DataVis-RS v{}", env!("CARGO_PKG_VERSION"));
+
+    // Log available backends
+    tracing::info!("Available backends: probe-rs, OpenOCD");
+    #[cfg(feature = "mock-probe")]
+    tracing::info!("Mock probe: enabled");
+    #[cfg(not(feature = "mock-probe"))]
+    tracing::info!("Mock probe: disabled");
+
+    // Check OpenOCD availability
+    if std::process::Command::new("openocd")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        tracing::info!("OpenOCD: found on system PATH");
+    } else {
+        // Check bundled location
+        let bundled = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
+            .map(|dir| {
+                #[cfg(target_os = "macos")]
+                {
+                    dir.join("../Resources/openocd/bin/openocd").exists()
+                        || dir.join("openocd/bin/openocd").exists()
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    dir.join("openocd/bin/openocd").exists()
+                }
+            })
+            .unwrap_or(false);
+
+        if bundled {
+            tracing::info!("OpenOCD: using bundled binary");
+        } else {
+            tracing::warn!("OpenOCD: not found (install or configure path in Settings)");
+        }
+    }
 
     // Load application state (recent projects, preferences, etc.)
     let mut app_state = AppState::load_or_default();

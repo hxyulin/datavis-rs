@@ -7,7 +7,7 @@ use crate::config::ProbeConfig;
 use crate::pipeline::id::{NodeId, VarId};
 use crate::pipeline::packet::ConfigValue;
 use crate::session::types::{SessionRecording, SessionState};
-use crate::types::{CollectionStats, ConnectionStatus, Variable, VariableType};
+use crate::types::{CollectionStats, ConnectionStatus, PointerState, Variable, VariableType};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::time::Duration;
 
@@ -66,6 +66,9 @@ pub enum SinkMessage {
 
     /// Snapshot of the variable tree for UI display.
     VariableTreeSnapshot(Vec<VariableNodeSnapshot>),
+
+    /// Pointer state updates for UI display.
+    PointerStates(std::collections::HashMap<u32, PointerState>),
 
     /// Pipeline is shutting down.
     Shutdown,
@@ -262,6 +265,7 @@ impl PipelineBridge {
             }
             BackendMessage::VariableList(vars) => Some(SinkMessage::VariableList(vars)),
             BackendMessage::ProbeList(probes) => Some(SinkMessage::ProbeList(probes)),
+            BackendMessage::PointerStates(states) => Some(SinkMessage::PointerStates(states)),
             BackendMessage::Shutdown => None,
         }
     }

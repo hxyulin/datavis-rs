@@ -97,33 +97,37 @@ jobs:
       - name: Build
         run: cargo build --release --target aarch64-apple-darwin
 
-      - name: Package
-        run: cargo packager --release --formats dmg
-
       - name: Download OpenOCD
         run: |
           curl -sL "https://github.com/xpack-dev-tools/openocd-xpack/releases/download/v${OPENOCD_VERSION}/xpack-openocd-${OPENOCD_VERSION}-darwin-arm64.tar.gz" | tar xz
           mv "xpack-openocd-${OPENOCD_VERSION}" openocd-bundle
 
-      - name: Bundle OpenOCD into app
+      - name: Package
+        run: cargo packager --release --formats dmg --target aarch64-apple-darwin
+
+      - name: Bundle OpenOCD into DMG
         run: |
-          APP_PATH=$(find target/release -name "*.app" -type d | head -1)
-          if [ -n "$APP_PATH" ]; then
-            mkdir -p "$APP_PATH/Contents/Resources/openocd/bin"
-            cp openocd-bundle/bin/openocd "$APP_PATH/Contents/Resources/openocd/bin/"
-            cp -r openocd-bundle/openocd/scripts "$APP_PATH/Contents/Resources/openocd/scripts"
-            cp -r openocd-bundle/libexec "$APP_PATH/Contents/Resources/openocd/libexec"
-            chmod +x "$APP_PATH/Contents/Resources/openocd/bin/openocd"
-            # Re-create DMG with bundled OpenOCD
-            rm -f target/release/*.dmg
-            hdiutil create -volname "Data Visualizer" -srcfolder "$APP_PATH" -ov -format UDZO "target/release/Data Visualizer_aarch64.dmg"
+          # Find the .app — cargo-packager outputs to target/<triple>/release/bundle/macos/
+          APP_PATH=$(find target -name "*.app" -type d | head -1)
+          echo "Found app at: $APP_PATH"
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: Could not find .app bundle"
+            exit 1
           fi
+          # Inject OpenOCD into the .app bundle
+          mkdir -p "$APP_PATH/Contents/Resources/openocd/bin"
+          cp openocd-bundle/bin/openocd "$APP_PATH/Contents/Resources/openocd/bin/"
+          cp -r openocd-bundle/openocd/scripts "$APP_PATH/Contents/Resources/openocd/scripts"
+          cp -r openocd-bundle/libexec "$APP_PATH/Contents/Resources/openocd/libexec"
+          chmod +x "$APP_PATH/Contents/Resources/openocd/bin/openocd"
+          # Re-create DMG with bundled OpenOCD
+          hdiutil create -volname "Data Visualizer" -srcfolder "$APP_PATH" -ov -format UDZO "Data Visualizer_aarch64.dmg"
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
           name: macos-aarch64-dmg
-          path: target/release/*.dmg
+          path: "Data Visualizer_aarch64.dmg"
 
       - name: Create portable archive with OpenOCD
         run: |
@@ -158,33 +162,37 @@ jobs:
       - name: Build
         run: cargo build --release --target x86_64-apple-darwin
 
-      - name: Package
-        run: cargo packager --release --formats dmg --target x86_64-apple-darwin
-
       - name: Download OpenOCD
         run: |
           curl -sL "https://github.com/xpack-dev-tools/openocd-xpack/releases/download/v${OPENOCD_VERSION}/xpack-openocd-${OPENOCD_VERSION}-darwin-x64.tar.gz" | tar xz
           mv "xpack-openocd-${OPENOCD_VERSION}" openocd-bundle
 
-      - name: Bundle OpenOCD into app
+      - name: Package
+        run: cargo packager --release --formats dmg --target x86_64-apple-darwin
+
+      - name: Bundle OpenOCD into DMG
         run: |
-          APP_PATH=$(find target/release -name "*.app" -type d | head -1)
-          if [ -n "$APP_PATH" ]; then
-            mkdir -p "$APP_PATH/Contents/Resources/openocd/bin"
-            cp openocd-bundle/bin/openocd "$APP_PATH/Contents/Resources/openocd/bin/"
-            cp -r openocd-bundle/openocd/scripts "$APP_PATH/Contents/Resources/openocd/scripts"
-            cp -r openocd-bundle/libexec "$APP_PATH/Contents/Resources/openocd/libexec"
-            chmod +x "$APP_PATH/Contents/Resources/openocd/bin/openocd"
-            # Re-create DMG with bundled OpenOCD
-            rm -f target/release/*.dmg
-            hdiutil create -volname "Data Visualizer" -srcfolder "$APP_PATH" -ov -format UDZO "target/release/Data Visualizer_x86_64.dmg"
+          # Find the .app — cargo-packager outputs to target/<triple>/release/bundle/macos/
+          APP_PATH=$(find target -name "*.app" -type d | head -1)
+          echo "Found app at: $APP_PATH"
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: Could not find .app bundle"
+            exit 1
           fi
+          # Inject OpenOCD into the .app bundle
+          mkdir -p "$APP_PATH/Contents/Resources/openocd/bin"
+          cp openocd-bundle/bin/openocd "$APP_PATH/Contents/Resources/openocd/bin/"
+          cp -r openocd-bundle/openocd/scripts "$APP_PATH/Contents/Resources/openocd/scripts"
+          cp -r openocd-bundle/libexec "$APP_PATH/Contents/Resources/openocd/libexec"
+          chmod +x "$APP_PATH/Contents/Resources/openocd/bin/openocd"
+          # Re-create DMG with bundled OpenOCD
+          hdiutil create -volname "Data Visualizer" -srcfolder "$APP_PATH" -ov -format UDZO "Data Visualizer_x86_64.dmg"
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
           name: macos-x86_64-dmg
-          path: target/release/*.dmg
+          path: "Data Visualizer_x86_64.dmg"
 
       - name: Create portable archive with OpenOCD
         run: |

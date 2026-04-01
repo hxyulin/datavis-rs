@@ -52,6 +52,8 @@ pub mod converter_engine;
 pub mod dwarf_parser;
 pub mod elf_parser;
 #[cfg(feature = "mock-probe")]
+pub mod mock_fault;
+#[cfg(feature = "mock-probe")]
 pub mod mock_probe;
 pub mod openocd;
 pub mod probe;
@@ -74,6 +76,8 @@ pub use type_table::{
 };
 
 #[cfg(feature = "mock-probe")]
+pub use mock_fault::*;
+#[cfg(feature = "mock-probe")]
 pub use mock_probe::{MockDataPattern, MockProbeBackend, MockProbeInfo, MockVariableConfig};
 pub use openocd::OpenOcdProbe;
 pub use probe::{ProbeBackend, ProbeInfo};
@@ -82,7 +86,7 @@ pub use read_manager::{ReadManager, ReadRegion, DEFAULT_GAP_THRESHOLD};
 pub use worker::{BackendWorker, SwdCommand, SwdResponse};
 
 use crate::config::AppConfig;
-use crate::types::{CollectionStats, ConnectionStatus, Variable};
+use crate::types::{CollectionStats, ConnectionStatus, PointerState, Variable};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -273,6 +277,8 @@ pub enum BackendMessage {
     VariableList(Vec<Variable>),
     /// Probe list update (response to RefreshProbes)
     ProbeList(Vec<DetectedProbe>),
+    /// Pointer state updates for UI display
+    PointerStates(std::collections::HashMap<u32, PointerState>),
     /// Backend is shutting down
     Shutdown,
 }

@@ -101,14 +101,14 @@ fn render_stale_warning(ui: &mut Ui, shared: &SharedState<'_>, pane_id: Option<u
 
     // Calculate stale duration
     let stale_duration = if let Some(pid) = pane_id {
-        shared
+        shared.state
             .topics
             .pane_data_freshness
             .get(&pid)
             .map(|t| Instant::now().duration_since(*t))
             .unwrap_or_default()
     } else {
-        shared
+        shared.state
             .topics
             .global_data_freshness
             .map(|t| Instant::now().duration_since(t))
@@ -185,7 +185,7 @@ pub fn render_dialogs(
     if state.value_editor_open {
         let var_id = state.value_editor_state.var_id;
         if let Some(var_id) = var_id {
-            let (var_name, var_type, is_writable) = match shared.config.find_variable(var_id) {
+            let (var_name, var_type, is_writable) = match shared.state.config.find_variable(var_id) {
                 Some(var) => (var.name.clone(), var.var_type, var.is_writable()),
                 None => {
                     state.value_editor_open = false;
@@ -193,7 +193,7 @@ pub fn render_dialogs(
                 }
             };
 
-            let current_value = shared
+            let current_value = shared.state
                 .topics
                 .variable_data
                 .get(&var_id)
@@ -204,7 +204,7 @@ pub fn render_dialogs(
                 var_name: &var_name,
                 var_type,
                 is_writable,
-                connection_status: shared.topics.connection_status,
+                connection_status: shared.state.topics.connection_status,
                 current_value,
             };
 
@@ -226,9 +226,9 @@ pub fn render_dialogs(
     // Trigger config dialog
     if state.trigger_config_open {
         let dialog_ctx = TriggerConfigContext {
-            variables: &shared.config.variables,
-            is_armed: shared.settings.trigger.armed,
-            is_triggered: shared.settings.trigger.triggered,
+            variables: &shared.state.config.variables,
+            is_armed: shared.state.settings.trigger.armed,
+            is_triggered: shared.state.settings.trigger.triggered,
         };
 
         if let Some(action) = show_dialog::<TriggerConfigDialog>(
@@ -239,16 +239,16 @@ pub fn render_dialogs(
         ) {
             match action {
                 TriggerConfigAction::UpdateSettings(settings) => {
-                    shared.settings.trigger = settings;
+                    shared.state.settings.trigger = settings;
                 }
                 TriggerConfigAction::Arm => {
-                    shared.settings.trigger.arm();
+                    shared.state.settings.trigger.arm();
                 }
                 TriggerConfigAction::Disarm => {
-                    shared.settings.trigger.disarm();
+                    shared.state.settings.trigger.disarm();
                 }
                 TriggerConfigAction::Reset => {
-                    shared.settings.trigger.reset();
+                    shared.state.settings.trigger.reset();
                 }
             }
         }
@@ -256,16 +256,16 @@ pub fn render_dialogs(
 
     // Export config dialog
     if state.export_config_open {
-        let total_samples: usize = shared
+        let total_samples: usize = shared.state
             .topics
             .variable_data
             .values()
             .map(|d| d.data_points.len())
             .sum();
-        let data_duration = shared.display_time;
+        let data_duration = shared.ctx.display_time;
 
         let dialog_ctx = ExportConfigContext {
-            variables: &shared.config.variables,
+            variables: &shared.state.config.variables,
             total_samples,
             data_duration,
             cursor_range: state.cursor.time_range(),
@@ -296,7 +296,7 @@ pub fn render_dialogs(
                         time_start,
                         time_end
                     );
-                    shared.settings.export = settings;
+                    shared.state.settings.export = settings;
                 }
                 ExportConfigAction::BrowseFile => {}
             }
@@ -328,8 +328,8 @@ fn render_toolbar_simple(
     actions: &mut Vec<AppAction>,
 ) {
     ui.horizontal(|ui| {
-        if shared.topics.connection_status == ConnectionStatus::Connected {
-            if shared.settings.collecting {
+        if shared.state.topics.connection_status == ConnectionStatus::Connected {
+            if shared.state.settings.collecting {
                 if ui.button("Stop").clicked() {
                     actions.push(AppAction::StopCollection);
                 }
@@ -349,7 +349,7 @@ fn render_toolbar_simple(
 
         ui.separator();
 
-        let actual_rate = shared.topics.stats.effective_sample_rate;
+        let actual_rate = shared.state.topics.stats.effective_sample_rate;
         let rate_color = if actual_rate > 0.0 {
             Color32::from_rgb(100, 255, 100)
         } else {
@@ -369,7 +369,7 @@ fn render_toolbar_simple(
                 (30.0, "30s"),
                 (60.0, "1m"),
             ];
-            let current = shared.settings.display_time_window;
+            let current = shared.state.settings.display_time_window;
             let label = SIMPLE_PRESETS
                 .iter()
                 .find(|&&(s, _)| (s - current).abs() < 0.01)
@@ -381,35 +381,35 @@ fn render_toolbar_simple(
                 .show_ui(ui, |ui| {
                     for &(secs, label) in SIMPLE_PRESETS {
                         if ui
-                            .selectable_value(&mut shared.settings.display_time_window, secs, label)
+                            .selectable_value(&mut shared.state.settings.display_time_window, secs, label)
                             .clicked()
                         {
-                            shared.settings.autoscale_x = true;
-                            shared.settings.follow_latest = true;
+                            shared.state.settings.autoscale_x = true;
+                            shared.state.settings.follow_latest = true;
                         }
                     }
                 });
         }
 
         if ui
-            .selectable_label(shared.settings.autoscale_y, "Auto Y")
+            .selectable_label(shared.state.settings.autoscale_y, "Auto Y")
             .on_hover_text("Auto-scale Y axis")
             .clicked()
         {
-            shared.settings.toggle_autoscale_y();
+            shared.state.settings.toggle_autoscale_y();
         }
 
         if ui.button("Reset View").clicked() {
-            shared.settings.autoscale_x = true;
-            shared.settings.autoscale_y = true;
-            shared.settings.follow_latest = true;
-            shared.settings.lock_x = false;
-            shared.settings.lock_y = false;
-            shared.settings.x_min = None;
-            shared.settings.x_max = None;
-            shared.settings.y_min = None;
-            shared.settings.y_max = None;
-            shared.settings.display_time_window = 10.0;
+            shared.state.settings.autoscale_x = true;
+            shared.state.settings.autoscale_y = true;
+            shared.state.settings.follow_latest = true;
+            shared.state.settings.lock_x = false;
+            shared.state.settings.lock_y = false;
+            shared.state.settings.x_min = None;
+            shared.state.settings.x_max = None;
+            shared.state.settings.y_min = None;
+            shared.state.settings.y_max = None;
+            shared.state.settings.display_time_window = 10.0;
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -426,8 +426,8 @@ fn render_toolbar_advanced(
 ) {
     // Row 1: Collection controls and stats
     ui.horizontal(|ui| {
-        if shared.topics.connection_status == ConnectionStatus::Connected {
-            if shared.settings.collecting {
+        if shared.state.topics.connection_status == ConnectionStatus::Connected {
+            if shared.state.settings.collecting {
                 if ui.button("Stop").clicked() {
                     actions.push(AppAction::StopCollection);
                 }
@@ -460,8 +460,8 @@ fn render_toolbar_advanced(
         ui.separator();
 
         // Stats
-        let target_rate = shared.config.collection.poll_rate_hz as f64;
-        let actual_rate = shared.topics.stats.effective_sample_rate;
+        let target_rate = shared.state.config.collection.poll_rate_hz as f64;
+        let actual_rate = shared.state.topics.stats.effective_sample_rate;
         let is_throttled = actual_rate > 0.0 && actual_rate < target_rate * 0.9;
         let rate_color = if is_throttled {
             Color32::from_rgb(255, 100, 100)
@@ -476,12 +476,12 @@ fn render_toolbar_advanced(
         if is_throttled {
             ui.colored_label(
                 Color32::from_rgb(255, 200, 100),
-                format!("(target: {} Hz)", shared.config.collection.poll_rate_hz),
+                format!("(target: {} Hz)", shared.state.config.collection.poll_rate_hz),
             );
         }
         ui.label(format!(
             "| Success: {:.1}%",
-            shared.topics.stats.success_rate()
+            shared.state.topics.stats.success_rate()
         ));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -517,100 +517,100 @@ fn render_toolbar_advanced(
         }
 
         egui::ComboBox::from_id_salt("time_period")
-            .selected_text(format_time_window(shared.settings.display_time_window))
+            .selected_text(format_time_window(shared.state.settings.display_time_window))
             .width(60.0)
             .show_ui(ui, |ui| {
                 for &(secs, label) in TIME_PRESETS {
                     if ui
-                        .selectable_value(&mut shared.settings.display_time_window, secs, label)
+                        .selectable_value(&mut shared.state.settings.display_time_window, secs, label)
                         .clicked()
                     {
-                        shared.settings.autoscale_x = true;
-                        shared.settings.follow_latest = true;
+                        shared.state.settings.autoscale_x = true;
+                        shared.state.settings.follow_latest = true;
                     }
                 }
             });
 
-        let autoscale_x_text = if shared.settings.autoscale_x {
+        let autoscale_x_text = if shared.state.settings.autoscale_x {
             "Auto"
         } else {
             "Manual"
         };
         if ui
-            .selectable_label(shared.settings.autoscale_x, autoscale_x_text)
+            .selectable_label(shared.state.settings.autoscale_x, autoscale_x_text)
             .clicked()
         {
-            shared.settings.toggle_autoscale_x();
+            shared.state.settings.toggle_autoscale_x();
         }
 
-        let lock_x_text = if shared.settings.lock_x {
+        let lock_x_text = if shared.state.settings.lock_x {
             "Locked"
         } else {
             "Unlocked"
         };
         if ui
-            .selectable_label(shared.settings.lock_x, lock_x_text)
+            .selectable_label(shared.state.settings.lock_x, lock_x_text)
             .clicked()
         {
-            shared.settings.toggle_lock_x();
+            shared.state.settings.toggle_lock_x();
         }
 
         ui.separator();
 
-        let max_window = shared.settings.max_time_window;
+        let max_window = shared.state.settings.max_time_window;
         if ui
             .add(
-                egui::Slider::new(&mut shared.settings.display_time_window, 0.5..=max_window)
+                egui::Slider::new(&mut shared.state.settings.display_time_window, 0.5..=max_window)
                     .suffix("s")
                     .logarithmic(true),
             )
             .changed()
         {
-            shared.settings.display_time_window =
-                shared.settings.display_time_window.clamp(0.1, max_window);
+            shared.state.settings.display_time_window =
+                shared.state.settings.display_time_window.clamp(0.1, max_window);
         }
 
         ui.separator();
 
         ui.label("Y-Axis:");
 
-        let autoscale_y_text = if shared.settings.autoscale_y {
+        let autoscale_y_text = if shared.state.settings.autoscale_y {
             "Auto"
         } else {
             "Manual"
         };
         if ui
-            .selectable_label(shared.settings.autoscale_y, autoscale_y_text)
+            .selectable_label(shared.state.settings.autoscale_y, autoscale_y_text)
             .clicked()
         {
-            shared.settings.toggle_autoscale_y();
+            shared.state.settings.toggle_autoscale_y();
         }
 
-        let lock_y_text = if shared.settings.lock_y {
+        let lock_y_text = if shared.state.settings.lock_y {
             "Locked"
         } else {
             "Unlocked"
         };
         if ui
-            .selectable_label(shared.settings.lock_y, lock_y_text)
+            .selectable_label(shared.state.settings.lock_y, lock_y_text)
             .clicked()
         {
-            shared.settings.toggle_lock_y();
+            shared.state.settings.toggle_lock_y();
         }
 
         ui.separator();
 
         if ui.button("Reset View").clicked() {
-            shared.settings.autoscale_x = true;
-            shared.settings.autoscale_y = true;
-            shared.settings.follow_latest = true;
-            shared.settings.lock_x = false;
-            shared.settings.lock_y = false;
-            shared.settings.x_min = None;
-            shared.settings.x_max = None;
-            shared.settings.y_min = None;
-            shared.settings.y_max = None;
-            shared.settings.display_time_window = 10.0;
+            shared.state.settings.autoscale_x = true;
+            shared.state.settings.autoscale_y = true;
+            shared.state.settings.follow_latest = true;
+            shared.state.settings.lock_x = false;
+            shared.state.settings.lock_y = false;
+            shared.state.settings.x_min = None;
+            shared.state.settings.x_max = None;
+            shared.state.settings.y_min = None;
+            shared.state.settings.y_max = None;
+            shared.state.settings.display_time_window = 10.0;
             state.secondary_autoscale_y = true;
             state.secondary_y_min = None;
             state.secondary_y_max = None;
@@ -686,9 +686,9 @@ fn render_toolbar_advanced(
 
         // Trigger controls
         ui.label("Trigger:");
-        let trigger_enabled = shared.settings.trigger.enabled;
-        let trigger_armed = shared.settings.trigger.armed;
-        let trigger_triggered = shared.settings.trigger.triggered;
+        let trigger_enabled = shared.state.settings.trigger.enabled;
+        let trigger_armed = shared.state.settings.trigger.armed;
+        let trigger_triggered = shared.state.settings.trigger.triggered;
 
         let (status_text, status_color) = if trigger_triggered {
             ("TRIGGERED", Color32::from_rgb(100, 255, 100))
@@ -704,19 +704,19 @@ fn render_toolbar_advanced(
         if trigger_enabled {
             if trigger_armed {
                 if ui.button("Disarm").clicked() {
-                    shared.settings.trigger.disarm();
+                    shared.state.settings.trigger.disarm();
                 }
             } else if ui.button("Arm").clicked() {
-                shared.settings.trigger.arm();
+                shared.state.settings.trigger.arm();
             }
             if trigger_triggered && ui.button("Reset").clicked() {
-                shared.settings.trigger.reset();
+                shared.state.settings.trigger.reset();
             }
         }
 
         if ui.button("Config...").clicked() {
             state.trigger_config_state =
-                TriggerConfigState::from_settings(&shared.settings.trigger);
+                TriggerConfigState::from_settings(&shared.state.settings.trigger);
             state.trigger_config_open = true;
         }
     });
@@ -725,7 +725,7 @@ fn render_toolbar_advanced(
     ui.horizontal(|ui| {
         ui.label("Markers:");
 
-        let current_time = std::time::Duration::from_secs_f64(shared.display_time);
+        let current_time = std::time::Duration::from_secs_f64(shared.ctx.display_time);
         if ui.button("Add").clicked() {
             let name = if state.new_marker_name.is_empty() {
                 format!("Marker {}", state.markers.len() + 1)
@@ -760,20 +760,20 @@ fn render_toolbar_advanced(
             if ui.button("<").clicked() {
                 if let Some(marker) = state.markers.prev_before(current_time) {
                     let marker_time = marker.time_secs();
-                    shared.settings.autoscale_x = false;
-                    let window = shared.settings.display_time_window;
-                    shared.settings.x_min = Some(marker_time - window / 2.0);
-                    shared.settings.x_max = Some(marker_time + window / 2.0);
+                    shared.state.settings.autoscale_x = false;
+                    let window = shared.state.settings.display_time_window;
+                    shared.state.settings.x_min = Some(marker_time - window / 2.0);
+                    shared.state.settings.x_max = Some(marker_time + window / 2.0);
                 }
             }
 
             if ui.button(">").clicked() {
                 if let Some(marker) = state.markers.next_after(current_time) {
                     let marker_time = marker.time_secs();
-                    shared.settings.autoscale_x = false;
-                    let window = shared.settings.display_time_window;
-                    shared.settings.x_min = Some(marker_time - window / 2.0);
-                    shared.settings.x_max = Some(marker_time + window / 2.0);
+                    shared.state.settings.autoscale_x = false;
+                    let window = shared.state.settings.display_time_window;
+                    shared.state.settings.x_min = Some(marker_time - window / 2.0);
+                    shared.state.settings.x_max = Some(marker_time + window / 2.0);
                 }
             }
 
@@ -793,15 +793,15 @@ fn render_toolbar_advanced(
 fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &mut Ui) {
     use egui_plot::{AxisHints, Line, Plot, PlotPoints, Points};
 
-    let current_time = shared.display_time;
+    let current_time = shared.ctx.display_time;
 
-    let (x_min, x_max) = if shared.settings.autoscale_x {
-        let window = shared.settings.display_time_window;
+    let (x_min, x_max) = if shared.state.settings.autoscale_x {
+        let window = shared.state.settings.display_time_window;
         (current_time - window, current_time)
-    } else if let (Some(min), Some(max)) = (shared.settings.x_min, shared.settings.x_max) {
+    } else if let (Some(min), Some(max)) = (shared.state.settings.x_min, shared.state.settings.x_max) {
         (min, max)
     } else {
-        let window = shared.settings.display_time_window;
+        let window = shared.state.settings.display_time_window;
         (current_time - window, current_time)
     };
 
@@ -823,14 +823,14 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
     }
 
     // For Y: when manual, apply stored bounds. When auto, let egui_plot auto-fit.
-    if !shared.settings.autoscale_y {
-        if let (Some(y_min), Some(y_max)) = (shared.settings.y_min, shared.settings.y_max) {
+    if !shared.state.settings.autoscale_y {
+        if let (Some(y_min), Some(y_max)) = (shared.state.settings.y_min, shared.state.settings.y_max) {
             plot = plot.include_y(y_min).include_y(y_max);
         }
     }
 
-    let allow_x_interact = !shared.settings.autoscale_x && !shared.settings.lock_x;
-    let allow_y_interact = !shared.settings.autoscale_y && !shared.settings.lock_y;
+    let allow_x_interact = !shared.state.settings.autoscale_x && !shared.state.settings.lock_x;
+    let allow_y_interact = !shared.state.settings.autoscale_y && !shared.state.settings.lock_y;
     plot = plot
         .allow_drag(allow_x_interact || allow_y_interact)
         .allow_zoom(allow_x_interact || allow_y_interact)
@@ -840,7 +840,7 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
     let cursor_a = state.cursor.cursor_a;
     let cursor_b = state.cursor.cursor_b;
     let enable_secondary_axis = state.enable_secondary_axis;
-    let autoscale_y = shared.settings.autoscale_y;
+    let autoscale_y = shared.state.settings.autoscale_y;
 
     let response = plot.show(ui, |plot_ui| {
         use crate::types::{PlotStyle, MAX_RENDER_POINTS};
@@ -854,12 +854,12 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
         plot_ui.set_auto_bounds(egui::Vec2b::new(false, autoscale_y));
 
         // Determine data source: use per-pane data if available, otherwise global
-        let pane_id = shared.current_pane_id.map(|id| id.0);
+        let pane_id = shared.ctx.current_pane_id.map(|id| id.0);
         let use_pane_data = pane_id
-            .and_then(|id| shared.topics.graph_pane_data.get(&id))
+            .and_then(|id| shared.state.topics.graph_pane_data.get(&id))
             .is_some();
 
-        for var in shared.config.variables.values() {
+        for var in shared.state.config.variables.values() {
             if !var.enabled || !var.show_in_graph {
                 continue;
             }
@@ -867,10 +867,10 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
             // Get data from per-pane store or global store
             let data = if use_pane_data {
                 pane_id
-                    .and_then(|id| shared.topics.graph_pane_data.get(&id))
+                    .and_then(|id| shared.state.topics.graph_pane_data.get(&id))
                     .and_then(|pane_data| pane_data.get(&var.id))
             } else {
-                shared.topics.variable_data.get(&var.id)
+                shared.state.topics.variable_data.get(&var.id)
             };
 
             if let Some(data) = data {
@@ -915,7 +915,7 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
                     var.name.clone()
                 };
 
-                let line_width = shared.config.ui.line_width;
+                let line_width = shared.state.config.ui.line_width;
 
                 match var.plot_style {
                     PlotStyle::Line => {
@@ -958,11 +958,11 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
         }
 
         // Draw trigger threshold line
-        if shared.settings.trigger.enabled {
-            let threshold = shared.settings.trigger.threshold;
-            let trigger_color = if shared.settings.trigger.triggered {
+        if shared.state.settings.trigger.enabled {
+            let threshold = shared.state.settings.trigger.threshold;
+            let trigger_color = if shared.state.settings.trigger.triggered {
                 Color32::from_rgb(100, 255, 100)
-            } else if shared.settings.trigger.armed {
+            } else if shared.state.settings.trigger.armed {
                 Color32::from_rgb(255, 255, 100)
             } else {
                 Color32::from_rgb(255, 100, 100)
@@ -1027,28 +1027,28 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
         }
 
         // Only capture bounds back when in manual mode (preserves user zoom/pan)
-        if !shared.settings.autoscale_x && !shared.settings.lock_x {
+        if !shared.state.settings.autoscale_x && !shared.state.settings.lock_x {
             let bounds = plot_ui.plot_bounds();
-            shared.settings.x_min = Some(bounds.min()[0]);
-            shared.settings.x_max = Some(bounds.max()[0]);
+            shared.state.settings.x_min = Some(bounds.min()[0]);
+            shared.state.settings.x_max = Some(bounds.max()[0]);
         }
-        if !shared.settings.autoscale_y && !shared.settings.lock_y {
+        if !shared.state.settings.autoscale_y && !shared.state.settings.lock_y {
             let bounds = plot_ui.plot_bounds();
-            shared.settings.y_min = Some(bounds.min()[1]);
-            shared.settings.y_max = Some(bounds.max()[1]);
+            shared.state.settings.y_min = Some(bounds.min()[1]);
+            shared.state.settings.y_max = Some(bounds.max()[1]);
         }
     });
 
     // If user interacted with the plot, disable autoscale for the affected axes
     if response.response.dragged() {
-        shared.settings.autoscale_x = false;
-        shared.settings.autoscale_y = false;
+        shared.state.settings.autoscale_x = false;
+        shared.state.settings.autoscale_y = false;
     }
     if response.response.hovered() {
         let scroll = ui.input(|i| i.smooth_scroll_delta);
         if scroll.x.abs() > 0.0 || scroll.y.abs() > 0.0 {
-            shared.settings.autoscale_x = false;
-            shared.settings.autoscale_y = false;
+            shared.state.settings.autoscale_x = false;
+            shared.state.settings.autoscale_y = false;
         }
     }
 
@@ -1059,7 +1059,7 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
             state
                 .cursor
                 .update_position(Some(PlotPoint::new(plot_pos.x, plot_pos.y)));
-            state.cursor.find_nearest(&shared.topics.variable_data);
+            state.cursor.find_nearest(&shared.state.topics.variable_data);
         } else {
             state.cursor.update_position(None);
         }
@@ -1103,11 +1103,11 @@ fn format_cursor_tooltip(state: &TimeSeriesState) -> String {
 fn update_range_statistics(state: &mut TimeSeriesState, shared: &SharedState<'_>) {
     state.variable_statistics.clear();
     if let Some((t_start, t_end)) = state.cursor.time_range() {
-        for var in shared.config.variables.values() {
+        for var in shared.state.config.variables.values() {
             if !var.enabled || !var.show_in_graph {
                 continue;
             }
-            if let Some(data) = shared.topics.variable_data.get(&var.id) {
+            if let Some(data) = shared.state.topics.variable_data.get(&var.id) {
                 let stats = PlotStatistics::from_data_range(data, t_start, t_end);
                 if stats.is_valid() {
                     state.variable_statistics.insert(var.id, stats);

@@ -31,7 +31,7 @@ pub fn render(
     });
     ui.separator();
 
-    if shared.config.variables.is_empty() {
+    if shared.state.config.variables.is_empty() {
         ui.colored_label(Color32::GRAY, "No variables configured");
         return Vec::new();
     }
@@ -72,7 +72,7 @@ pub fn render(
                     }
                     ui.end_row();
 
-                    for var in shared.config.variables.values() {
+                    for var in shared.state.config.variables.values() {
                         if !var.enabled {
                             continue;
                         }
@@ -86,7 +86,7 @@ pub fn render(
 
                         ui.colored_label(color, &var.name);
 
-                        if let Some(data) = shared.topics.variable_data.get(&var.id) {
+                        if let Some(data) = shared.state.topics.variable_data.get(&var.id) {
                             if let Some(last) = data.last() {
                                 ui.label(
                                     egui::RichText::new(format!("{:.4}", last.converted_value))

@@ -25,7 +25,7 @@
 //! }
 //! ```
 
-use crate::types::{PointerState, Variable};
+use crate::types::{PointerRuntime, Variable};
 use std::time::Instant;
 
 /// Default gap threshold for combining reads (64 bytes)
@@ -239,6 +239,45 @@ impl Default for ReadManager {
     }
 }
 
+/// Resolve dependent variable addresses using cached pointer values.
+/// Pure function: takes variables + pointer runtime, returns resolved copies.
+pub fn resolve_dependent_addresses(
+    variables: &[Variable],
+    pointer_runtime: &std::collections::HashMap<u32, PointerRuntime>,
+) -> Vec<Variable> {
+    // Build pointer cache from runtime
+    let mut pointer_cache: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    for var in variables {
+        if let Some(ptr_meta) = &var.pointer_metadata {
+            if ptr_meta.pointer_parent_id.is_none() {
+                // This is a pointer variable — get its cached address from runtime
+                if let Some(rt) = pointer_runtime.get(&var.id) {
+                    if let Some(cached_addr) = rt.cached_address {
+                        pointer_cache.insert(var.id, cached_addr);
+                    }
+                }
+            }
+        }
+    }
+
+    // Resolve dependent addresses
+    variables
+        .iter()
+        .map(|var| {
+            if let Some(ptr_meta) = &var.pointer_metadata {
+                if let Some(parent_id) = ptr_meta.pointer_parent_id {
+                    if let Some(&parent_addr) = pointer_cache.get(&parent_id) {
+                        let mut resolved = var.clone();
+                        resolved.address = parent_addr.wrapping_add(ptr_meta.offset_from_pointer);
+                        return resolved;
+                    }
+                }
+            }
+            var.clone()
+        })
+        .collect()
+}
+
 /// Manages two-stage reads for pointer dereferencing
 ///
 /// Separates pointer variables (read at lower rate) from dependent variables
@@ -332,86 +371,18 @@ impl DependentReadPlanner {
         }
     }
 
-    /// Resolve dependent variable addresses using cached pointer values
+    /// Update pointer runtime state based on read value
     ///
     /// # Arguments
-    /// * `variables` - All variables (includes both pointers and dependents)
-    ///
-    /// # Returns
-    /// A new vector with dependent variables having their addresses resolved
-    /// to pointer_value + offset. Variables without valid pointer parents are unchanged.
-    pub fn resolve_addresses(&self, variables: &[Variable]) -> Vec<Variable> {
-        // Build a map of pointer ID -> cached address
-        let mut pointer_addresses = std::collections::HashMap::new();
-        for var in variables {
-            if let Some(ptr_meta) = &var.pointer_metadata {
-                if ptr_meta.pointer_parent_id.is_none() {
-                    // This is a pointer, store its cached address
-                    if let Some(cached_addr) = ptr_meta.cached_address {
-                        pointer_addresses.insert(var.id, cached_addr);
-                    }
-                }
-            }
-        }
-
-        // Resolve dependent variable addresses
-        variables
-            .iter()
-            .map(|var| {
-                if let Some(ptr_meta) = &var.pointer_metadata {
-                    if let Some(parent_id) = ptr_meta.pointer_parent_id {
-                        // This is a dependent variable
-                        if let Some(&parent_addr) = pointer_addresses.get(&parent_id) {
-                            // Resolve: parent_address + offset
-                            let mut resolved = var.clone();
-                            resolved.address =
-                                parent_addr.wrapping_add(ptr_meta.offset_from_pointer);
-                            return resolved;
-                        }
-                    }
-                }
-                var.clone()
-            })
-            .collect()
-    }
-
-    /// Update pointer state based on read value
-    ///
-    /// # Arguments
-    /// * `variable` - The variable to update (must have pointer_metadata)
+    /// * `runtime` - The pointer runtime state to update
     /// * `value` - The read value (interpreted as address)
-    ///
-    /// # Returns
-    /// Updated variable with pointer state set appropriately
-    pub fn update_pointer_state(variable: &mut Variable, value: f64) {
-        let Some(ptr_meta) = &mut variable.pointer_metadata else {
-            return;
-        };
-
-        let addr = value as u64;
-
-        // Update cached address
-        ptr_meta.cached_address = Some(addr);
-
-        // Determine pointer state
-        ptr_meta.pointer_state = if addr == 0 {
-            PointerState::Null
-        } else if !(0x1000..=0xFFFF_FFFF_0000_0000).contains(&addr) {
-            // Suspicious addresses (very low or very high)
-            PointerState::Invalid(addr)
-        } else if !addr.is_multiple_of(4) {
-            // Unaligned pointer (suspicious for 32/64-bit architectures)
-            PointerState::Invalid(addr)
-        } else {
-            PointerState::Valid(addr)
-        };
+    pub fn update_pointer_state(runtime: &mut PointerRuntime, value: f64) {
+        runtime.update_from_read(value);
     }
 
     /// Mark pointer read as failed
-    pub fn mark_pointer_error(variable: &mut Variable) {
-        if let Some(ptr_meta) = &mut variable.pointer_metadata {
-            ptr_meta.pointer_state = PointerState::ReadError;
-        }
+    pub fn mark_pointer_error(runtime: &mut PointerRuntime) {
+        runtime.mark_error();
     }
 
     /// Clear cached data (for reset/reconnect)
@@ -906,5 +877,157 @@ mod tests {
             // Property: Parsing should never panic, even with arbitrary bytes
             let _ = var_type.parse_to_f64(&bytes);
         }
+    }
+
+    #[test]
+    fn test_resolve_no_pointers() {
+        let vars = vec![
+            create_test_variable("a", 0x1000, VariableType::U32),
+            create_test_variable("b", 0x2000, VariableType::F32),
+        ];
+        let runtime = std::collections::HashMap::new();
+        let resolved = resolve_dependent_addresses(&vars, &runtime);
+        assert_eq!(resolved[0].address, 0x1000);
+        assert_eq!(resolved[1].address, 0x2000);
+    }
+
+    #[test]
+    fn test_resolve_single_chain() {
+        use crate::types::{PointerMetadata, PointerRuntime};
+
+        // Create pointer variable
+        let mut ptr_var = create_test_variable("ptr", 0x1000, VariableType::U32);
+        ptr_var.pointer_metadata = Some(PointerMetadata {
+            pointer_poll_rate_hz: 1,
+            pointer_parent_id: None,
+            offset_from_pointer: 0,
+        });
+
+        // Create dependent child
+        let mut child_var = create_test_variable("ptr.field", 0, VariableType::F32);
+        child_var.pointer_metadata = Some(PointerMetadata {
+            pointer_poll_rate_hz: 0,
+            pointer_parent_id: Some(ptr_var.id),
+            offset_from_pointer: 8,
+        });
+
+        let vars = vec![ptr_var.clone(), child_var];
+
+        // Set up runtime with cached pointer value
+        let mut runtime = std::collections::HashMap::new();
+        let mut ptr_rt = PointerRuntime::default();
+        ptr_rt.cached_address = Some(0x5000);
+        runtime.insert(ptr_var.id, ptr_rt);
+
+        let resolved = resolve_dependent_addresses(&vars, &runtime);
+        assert_eq!(resolved[0].address, 0x1000); // pointer itself unchanged
+        assert_eq!(resolved[1].address, 0x5008); // 0x5000 + 8
+    }
+
+    #[test]
+    fn test_resolve_missing_parent() {
+        use crate::types::PointerMetadata;
+
+        let mut child_var = create_test_variable("orphan", 0, VariableType::U32);
+        child_var.pointer_metadata = Some(PointerMetadata {
+            pointer_poll_rate_hz: 0,
+            pointer_parent_id: Some(999), // non-existent parent
+            offset_from_pointer: 4,
+        });
+
+        let vars = vec![child_var];
+        let runtime = std::collections::HashMap::new();
+        let resolved = resolve_dependent_addresses(&vars, &runtime);
+        assert_eq!(resolved[0].address, 0); // unchanged
+    }
+
+    #[test]
+    fn test_resolve_mixed() {
+        use crate::types::{PointerMetadata, PointerRuntime};
+
+        let static_var = create_test_variable("static", 0x3000, VariableType::U32);
+
+        let mut ptr_var = create_test_variable("ptr", 0x1000, VariableType::U32);
+        ptr_var.pointer_metadata = Some(PointerMetadata {
+            pointer_poll_rate_hz: 1,
+            pointer_parent_id: None,
+            offset_from_pointer: 0,
+        });
+
+        let mut child_var = create_test_variable("ptr.x", 0, VariableType::F32);
+        child_var.pointer_metadata = Some(PointerMetadata {
+            pointer_poll_rate_hz: 0,
+            pointer_parent_id: Some(ptr_var.id),
+            offset_from_pointer: 0,
+        });
+
+        let vars = vec![static_var, ptr_var.clone(), child_var];
+
+        let mut runtime = std::collections::HashMap::new();
+        let mut ptr_rt = PointerRuntime::default();
+        ptr_rt.cached_address = Some(0x8000);
+        runtime.insert(ptr_var.id, ptr_rt);
+
+        let resolved = resolve_dependent_addresses(&vars, &runtime);
+        assert_eq!(resolved[0].address, 0x3000); // static unchanged
+        assert_eq!(resolved[1].address, 0x1000); // pointer unchanged
+        assert_eq!(resolved[2].address, 0x8000); // resolved: 0x8000 + 0
+    }
+
+    #[test]
+    fn test_resolve_empty_cache() {
+        use crate::types::{PointerMetadata, PointerRuntime};
+
+        let mut ptr_var = create_test_variable("ptr", 0x1000, VariableType::U32);
+        ptr_var.pointer_metadata = Some(PointerMetadata {
+            pointer_poll_rate_hz: 1,
+            pointer_parent_id: None,
+            offset_from_pointer: 0,
+        });
+
+        let mut child_var = create_test_variable("ptr.x", 0, VariableType::F32);
+        child_var.pointer_metadata = Some(PointerMetadata {
+            pointer_poll_rate_hz: 0,
+            pointer_parent_id: Some(ptr_var.id),
+            offset_from_pointer: 4,
+        });
+
+        let vars = vec![ptr_var.clone(), child_var];
+
+        // Runtime exists but no cached address yet
+        let mut runtime = std::collections::HashMap::new();
+        runtime.insert(ptr_var.id, PointerRuntime::default());
+
+        let resolved = resolve_dependent_addresses(&vars, &runtime);
+        assert_eq!(resolved[1].address, 0); // unresolved, unchanged
+    }
+
+    #[test]
+    fn test_resolve_zero_offset() {
+        use crate::types::{PointerMetadata, PointerRuntime};
+
+        let mut ptr_var = create_test_variable("ptr", 0x1000, VariableType::U32);
+        ptr_var.pointer_metadata = Some(PointerMetadata {
+            pointer_poll_rate_hz: 1,
+            pointer_parent_id: None,
+            offset_from_pointer: 0,
+        });
+
+        let mut child_var = create_test_variable("ptr.first", 0, VariableType::U32);
+        child_var.pointer_metadata = Some(PointerMetadata {
+            pointer_poll_rate_hz: 0,
+            pointer_parent_id: Some(ptr_var.id),
+            offset_from_pointer: 0,
+        });
+
+        let vars = vec![ptr_var.clone(), child_var];
+
+        let mut runtime = std::collections::HashMap::new();
+        let mut ptr_rt = PointerRuntime::default();
+        ptr_rt.cached_address = Some(0x7000);
+        runtime.insert(ptr_var.id, ptr_rt);
+
+        let resolved = resolve_dependent_addresses(&vars, &runtime);
+        assert_eq!(resolved[1].address, 0x7000); // same as pointer value
     }
 }

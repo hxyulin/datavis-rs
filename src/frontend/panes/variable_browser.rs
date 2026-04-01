@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use egui::{Color32, Ui};
 
 use crate::backend::{ElfInfo, ElfSymbol, TypeHandle};
-use crate::frontend::state::{AppAction, ChildVariableSpec, SharedState};
+use crate::frontend::state::{AppAction, ChildAddressMode, ChildVariableSpec, SharedState};
 use crate::types::Variable;
 
 use crate::frontend::pane_trait::Pane;
@@ -87,9 +87,9 @@ pub fn render(
     let mut struct_add_actions: Vec<AppAction> = Vec::new();
 
     // Auto-refresh when ELF is reloaded
-    if shared.topics.elf_generation != state.last_elf_generation {
-        state.last_elf_generation = shared.topics.elf_generation;
-        state.update_filter(shared.elf_info);
+    if shared.state.topics.elf_generation != state.last_elf_generation {
+        state.last_elf_generation = shared.state.topics.elf_generation;
+        state.update_filter(shared.ctx.elf_info);
     }
 
     ui.heading("Variable Browser");
@@ -98,7 +98,7 @@ pub fn render(
     // ELF file selection
     ui.horizontal(|ui| {
         ui.label("ELF File:");
-        if let Some(path) = shared.elf_file_path {
+        if let Some(path) = shared.ctx.elf_file_path {
             let filename = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -117,9 +117,9 @@ pub fn render(
         }
     });
 
-    if shared.elf_info.is_some() {
+    if shared.ctx.elf_info.is_some() {
         ui.horizontal(|ui| {
-            ui.label(format!("{} variables available", shared.elf_symbols.len()));
+            ui.label(format!("{} variables available", shared.ctx.elf_symbols.len()));
         });
     }
 
@@ -130,11 +130,11 @@ pub fn render(
         ui.label("Search:");
         let response = ui.text_edit_singleline(&mut state.query);
         if response.changed() {
-            state.update_filter(shared.elf_info);
+            state.update_filter(shared.ctx.elf_info);
         }
         if ui.button("Clear").clicked() {
             state.query.clear();
-            state.update_filter(shared.elf_info);
+            state.update_filter(shared.ctx.elf_info);
         }
     });
 
@@ -145,12 +145,12 @@ pub fn render(
             .on_hover_text("Show optimized out, extern, and local variables")
             .changed()
         {
-            state.update_filter(shared.elf_info);
+            state.update_filter(shared.ctx.elf_info);
         }
     });
 
     // Diagnostics summary (collapsible)
-    if let Some(elf_info) = shared.elf_info {
+    if let Some(elf_info) = shared.ctx.elf_info {
         let diagnostics = elf_info.get_diagnostics();
         if diagnostics.total_variables > 0 {
             ui.collapsing("Debug Info Statistics", |ui| {
@@ -168,7 +168,7 @@ pub fn render(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if state.filtered_symbols.is_empty() {
-                if shared.elf_info.is_some() {
+                if shared.ctx.elf_info.is_some() {
                     ui.colored_label(Color32::GRAY, "No matching variables");
                 } else {
                     ui.colored_label(Color32::GRAY, "Load an ELF file to browse variables");
@@ -201,7 +201,7 @@ pub fn render(
                             ui,
                             &symbol.display_name,
                             symbol.address,
-                            shared
+                            shared.ctx
                                 .elf_info
                                 .and_then(|info| info.symbol_type_handle(symbol)),
                             &root_path,
@@ -422,7 +422,11 @@ fn render_type_tree(
         ui.add_space((indent_level * 20) as f32);
 
         if can_expand {
-            let expand_icon = if is_expanded { "v" } else { ">" };
+            let expand_icon = if is_expanded {
+                crate::frontend::icons::TREE_EXPANDED
+            } else {
+                crate::frontend::icons::TREE_COLLAPSED
+            };
             let expand_tooltip = if is_pointer {
                 "Expand to see pointee structure (requires dereferencing at runtime)"
             } else {
@@ -446,8 +450,7 @@ fn render_type_tree(
             )
         } else if parent_is_pointer {
             let short_name = name.rsplit('.').next().unwrap_or(name);
-            // For pointer members, show offset from pointer base (Phase 2 will use actual pointer value)
-            format!("→{}: {} (needs pointer dereference)", short_name, type_name)
+            format!("{}{}: {} <dynamic>", crate::frontend::icons::ARROW_RIGHT, short_name, type_name)
         } else {
             let short_name = name.rsplit('.').next().unwrap_or(name);
             format!(".{}: {} @ 0x{:08X}", short_name, type_name, address)
@@ -496,6 +499,7 @@ fn render_type_tree(
             struct_add_actions.push(AppAction::AddStructVariable {
                 parent: parent_var,
                 children,
+                pointer_poll_rate_hz: None,
             });
         }
 
@@ -515,10 +519,10 @@ fn render_type_tree(
                 .unwrap_or(crate::types::VariableType::U32);
             let pointer_var = Variable::new(name, address, parent_type);
             let children = collect_pointer_children(&type_handle, name);
-            struct_add_actions.push(AppAction::AddPointerVariable {
-                pointer: pointer_var,
+            struct_add_actions.push(AppAction::AddStructVariable {
+                parent: pointer_var,
                 children,
-                pointer_poll_rate_hz: 1, // Default 1 Hz for pointer updates
+                pointer_poll_rate_hz: Some(1), // Default 1 Hz for pointer updates
             });
         }
     });
@@ -546,7 +550,7 @@ fn render_type_tree(
                     struct_add_actions,
                     symbol_to_use,
                     root_symbol,
-                    is_pointer, // Pass pointer state to children
+                    is_pointer || parent_is_pointer, // Sticky: any ancestor being a pointer propagates down
                 );
             }
         }
@@ -571,7 +575,7 @@ fn render_type_tree(
                     struct_add_actions,
                     symbol_to_use,
                     root_symbol,
-                    is_pointer, // Pass pointer state to array elements
+                    is_pointer || parent_is_pointer, // Sticky: any ancestor being a pointer propagates down
                 );
             }
 
@@ -597,8 +601,8 @@ fn render_type_tree(
     }
 }
 
-/// Collect leaf children from a struct/array type handle for AddStructVariable.
-/// Walks members recursively, collecting only leaf (addable, non-expandable) fields.
+/// Collect children from a struct/array type handle for AddStructVariable.
+/// Preserves full tree hierarchy — intermediate struct/array nodes carry nested children.
 fn collect_children_from_type(
     type_handle: &Option<TypeHandle>,
     parent_name: &str,
@@ -620,15 +624,21 @@ fn collect_children_from_type(
             let member_underlying = member_type.underlying();
 
             if member_underlying.is_expandable() && !member_underlying.is_pointer_or_reference() {
-                // Recurse into nested structs
+                // Preserve intermediate node with nested children
                 let nested =
-                    collect_children_from_type(&Some(member_type), &full_name, member_addr);
-                children.extend(nested);
+                    collect_children_from_type(&Some(member_type.clone()), &full_name, member_addr);
+                children.push(ChildVariableSpec {
+                    name: full_name,
+                    address_mode: ChildAddressMode::Absolute(member_addr),
+                    var_type: member_type.to_variable_type(),
+                    children: nested,
+                });
             } else if member_type.is_addable() {
                 children.push(ChildVariableSpec {
                     name: full_name,
-                    address: member_addr,
+                    address_mode: ChildAddressMode::Absolute(member_addr),
                     var_type: member_type.to_variable_type(),
+                    children: vec![],
                 });
             }
         }
@@ -649,13 +659,20 @@ fn collect_children_from_type(
                 if let Some(ref et) = elem_type {
                     let et_underlying = et.underlying();
                     if et_underlying.is_expandable() && !et_underlying.is_pointer_or_reference() {
-                        let nested = collect_children_from_type(&elem_type, &full_name, elem_addr);
-                        children.extend(nested);
+                        let nested =
+                            collect_children_from_type(&elem_type, &full_name, elem_addr);
+                        children.push(ChildVariableSpec {
+                            name: full_name,
+                            address_mode: ChildAddressMode::Absolute(elem_addr),
+                            var_type: et.to_variable_type(),
+                            children: nested,
+                        });
                     } else if et.is_addable() {
                         children.push(ChildVariableSpec {
                             name: full_name,
-                            address: elem_addr,
+                            address_mode: ChildAddressMode::Absolute(elem_addr),
                             var_type: et.to_variable_type(),
+                            children: vec![],
                         });
                     }
                 }
@@ -666,13 +683,13 @@ fn collect_children_from_type(
     children
 }
 
-/// Collect pointer-dependent children from a pointer type handle for AddPointerVariable.
+/// Collect pointer-dependent children from a pointer type handle.
 /// Similar to collect_children_from_type, but stores offsets from dereferenced pointer
-/// instead of absolute addresses (Phase 2 feature).
+/// using `ChildAddressMode::RelativeToPointer` instead of absolute addresses.
 fn collect_pointer_children(
     type_handle: &Option<TypeHandle>,
     parent_name: &str,
-) -> Vec<crate::frontend::state::PointerChildSpec> {
+) -> Vec<ChildVariableSpec> {
     let mut children = Vec::new();
     let Some(handle) = type_handle else {
         return children;
@@ -695,10 +712,8 @@ fn collect_pointer_children_recursive(
     type_handle: &TypeHandle,
     parent_name: &str,
     base_offset: u64,
-    children: &mut Vec<crate::frontend::state::PointerChildSpec>,
+    children: &mut Vec<ChildVariableSpec>,
 ) {
-    use crate::frontend::state::PointerChildSpec;
-
     // Struct members
     if let Some(members) = type_handle.members() {
         for member in members {
@@ -708,18 +723,26 @@ fn collect_pointer_children_recursive(
             let member_underlying = member_type.underlying();
 
             if member_underlying.is_expandable() && !member_underlying.is_pointer_or_reference() {
-                // Recurse into nested structs
+                // Recurse into nested structs — intermediate node with nested children
+                let mut nested = Vec::new();
                 collect_pointer_children_recursive(
                     &member_type,
                     &full_name,
                     member_offset,
-                    children,
+                    &mut nested,
                 );
-            } else if member_type.is_addable() {
-                children.push(PointerChildSpec {
+                children.push(ChildVariableSpec {
                     name: full_name,
-                    offset_from_pointer: member_offset,
+                    address_mode: ChildAddressMode::RelativeToPointer { offset: member_offset },
                     var_type: member_type.to_variable_type(),
+                    children: nested,
+                });
+            } else if member_type.is_addable() {
+                children.push(ChildVariableSpec {
+                    name: full_name,
+                    address_mode: ChildAddressMode::RelativeToPointer { offset: member_offset },
+                    var_type: member_type.to_variable_type(),
+                    children: vec![],
                 });
             }
         }
@@ -740,12 +763,20 @@ fn collect_pointer_children_recursive(
                 if let Some(ref et) = elem_type {
                     let et_underlying = et.underlying();
                     if et_underlying.is_expandable() && !et_underlying.is_pointer_or_reference() {
-                        collect_pointer_children_recursive(et, &full_name, elem_offset, children);
-                    } else if et.is_addable() {
-                        children.push(PointerChildSpec {
+                        let mut nested = Vec::new();
+                        collect_pointer_children_recursive(et, &full_name, elem_offset, &mut nested);
+                        children.push(ChildVariableSpec {
                             name: full_name,
-                            offset_from_pointer: elem_offset,
+                            address_mode: ChildAddressMode::RelativeToPointer { offset: elem_offset },
                             var_type: et.to_variable_type(),
+                            children: nested,
+                        });
+                    } else if et.is_addable() {
+                        children.push(ChildVariableSpec {
+                            name: full_name,
+                            address_mode: ChildAddressMode::RelativeToPointer { offset: elem_offset },
+                            var_type: et.to_variable_type(),
+                            children: vec![],
                         });
                     }
                 }

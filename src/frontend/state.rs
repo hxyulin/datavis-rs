@@ -18,55 +18,84 @@ use crate::types::{Variable, VariableType};
 
 use super::workspace::{PaneId, PaneKind};
 
-/// Specification for a child variable when adding a struct
+/// How a child variable's address is determined.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChildAddressMode {
+    /// Absolute address known at compile time (from DWARF debug info).
+    Absolute(u64),
+    /// Address is base_pointer_value + offset, resolved at runtime.
+    RelativeToPointer { offset: u64 },
+}
+
+impl ChildAddressMode {
+    /// Resolve this address mode to a concrete address.
+    /// For `Absolute`, always returns the static address.
+    /// For `RelativeToPointer`, requires a pointer value to resolve.
+    pub fn resolve(&self, pointer_value: Option<u64>) -> Option<u64> {
+        match self {
+            ChildAddressMode::Absolute(addr) => Some(*addr),
+            ChildAddressMode::RelativeToPointer { offset } => {
+                pointer_value.map(|base| base.wrapping_add(*offset))
+            }
+        }
+    }
+
+    /// Whether this address requires runtime resolution.
+    pub fn is_dynamic(&self) -> bool {
+        matches!(self, ChildAddressMode::RelativeToPointer { .. })
+    }
+}
+
+/// Specification for a child variable when adding a struct or pointer.
+/// Supports arbitrary nesting — intermediate struct nodes carry their own children.
 #[derive(Debug, Clone)]
 pub struct ChildVariableSpec {
     pub name: String,
-    pub address: u64,
+    pub address_mode: ChildAddressMode,
     pub var_type: VariableType,
+    /// Nested children (non-empty for intermediate struct/array nodes)
+    pub children: Vec<ChildVariableSpec>,
 }
 
-/// Specification for a pointer-dependent child variable (Phase 2 feature)
-#[derive(Debug, Clone)]
-pub struct PointerChildSpec {
-    pub name: String,
-    pub offset_from_pointer: u64,
-    pub var_type: VariableType,
+impl ChildVariableSpec {
+    /// Count total leaf nodes (variables without children) in this tree.
+    pub fn leaf_count(&self) -> usize {
+        if self.children.is_empty() {
+            1
+        } else {
+            self.children.iter().map(|c| c.leaf_count()).sum()
+        }
+    }
 }
 
-/// Shared state accessible by all panes (borrowed, not owned).
-///
-/// This struct provides panes with access to shared application state
-/// through borrowed references. Published data (variables, stats, status,
-/// snapshots) is accessed via `topics`.
-pub struct SharedState<'a> {
-    // Communication
+/// Immutable context available to all panes.
+pub struct SharedContext<'a> {
     pub frontend: &'a PipelineBridge,
-
-    // Configuration (read-write by panes)
-    pub config: &'a mut AppConfig,
-    pub settings: &'a mut RuntimeSettings,
-    pub app_state: &'a mut AppState,
-
-    // ELF (read-only)
     pub elf_info: Option<&'a ElfInfo>,
     pub elf_symbols: &'a [ElfSymbol],
     pub elf_file_path: Option<&'a PathBuf>,
-
-    // Persistence
-    pub persistence_config: &'a mut DataPersistenceConfig,
-
-    // Error display
-    pub last_error: &'a mut Option<String>,
-
-    // Timing — current time in seconds (frozen when not collecting)
     pub display_time: f64,
-
-    // All published data (variables, stats, status, snapshots)
-    pub topics: &'a mut Topics,
-
-    // Current pane being rendered (for per-pane data access)
     pub current_pane_id: Option<PaneId>,
+}
+
+/// Mutable state that panes can modify.
+pub struct SharedMut<'a> {
+    pub config: &'a mut AppConfig,
+    pub settings: &'a mut RuntimeSettings,
+    pub app_state: &'a mut AppState,
+    pub persistence_config: &'a mut DataPersistenceConfig,
+    pub last_error: &'a mut Option<String>,
+    pub topics: &'a mut Topics,
+}
+
+/// Shared state accessible by all panes (composed of immutable context + mutable state).
+///
+/// This struct provides panes with access to shared application state
+/// through borrowed references. Published data (variables, stats, status,
+/// snapshots) is accessed via `state.topics`.
+pub struct SharedState<'a> {
+    pub ctx: SharedContext<'a>,
+    pub state: SharedMut<'a>,
 }
 
 /// Actions that any page can emit
@@ -101,21 +130,22 @@ pub enum AppAction {
     // Variable management
     /// Add a new variable
     AddVariable(Variable),
-    /// Add a struct variable with auto-decomposed children
+    /// Add a struct or pointer variable with auto-decomposed children.
+    /// When `pointer_poll_rate_hz` is `Some`, the parent is treated as a pointer
+    /// and children with `RelativeToPointer` addresses get pointer metadata.
     AddStructVariable {
         parent: Variable,
         children: Vec<ChildVariableSpec>,
-    },
-    /// Add a pointer variable with auto-dereferencing children (Phase 2 feature)
-    AddPointerVariable {
-        pointer: Variable,
-        children: Vec<PointerChildSpec>,
-        pointer_poll_rate_hz: u32,
+        pointer_poll_rate_hz: Option<u32>,
     },
     /// Remove a variable by ID
     RemoveVariable(u32),
     /// Update an existing variable
     UpdateVariable(Variable),
+    /// Set a variable's poll rate with tree propagation (down: clamp children, up: raise ancestors)
+    SetVariablePollRate { id: u32, rate_hz: u32 },
+    /// Toggle enabled state for an entire variable tree
+    ToggleTreeEnabled { root_id: u32, enabled: bool },
     /// Write a value to a variable
     WriteVariable { id: u32, value: f64 },
 
@@ -213,26 +243,176 @@ impl<'a> SharedState<'a> {
     /// * `false` if data is fresh, collection stopped, or no data received yet
     pub fn is_pane_data_stale(&self, pane_id: Option<u64>) -> bool {
         // Don't warn if collection stopped
-        if !self.settings.collecting {
+        if !self.state.settings.collecting {
             return false;
         }
 
-        let threshold = self.topics.staleness_threshold;
+        let threshold = self.state.topics.staleness_threshold;
         let now = Instant::now();
 
         if let Some(pid) = pane_id {
             // Check pane-specific data first
-            if let Some(last_update) = self.topics.pane_data_freshness.get(&pid) {
+            if let Some(last_update) = self.state.topics.pane_data_freshness.get(&pid) {
                 return now.duration_since(*last_update) > threshold;
             }
         }
 
         // Fall back to global data check
-        if let Some(global_update) = self.topics.global_data_freshness {
+        if let Some(global_update) = self.state.topics.global_data_freshness {
             return now.duration_since(global_update) > threshold;
         }
 
         // No data received yet - not stale, just empty
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::VariableType;
+
+    #[test]
+    fn test_absolute_resolve() {
+        let mode = ChildAddressMode::Absolute(0x2000);
+        assert_eq!(mode.resolve(None), Some(0x2000));
+        assert_eq!(mode.resolve(Some(0x5000)), Some(0x2000));
+    }
+
+    #[test]
+    fn test_relative_resolve() {
+        let mode = ChildAddressMode::RelativeToPointer { offset: 8 };
+        assert_eq!(mode.resolve(Some(0x3000)), Some(0x3008));
+    }
+
+    #[test]
+    fn test_relative_resolve_none() {
+        let mode = ChildAddressMode::RelativeToPointer { offset: 8 };
+        assert_eq!(mode.resolve(None), None);
+    }
+
+    #[test]
+    fn test_is_dynamic() {
+        assert!(!ChildAddressMode::Absolute(0).is_dynamic());
+        assert!(ChildAddressMode::RelativeToPointer { offset: 0 }.is_dynamic());
+    }
+
+    #[test]
+    fn test_leaf_count_flat() {
+        let spec = ChildVariableSpec {
+            name: "parent".into(),
+            address_mode: ChildAddressMode::Absolute(0),
+            var_type: VariableType::U32,
+            children: vec![
+                ChildVariableSpec { name: "a".into(), address_mode: ChildAddressMode::Absolute(0), var_type: VariableType::U32, children: vec![] },
+                ChildVariableSpec { name: "b".into(), address_mode: ChildAddressMode::Absolute(4), var_type: VariableType::U32, children: vec![] },
+                ChildVariableSpec { name: "c".into(), address_mode: ChildAddressMode::Absolute(8), var_type: VariableType::F32, children: vec![] },
+            ],
+        };
+        assert_eq!(spec.leaf_count(), 3);
+    }
+
+    #[test]
+    fn test_leaf_count_nested() {
+        let spec = ChildVariableSpec {
+            name: "root".into(),
+            address_mode: ChildAddressMode::Absolute(0),
+            var_type: VariableType::U32,
+            children: vec![
+                ChildVariableSpec {
+                    name: "inner".into(),
+                    address_mode: ChildAddressMode::Absolute(0),
+                    var_type: VariableType::U32,
+                    children: vec![
+                        ChildVariableSpec { name: "a".into(), address_mode: ChildAddressMode::Absolute(0), var_type: VariableType::U32, children: vec![] },
+                        ChildVariableSpec { name: "b".into(), address_mode: ChildAddressMode::Absolute(4), var_type: VariableType::U32, children: vec![] },
+                    ],
+                },
+                ChildVariableSpec { name: "c".into(), address_mode: ChildAddressMode::Absolute(8), var_type: VariableType::F32, children: vec![] },
+            ],
+        };
+        assert_eq!(spec.leaf_count(), 3);
+    }
+
+    #[test]
+    fn test_shared_mut_construction() {
+        use crate::config::{AppConfig, AppState, DataPersistenceConfig};
+        use crate::config::settings::RuntimeSettings;
+        use crate::frontend::topics::Topics;
+
+        let mut config = AppConfig::default();
+        let mut settings = RuntimeSettings::default();
+        let mut app_state = AppState::default();
+        let mut persistence = DataPersistenceConfig::default();
+        let mut last_error: Option<String> = None;
+        let mut topics = Topics::default();
+
+        let state = SharedMut {
+            config: &mut config,
+            settings: &mut settings,
+            app_state: &mut app_state,
+            persistence_config: &mut persistence,
+            last_error: &mut last_error,
+            topics: &mut topics,
+        };
+
+        // Verify fields are accessible
+        assert!(state.config.variables.is_empty());
+        assert!(!state.settings.paused);
+    }
+
+    #[test]
+    fn test_shared_mut_add_variable() {
+        use crate::config::{AppConfig, AppState, DataPersistenceConfig};
+        use crate::config::settings::RuntimeSettings;
+        use crate::frontend::topics::Topics;
+
+        let mut config = AppConfig::default();
+        let mut settings = RuntimeSettings::default();
+        let mut app_state = AppState::default();
+        let mut persistence = DataPersistenceConfig::default();
+        let mut last_error: Option<String> = None;
+        let mut topics = Topics::default();
+
+        let state = SharedMut {
+            config: &mut config,
+            settings: &mut settings,
+            app_state: &mut app_state,
+            persistence_config: &mut persistence,
+            last_error: &mut last_error,
+            topics: &mut topics,
+        };
+
+        let var = crate::types::Variable::new("test", 0x1000, VariableType::U32);
+        let id = var.id;
+        state.config.add_variable(var);
+        assert!(state.config.variables.contains_key(&id));
+    }
+
+    #[test]
+    fn test_shared_mut_independent_of_context() {
+        use crate::config::{AppConfig, AppState, DataPersistenceConfig};
+        use crate::config::settings::RuntimeSettings;
+        use crate::frontend::topics::Topics;
+
+        let mut config = AppConfig::default();
+        let mut settings = RuntimeSettings::default();
+        let mut app_state = AppState::default();
+        let mut persistence = DataPersistenceConfig::default();
+        let mut last_error: Option<String> = None;
+        let mut topics = Topics::default();
+
+        // SharedMut can be constructed without SharedContext or PipelineBridge
+        let state = SharedMut {
+            config: &mut config,
+            settings: &mut settings,
+            app_state: &mut app_state,
+            persistence_config: &mut persistence,
+            last_error: &mut last_error,
+            topics: &mut topics,
+        };
+
+        state.settings.paused = true;
+        assert!(state.settings.paused);
     }
 }

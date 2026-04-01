@@ -58,8 +58,8 @@ pub enum VariableDetailAction {
 
 /// Context needed to render the variable detail dialog
 pub struct VariableDetailContext {
-    /// Variable address
-    pub address: u64,
+    /// Variable address (static or dynamic)
+    pub address: crate::types::VariableAddress,
     /// Variable type as string
     pub var_type: String,
     /// Whether sampling is enabled
@@ -114,7 +114,7 @@ impl Dialog for VariableDetailDialog {
 
                 // Address (read-only)
                 ui.label("Address:");
-                ui.label(egui::RichText::new(format!("0x{:08X}", ctx.address)).monospace());
+                ui.label(egui::RichText::new(ctx.address.to_string()).monospace());
                 ui.end_row();
 
                 // Type (read-only)

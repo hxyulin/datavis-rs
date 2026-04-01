@@ -166,7 +166,7 @@ fn render_recording_controls(
     ui: &mut Ui,
     _actions: &mut Vec<AppAction>,
 ) {
-    let recorder_state = shared.topics.recorder_state;
+    let recorder_state = shared.state.topics.recorder_state;
 
     ui.label("Recording Controls");
 
@@ -214,7 +214,7 @@ fn render_recording_controls(
         SessionState::Recording => {
             ui.horizontal(|ui| {
                 ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "● REC");
-                ui.label(format!("{} frames", shared.topics.recorder_frame_count));
+                ui.label(format!("{} frames", shared.state.topics.recorder_frame_count));
             });
 
             ui.horizontal(|ui| {
@@ -242,7 +242,7 @@ fn render_snapshot_controls(
 ) {
     ui.label("Snapshots");
 
-    let has_data = !shared.topics.variable_data.is_empty();
+    let has_data = !shared.state.topics.variable_data.is_empty();
 
     ui.horizontal(|ui| {
         ui.label("Tag:");
@@ -274,7 +274,7 @@ fn render_snapshot_controls(
             }
             if ui.button("Save as Recording").clicked() {
                 let recording = build_snapshot_recording(state);
-                shared.topics.completed_recordings.push(recording);
+                shared.state.topics.completed_recordings.push(recording);
                 state.snapshot_frames.clear();
                 state.snapshot_start_time = None;
             }
@@ -289,7 +289,7 @@ fn take_snapshot(state: &mut RecorderPaneState, shared: &SharedState<'_>) {
     let timestamp = now.duration_since(start);
 
     let mut values = HashMap::new();
-    for (&var_id, var_data) in &shared.topics.variable_data {
+    for (&var_id, var_data) in &shared.state.topics.variable_data {
         if let Some(dp) = var_data.last() {
             values.insert(var_id, RecordedValue::from(dp));
         }
@@ -417,7 +417,7 @@ fn render_saved_recordings(
     shared: &mut SharedState<'_>,
     ui: &mut Ui,
 ) {
-    let recordings = &mut shared.topics.completed_recordings;
+    let recordings = &mut shared.state.topics.completed_recordings;
     ui.label(format!("Saved Recordings ({})", recordings.len()));
 
     if recordings.is_empty() {
@@ -482,11 +482,11 @@ fn render_export_tab(
 ) {
     // --- Status ---
     ui.horizontal(|ui| {
-        if shared.topics.exporter_active {
+        if shared.state.topics.exporter_active {
             ui.colored_label(egui::Color32::from_rgb(100, 255, 100), "● Active");
             ui.label(format!(
                 "{} rows written",
-                shared.topics.exporter_rows_written
+                shared.state.topics.exporter_rows_written
             ));
         } else {
             ui.label("Inactive");
@@ -550,7 +550,7 @@ fn render_export_tab(
                     state.value_choices.clear();
                 }
                 if ui.button("All Raw").clicked() {
-                    for vnode in &shared.topics.variable_tree {
+                    for vnode in &shared.state.topics.variable_tree {
                         if vnode.is_leaf && vnode.enabled {
                             state.value_choices.insert(vnode.id.0, ValueChoice::Raw);
                         }
@@ -561,7 +561,7 @@ fn render_export_tab(
             egui::ScrollArea::vertical()
                 .max_height(200.0)
                 .show(ui, |ui| {
-                    for vnode in &shared.topics.variable_tree {
+                    for vnode in &shared.state.topics.variable_tree {
                         if !vnode.is_leaf || !vnode.enabled {
                             continue;
                         }
@@ -583,7 +583,7 @@ fn render_export_tab(
 
     // Start/Stop
     ui.horizontal(|ui| {
-        if shared.topics.exporter_active {
+        if shared.state.topics.exporter_active {
             if ui.button("Stop Export").clicked() {
                 // TODO: Implement stop export with new architecture
             }

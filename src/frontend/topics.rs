@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crate::backend::DetectedProbe;
 use crate::pipeline::bridge::VariableNodeSnapshot;
 use crate::session::types::{SessionRecording, SessionState};
-use crate::types::{CollectionStats, ConnectionStatus, VariableData};
+use crate::types::{CollectionStats, ConnectionStatus, PointerState, VariableData};
 
 /// All shared data published by the backend and consumed by panes.
 ///
@@ -67,6 +67,9 @@ pub struct Topics {
     /// Track when each pane last received data (keyed by pane ID)
     pub pane_data_freshness: HashMap<u64, Instant>,
 
+    /// Pointer states for UI display (populated by backend worker)
+    pub pointer_states: HashMap<u32, PointerState>,
+
     /// Track when global data was last updated
     pub global_data_freshness: Option<Instant>,
 
@@ -95,6 +98,7 @@ impl Default for Topics {
             project_name: String::new(),
             project_file_path: None,
             elf_generation: 0,
+            pointer_states: HashMap::new(),
             pane_data_freshness: HashMap::new(),
             global_data_freshness: None,
             last_stats_update: None,

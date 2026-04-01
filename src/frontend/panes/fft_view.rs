@@ -57,13 +57,13 @@ pub fn render(
             .selected_text(
                 state
                     .target_variable_id
-                    .and_then(|id| shared.config.variables.get(&id))
+                    .and_then(|id| shared.state.config.variables.get(&id))
                     .map(|v| v.name.as_str())
                     .unwrap_or("Select..."),
             )
             .width(120.0)
             .show_ui(ui, |ui| {
-                for var in shared.config.variables.values() {
+                for var in shared.state.config.variables.values() {
                     if var.enabled && var.show_in_graph {
                         let is_selected = state.target_variable_id == Some(var.id);
                         if ui.selectable_label(is_selected, &var.name).clicked() {
@@ -150,7 +150,7 @@ pub fn render(
     // Compute FFT if we have a selected variable
     if let Some(var_id) = state.target_variable_id {
         if state.fft_result.is_none() {
-            if let Some(data) = shared.topics.variable_data.get(&var_id) {
+            if let Some(data) = shared.state.topics.variable_data.get(&var_id) {
                 if !data.data_points.is_empty() {
                     let samples: Vec<f64> =
                         data.data_points.iter().map(|p| p.converted_value).collect();
@@ -161,10 +161,10 @@ pub fn render(
                         if duration > 0.0 {
                             data.data_points.len() as f64 / duration
                         } else {
-                            shared.config.collection.poll_rate_hz as f64
+                            shared.state.config.collection.poll_rate_hz as f64
                         }
                     } else {
-                        shared.config.collection.poll_rate_hz as f64
+                        shared.state.config.collection.poll_rate_hz as f64
                     };
 
                     let result = if state.averaged {
@@ -225,7 +225,7 @@ pub fn render(
 
             let color = state
                 .target_variable_id
-                .and_then(|id| shared.config.variables.get(&id))
+                .and_then(|id| shared.state.config.variables.get(&id))
                 .map(|v| {
                     Color32::from_rgba_unmultiplied(v.color[0], v.color[1], v.color[2], v.color[3])
                 })

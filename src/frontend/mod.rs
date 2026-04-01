@@ -25,7 +25,10 @@
 //! - [`script_editor`] - Rhai script editor with syntax highlighting
 //! - `widgets` - Custom UI widgets (status indicators, sparklines, etc.)
 
+pub mod actions;
+pub mod dialog_manager;
 pub mod dialogs;
+pub mod icons;
 pub mod markers;
 pub mod pane_registry;
 pub mod pane_trait;
@@ -43,7 +46,7 @@ pub mod workspace;
 pub use panels::*;
 pub use plot::PlotView;
 pub use script_editor::{ScriptEditor, ScriptEditorState};
-pub use state::{AppAction, DialogId, SharedState};
+pub use state::{AppAction, DialogId, SharedContext, SharedMut, SharedState};
 pub use topics::Topics;
 pub use widgets::*;
 
@@ -150,29 +153,8 @@ pub struct DataVisApp {
     selected_probe_index: Option<usize>,
     target_chip_input: String,
 
-    // === Global Dialogs ===
-    variable_change_open: bool,
-    variable_change_state: VariableChangeState,
-    elf_symbols_open: bool,
-    elf_symbols_state: ElfSymbolsState,
-    duplicate_confirm_open: bool,
-    duplicate_confirm_state: DuplicateConfirmState,
-
-    // === Connection dialog ===
-    connection_dialog_open: bool,
-
-    // === Settings dialogs (Phase 3) ===
-    connection_settings_open: bool,
-    connection_settings_state: ConnectionSettingsState,
-    collection_settings_open: bool,
-    collection_settings_state: CollectionSettingsState,
-    persistence_settings_open: bool,
-    persistence_settings_state: PersistenceSettingsState,
-    preferences_open: bool,
-    preferences_state: PreferencesState,
-
-    // === Help dialog ===
-    help_open: bool,
+    // === All dialog state ===
+    dialogs: dialog_manager::DialogManager,
 
     // === UI Session State (for automatic persistence) ===
     ui_session: crate::config::UiSessionState,
@@ -432,22 +414,7 @@ impl DataVisApp {
             show_status_bar,
             selected_probe_index,
             target_chip_input,
-            variable_change_open: false,
-            variable_change_state: VariableChangeState::default(),
-            elf_symbols_open: false,
-            elf_symbols_state: ElfSymbolsState::default(),
-            duplicate_confirm_open: false,
-            duplicate_confirm_state: DuplicateConfirmState::default(),
-            connection_dialog_open: false,
-            connection_settings_open: false,
-            connection_settings_state: ConnectionSettingsState::default(),
-            collection_settings_open: false,
-            collection_settings_state: CollectionSettingsState::default(),
-            persistence_settings_open: false,
-            persistence_settings_state: PersistenceSettingsState::default(),
-            preferences_open: false,
-            preferences_state: PreferencesState::default(),
-            help_open: false,
+            dialogs: dialog_manager::DialogManager::new(),
             ui_session,
         }
     }
@@ -604,6 +571,9 @@ impl DataVisApp {
                     tracing::info!("Recording complete: {} frames", recording.frames.len());
                     self.topics.completed_recordings.push(recording);
                 }
+                SinkMessage::PointerStates(states) => {
+                    self.topics.pointer_states = states;
+                }
             }
         }
 
@@ -670,91 +640,59 @@ impl DataVisApp {
             AppAction::AddVariable(var) => {
                 self.add_variable(var);
             }
-            AppAction::AddStructVariable { parent, children } => {
-                let parent_id = parent.id;
-                let parent_color = parent.color;
-                let child_count = children.len();
-                self.add_variable_confirmed(parent);
-                for (i, child_spec) in children.into_iter().enumerate() {
-                    let mut child = crate::types::Variable::new(
-                        &child_spec.name,
-                        child_spec.address,
-                        child_spec.var_type,
-                    );
-                    child.parent_id = Some(parent_id);
-                    child.enabled = false;
-                    child.show_in_graph = false;
-                    child.color =
-                        crate::types::Variable::generate_child_color(parent_color, i, child_count);
-                    self.add_variable_confirmed(child);
-                }
-            }
-            AppAction::AddPointerVariable {
-                mut pointer,
+            AppAction::AddStructVariable {
+                mut parent,
                 children,
                 pointer_poll_rate_hz,
             } => {
-                use crate::types::{PointerMetadata, PointerState};
+                let parent_id = parent.id;
+                let parent_color = parent.color;
 
-                let pointer_id = pointer.id;
-                let pointer_color = pointer.color;
-                let child_count = children.len();
-
-                // Set up pointer metadata on parent
-                pointer.pointer_metadata = Some(PointerMetadata {
-                    cached_address: None,
-                    last_pointer_read: None,
-                    pointer_poll_rate_hz,
-                    pointer_parent_id: None,
-                    offset_from_pointer: 0,
-                    pointer_state: PointerState::Unread,
-                });
-
-                self.add_variable_confirmed(pointer);
-
-                // Create dependent child variables
-                for (i, child_spec) in children.into_iter().enumerate() {
-                    let mut child = crate::types::Variable::new(
-                        &child_spec.name,
-                        0,
-                        child_spec.var_type, // Address will be resolved at runtime
-                    );
-                    child.parent_id = Some(pointer_id);
-                    child.enabled = false;
-                    child.show_in_graph = false;
-                    child.color =
-                        crate::types::Variable::generate_child_color(pointer_color, i, child_count);
-
-                    // Set up pointer metadata for dependent child
-                    child.pointer_metadata = Some(PointerMetadata {
-                        cached_address: None,
-                        last_pointer_read: None,
-                        pointer_poll_rate_hz: 0, // Children don't poll independently
-                        pointer_parent_id: Some(pointer_id),
-                        offset_from_pointer: child_spec.offset_from_pointer,
-                        pointer_state: PointerState::Unread,
+                if let Some(poll_rate) = pointer_poll_rate_hz {
+                    parent.pointer_metadata = Some(crate::types::PointerMetadata {
+                        pointer_poll_rate_hz: poll_rate,
+                        pointer_parent_id: None,
+                        offset_from_pointer: 0,
                     });
-
-                    self.add_variable_confirmed(child);
                 }
+                self.add_variable_confirmed(parent);
+                self.add_children_recursive(
+                    parent_id,
+                    parent_color,
+                    &children,
+                    if pointer_poll_rate_hz.is_some() {
+                        Some(parent_id)
+                    } else {
+                        None
+                    },
+                );
             }
             AppAction::RemoveVariable(id) => {
-                // Remove children first
-                let child_ids: Vec<u32> = self
-                    .config
-                    .variables
-                    .values()
-                    .filter(|v| v.parent_id == Some(id))
-                    .map(|v| v.id)
-                    .collect();
-                for child_id in child_ids {
-                    self.remove_variable_internal(child_id);
-                }
-                self.remove_variable_internal(id);
+                self.remove_variable_recursive(id);
             }
             AppAction::UpdateVariable(var) => {
                 self.frontend
                     .send_command(PipelineCommand::UpdateVariable(var));
+            }
+            AppAction::SetVariablePollRate { id, rate_hz } => {
+                let cmds = actions::variable_actions::set_variable_poll_rate(
+                    &mut self.config.variables,
+                    id,
+                    rate_hz,
+                );
+                for cmd in cmds {
+                    self.frontend.send_command(cmd);
+                }
+            }
+            AppAction::ToggleTreeEnabled { root_id, enabled } => {
+                let cmds = actions::variable_actions::toggle_tree_enabled(
+                    &mut self.config.variables,
+                    root_id,
+                    enabled,
+                );
+                for cmd in cmds {
+                    self.frontend.send_command(cmd);
+                }
             }
             AppAction::WriteVariable { id, value } => {
                 self.frontend.write_variable(id, value);
@@ -875,36 +813,14 @@ impl DataVisApp {
                 }
             }
             AppAction::RenameVariable { id, new_name } => {
-                let old_name = self.config.find_variable(id).map(|v| v.name.clone());
-                if let Some(old_name) = old_name {
-                    // Update parent name in config
-                    if let Some(var) = self.config.find_variable_mut(id) {
-                        var.name = new_name.clone();
-                    }
-                    // Update parent name in topics
-                    if let Some(data) = self.topics.variable_data.get_mut(&id) {
-                        data.variable.name = new_name.clone();
-                    }
-                    // Propagate prefix change to children
-                    let child_ids: Vec<u32> = self
-                        .config
-                        .variables
-                        .values()
-                        .filter(|v| v.parent_id == Some(id))
-                        .map(|v| v.id)
-                        .collect();
-                    for child_id in child_ids {
-                        if let Some(child) = self.config.find_variable_mut(child_id) {
-                            if let Some(suffix) = child.name.strip_prefix(&old_name) {
-                                child.name = format!("{}{}", new_name, suffix);
-                            }
-                        }
-                        if let Some(child_data) = self.topics.variable_data.get_mut(&child_id) {
-                            if let Some(suffix) = child_data.variable.name.strip_prefix(&old_name) {
-                                child_data.variable.name = format!("{}{}", new_name, suffix);
-                            }
-                        }
-                    }
+                let cmds = actions::variable_actions::rename_variable(
+                    &mut self.config.variables,
+                    &mut self.topics.variable_data,
+                    id,
+                    new_name,
+                );
+                for cmd in cmds {
+                    self.frontend.send_command(cmd);
                 }
             } // Pipeline actions removed in Phase 3
               // AppAction::AddPipelineNode, AddPipelineNodeWithConfig, etc. no longer exist
@@ -918,10 +834,10 @@ impl DataVisApp {
             | DialogId::ValueEditor(_)
             | DialogId::VariableDetail(_) => {}
             DialogId::ElfSymbols => {
-                self.elf_symbols_open = true;
+                self.dialogs.elf_symbols.0 = true;
             }
             DialogId::VariableChange => {
-                self.variable_change_open = true;
+                self.dialogs.variable_change.0 = true;
             }
             DialogId::DuplicateConfirm => {}
         }
@@ -958,8 +874,8 @@ impl DataVisApp {
             .any(|v| v.address == var.address);
 
         if is_duplicate {
-            self.duplicate_confirm_state = DuplicateConfirmState::with_variable(var);
-            self.duplicate_confirm_open = true;
+            self.dialogs.duplicate_confirm.1 = DuplicateConfirmState::with_variable(var);
+            self.dialogs.duplicate_confirm.0 = true;
         } else {
             self.add_variable_confirmed(var);
         }
@@ -973,12 +889,70 @@ impl DataVisApp {
         self.frontend.add_variable(var);
     }
 
+    fn add_children_recursive(
+        &mut self,
+        parent_id: u32,
+        parent_color: [u8; 4],
+        children: &[crate::frontend::state::ChildVariableSpec],
+        pointer_parent_id: Option<u32>,
+    ) {
+        use crate::frontend::state::ChildAddressMode;
+
+        let child_count = children.len();
+        for (i, spec) in children.iter().enumerate() {
+            let address = match &spec.address_mode {
+                ChildAddressMode::Absolute(addr) => *addr,
+                ChildAddressMode::RelativeToPointer { .. } => 0, // resolved at runtime
+            };
+            let mut child =
+                crate::types::Variable::new(&spec.name, address, spec.var_type);
+            child.parent_id = Some(parent_id);
+            child.enabled = false;
+            child.show_in_graph = false;
+            child.color =
+                crate::types::Variable::generate_child_color(parent_color, i, child_count);
+
+            // Set pointer metadata for pointer-dependent children
+            if let ChildAddressMode::RelativeToPointer { offset } = &spec.address_mode {
+                if let Some(ptr_parent) = pointer_parent_id {
+                    child.pointer_metadata = Some(crate::types::PointerMetadata {
+                        pointer_poll_rate_hz: 0,
+                        pointer_parent_id: Some(ptr_parent),
+                        offset_from_pointer: *offset,
+                    });
+                }
+            }
+
+            let child_id = child.id;
+            let child_color = child.color;
+            self.add_variable_confirmed(child);
+            if !spec.children.is_empty() {
+                self.add_children_recursive(child_id, child_color, &spec.children, pointer_parent_id);
+            }
+        }
+    }
+
+    fn remove_variable_recursive(&mut self, id: u32) {
+        let child_ids: Vec<u32> = self
+            .config
+            .variables
+            .values()
+            .filter(|v| v.parent_id == Some(id))
+            .map(|v| v.id)
+            .collect();
+        for child_id in child_ids {
+            self.remove_variable_recursive(child_id);
+        }
+        self.remove_variable_internal(id);
+    }
+
     fn remove_variable_internal(&mut self, id: u32) {
         self.config.remove_variable(id);
         self.topics.variable_data.remove(&id);
         self.frontend
             .send_command(PipelineCommand::RemoveVariable(id));
     }
+
 
     fn clear_all_data(&mut self) {
         for data in self.topics.variable_data.values_mut() {
@@ -996,8 +970,8 @@ impl DataVisApp {
 
         if let Some(action) = show_dialog::<ElfSymbolsDialog>(
             ctx,
-            &mut self.elf_symbols_open,
-            &mut self.elf_symbols_state,
+            &mut self.dialogs.elf_symbols.0,
+            &mut self.dialogs.elf_symbols.1,
             dialog_ctx,
         ) {
             match action {
@@ -1172,16 +1146,16 @@ impl DataVisApp {
                 "Detected {} variable changes after ELF reload",
                 changes.len()
             );
-            self.variable_change_state = VariableChangeState::with_changes(changes);
-            self.variable_change_open = true;
+            self.dialogs.variable_change.1 = VariableChangeState::with_changes(changes);
+            self.dialogs.variable_change.0 = true;
         }
     }
 
     fn render_variable_change_with_context(&mut self, ctx: &egui::Context) {
         if let Some(action) = show_dialog::<VariableChangeDialog>(
             ctx,
-            &mut self.variable_change_open,
-            &mut self.variable_change_state,
+            &mut self.dialogs.variable_change.0,
+            &mut self.dialogs.variable_change.1,
             VariableChangeContext,
         ) {
             match action {
@@ -1189,7 +1163,7 @@ impl DataVisApp {
                     self.apply_selected_variable_changes();
                 }
                 VariableChangeAction::UpdateAll => {
-                    self.variable_change_state.select_all();
+                    self.dialogs.variable_change.1.select_all();
                     self.apply_selected_variable_changes();
                 }
             }
@@ -1201,7 +1175,7 @@ impl DataVisApp {
         let mut address_updates: Vec<(u32, u64)> = Vec::new();
         let mut type_updates: Vec<(u32, VariableType)> = Vec::new();
 
-        for change in &self.variable_change_state.changes {
+        for change in &self.dialogs.variable_change.1.changes {
             if !change.selected {
                 continue;
             }
@@ -1356,31 +1330,31 @@ impl DataVisApp {
                 self.show_status_bar = !self.show_status_bar;
             }
             MenuEvent::OpenConnectionSettings => {
-                self.connection_settings_state =
+                self.dialogs.connection_settings.1 =
                     ConnectionSettingsState::from_config(&self.config.probe);
-                self.connection_settings_open = true;
+                self.dialogs.connection_settings.0 = true;
             }
             MenuEvent::OpenCollectionSettings => {
-                self.collection_settings_state =
+                self.dialogs.collection_settings.1 =
                     CollectionSettingsState::from_config(&self.config.collection);
-                self.collection_settings_open = true;
+                self.dialogs.collection_settings.0 = true;
             }
             MenuEvent::OpenPersistenceSettings => {
-                self.persistence_settings_state =
+                self.dialogs.persistence_settings.1 =
                     PersistenceSettingsState::from_config(&self.persistence_config);
-                self.persistence_settings_open = true;
+                self.dialogs.persistence_settings.0 = true;
             }
             MenuEvent::OpenPreferences => {
-                self.preferences_state =
+                self.dialogs.preferences.1 =
                     PreferencesState::from_config(&self.config.ui, &self.app_state.ui_preferences);
-                self.preferences_open = true;
+                self.dialogs.preferences.0 = true;
             }
             MenuEvent::OpenElfSymbols => {
-                self.elf_symbols_state = ElfSymbolsState::default();
-                self.elf_symbols_open = true;
+                self.dialogs.elf_symbols.1 = ElfSymbolsState::default();
+                self.dialogs.elf_symbols.0 = true;
             }
             MenuEvent::OpenHelp => {
-                self.help_open = true;
+                self.dialogs.help = true;
             }
             MenuEvent::OpenLogDirectory => {
                 if let Some(log_dir) = crate::config::log_dir() {
@@ -1398,11 +1372,11 @@ impl DataVisApp {
             }
             MenuEvent::OpenShortcuts => {
                 // TODO: Implement shortcuts dialog
-                self.help_open = true;
+                self.dialogs.help = true;
             }
             MenuEvent::OpenAbout => {
                 // TODO: Implement about dialog
-                self.help_open = true;
+                self.dialogs.help = true;
             }
             MenuEvent::LoadElf => {
                 if let Some(path) = rfd::FileDialog::new()
@@ -1607,9 +1581,9 @@ impl DataVisApp {
                 // === Tools menu ===
                 ui.menu_button("Tools", |ui| {
                     if ui.button("Connection Settings...").clicked() {
-                        self.connection_settings_state =
+                        self.dialogs.connection_settings.1 =
                             ConnectionSettingsState::from_config(&self.config.probe);
-                        self.connection_settings_open = true;
+                        self.dialogs.connection_settings.0 = true;
                         ui.close();
                     }
                     ui.separator();
@@ -1624,29 +1598,29 @@ impl DataVisApp {
                         ui.close();
                     }
                     if ui.button("Browse ELF Symbols...").clicked() {
-                        self.elf_symbols_open = true;
+                        self.dialogs.elf_symbols.0 = true;
                         ui.close();
                     }
                     ui.separator();
                     if ui.button("Collection Settings...").clicked() {
-                        self.collection_settings_state =
+                        self.dialogs.collection_settings.1 =
                             CollectionSettingsState::from_config(&self.config.collection);
-                        self.collection_settings_open = true;
+                        self.dialogs.collection_settings.0 = true;
                         ui.close();
                     }
                     if ui.button("Data Persistence...").clicked() {
-                        self.persistence_settings_state =
+                        self.dialogs.persistence_settings.1 =
                             PersistenceSettingsState::from_config(&self.persistence_config);
-                        self.persistence_settings_open = true;
+                        self.dialogs.persistence_settings.0 = true;
                         ui.close();
                     }
                     ui.separator();
                     if ui.button("Preferences...").clicked() {
-                        self.preferences_state = PreferencesState::from_config(
+                        self.dialogs.preferences.1 = PreferencesState::from_config(
                             &self.config.ui,
                             &self.app_state.ui_preferences,
                         );
-                        self.preferences_open = true;
+                        self.dialogs.preferences.0 = true;
                         ui.close();
                     }
                 });
@@ -1654,7 +1628,7 @@ impl DataVisApp {
                 // === Help menu ===
                 ui.menu_button("Help", |ui| {
                     if ui.button("Getting Started").clicked() {
-                        self.help_open = true;
+                        self.dialogs.help = true;
                         ui.close();
                     }
                     if ui.button("Open Log Directory").clicked() {
@@ -1697,7 +1671,7 @@ impl DataVisApp {
                     .on_hover_text("Click to connect to a debug probe")
                     .clicked()
                 {
-                    self.connection_dialog_open = true;
+                    self.dialogs.connection_dialog = true;
                 }
                 return;
             }
@@ -1806,9 +1780,9 @@ impl DataVisApp {
 
             ui.separator();
             if ui.small_button("Connection Settings...").clicked() {
-                self.connection_settings_state =
+                self.dialogs.connection_settings.1 =
                     ConnectionSettingsState::from_config(&self.config.probe);
-                self.connection_settings_open = true;
+                self.dialogs.connection_settings.0 = true;
                 ui.close();
             }
         });
@@ -1818,7 +1792,7 @@ impl DataVisApp {
     /// Render the settings dialogs (connection, collection, persistence, preferences)
     fn render_settings_dialogs(&mut self, ctx: &egui::Context) {
         // Connection dialog (main connect UI)
-        if self.connection_dialog_open {
+        if self.dialogs.connection_dialog {
             let mut should_close = false;
             egui::Window::new("Connect to Probe")
                 .collapsible(false)
@@ -1928,27 +1902,27 @@ impl DataVisApp {
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("Settings...").clicked() {
-                                self.connection_settings_state =
+                                self.dialogs.connection_settings.1 =
                                     ConnectionSettingsState::from_config(&self.config.probe);
-                                self.connection_settings_open = true;
+                                self.dialogs.connection_settings.0 = true;
                             }
                         });
                     });
                 });
 
             if should_close {
-                self.connection_dialog_open = false;
+                self.dialogs.connection_dialog = false;
             }
         }
 
         // Connection settings dialog
-        if self.connection_settings_open {
+        if self.dialogs.connection_settings.0 {
             // Sync state from config when opening
             let dialog_ctx = ConnectionSettingsContext;
             if let Some(action) = show_dialog::<ConnectionSettingsDialog>(
                 ctx,
-                &mut self.connection_settings_open,
-                &mut self.connection_settings_state,
+                &mut self.dialogs.connection_settings.0,
+                &mut self.dialogs.connection_settings.1,
                 dialog_ctx,
             ) {
                 match action {
@@ -1983,12 +1957,12 @@ impl DataVisApp {
         }
 
         // Collection settings dialog
-        if self.collection_settings_open {
+        if self.dialogs.collection_settings.0 {
             let dialog_ctx = CollectionSettingsContext;
             if let Some(action) = show_dialog::<CollectionSettingsDialog>(
                 ctx,
-                &mut self.collection_settings_open,
-                &mut self.collection_settings_state,
+                &mut self.dialogs.collection_settings.0,
+                &mut self.dialogs.collection_settings.1,
                 dialog_ctx,
             ) {
                 match action {
@@ -2008,12 +1982,12 @@ impl DataVisApp {
         }
 
         // Persistence settings dialog
-        if self.persistence_settings_open {
+        if self.dialogs.persistence_settings.0 {
             let dialog_ctx = PersistenceSettingsContext;
             if let Some(action) = show_dialog::<PersistenceSettingsDialog>(
                 ctx,
-                &mut self.persistence_settings_open,
-                &mut self.persistence_settings_state,
+                &mut self.dialogs.persistence_settings.0,
+                &mut self.dialogs.persistence_settings.1,
                 dialog_ctx,
             ) {
                 match action {
@@ -2025,12 +1999,12 @@ impl DataVisApp {
         }
 
         // Preferences dialog
-        if self.preferences_open {
+        if self.dialogs.preferences.0 {
             let dialog_ctx = PreferencesContext;
             if let Some(action) = show_dialog::<PreferencesDialog>(
                 ctx,
-                &mut self.preferences_open,
-                &mut self.preferences_state,
+                &mut self.dialogs.preferences.0,
+                &mut self.dialogs.preferences.1,
                 dialog_ctx,
             ) {
                 match action {
@@ -2054,7 +2028,7 @@ impl DataVisApp {
         }
 
         // Help dialog
-        if self.help_open {
+        if self.dialogs.help {
             egui::Window::new("Getting Started")
                 .collapsible(true)
                 .resizable(true)
@@ -2109,7 +2083,7 @@ impl DataVisApp {
                         ui.separator();
                         ui.add_space(4.0);
                         if ui.button("Close").clicked() {
-                            self.help_open = false;
+                            self.dialogs.help = false;
                         }
                     });
                 });
@@ -2127,18 +2101,22 @@ impl DataVisApp {
         for pane_id in pane_ids {
             if let Some(pane) = self.workspace.pane_states.get_mut(&pane_id) {
                 let mut shared = SharedState {
-                    frontend: &self.frontend,
-                    config: &mut self.config,
-                    settings: &mut self.settings,
-                    app_state: &mut self.app_state,
-                    elf_info: self.elf_info.as_ref(),
-                    elf_symbols: &self.elf_symbols,
-                    elf_file_path: self.elf_file_path.as_ref(),
-                    persistence_config: &mut self.persistence_config,
-                    last_error: &mut self.last_error,
-                    display_time,
-                    topics: &mut self.topics,
-                    current_pane_id: Some(pane_id),
+                    ctx: SharedContext {
+                        frontend: &self.frontend,
+                        elf_info: self.elf_info.as_ref(),
+                        elf_symbols: &self.elf_symbols,
+                        elf_file_path: self.elf_file_path.as_ref(),
+                        display_time,
+                        current_pane_id: Some(pane_id),
+                    },
+                    state: SharedMut {
+                        config: &mut self.config,
+                        settings: &mut self.settings,
+                        app_state: &mut self.app_state,
+                        persistence_config: &mut self.persistence_config,
+                        last_error: &mut self.last_error,
+                        topics: &mut self.topics,
+                    },
                 };
 
                 let pane_actions = pane.render_dialogs(&mut shared, ctx);
@@ -2272,7 +2250,7 @@ impl eframe::App for DataVisApp {
         self.render_settings_dialogs(ctx);
 
         // Duplicate confirm dialog
-        if self.duplicate_confirm_open {
+        if self.dialogs.duplicate_confirm.0 {
             use dialogs::{
                 show_dialog, DuplicateConfirmAction, DuplicateConfirmContext,
                 DuplicateConfirmDialog,
@@ -2281,8 +2259,8 @@ impl eframe::App for DataVisApp {
             let dialog_ctx = DuplicateConfirmContext;
             if let Some(action) = show_dialog::<DuplicateConfirmDialog>(
                 ctx,
-                &mut self.duplicate_confirm_open,
-                &mut self.duplicate_confirm_state,
+                &mut self.dialogs.duplicate_confirm.0,
+                &mut self.dialogs.duplicate_confirm.1,
                 dialog_ctx,
             ) {
                 match action {
