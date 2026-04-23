@@ -700,6 +700,12 @@ pub struct ProbeConfig {
     /// When None, derived from target_chip via family prefix mapping
     #[serde(default)]
     pub openocd_target: Option<String>,
+
+    /// How the OpenOCD backend obtains a TCL server:
+    /// - `Spawn` (default): start `openocd` as a subprocess on a free port
+    /// - `External`: connect to an already-running TCL server at host:port
+    #[serde(default)]
+    pub openocd_mode: OpenOcdMode,
 }
 
 fn default_usb_timeout_ms() -> u64 {
@@ -731,7 +737,34 @@ impl Default for ProbeConfig {
             openocd_path: None,
             openocd_interface: None,
             openocd_target: None,
+            openocd_mode: OpenOcdMode::default(),
         }
+    }
+}
+
+/// How the OpenOCD backend obtains its TCL server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OpenOcdMode {
+    /// Spawn a new `openocd` subprocess on a free port (current behaviour).
+    Spawn,
+    /// Connect to an already-running OpenOCD TCL server.
+    External { host: String, port: u16 },
+}
+
+impl OpenOcdMode {
+    /// The default values used when the user first switches into External mode.
+    pub fn default_external() -> Self {
+        OpenOcdMode::External {
+            host: "127.0.0.1".to_string(),
+            port: 6666,
+        }
+    }
+}
+
+impl Default for OpenOcdMode {
+    fn default() -> Self {
+        OpenOcdMode::Spawn
     }
 }
 
@@ -1041,5 +1074,43 @@ mod tests {
         assert_eq!(format_file_size(1024), "1.00 KB");
         assert_eq!(format_file_size(1024 * 1024), "1.00 MB");
         assert_eq!(format_file_size(2 * 1024 * 1024 * 1024), "2.00 GB");
+    }
+
+    #[test]
+    fn test_openocd_mode_serde_roundtrip() {
+        let spawn = OpenOcdMode::Spawn;
+        let json = serde_json::to_string(&spawn).unwrap();
+        let back: OpenOcdMode = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, OpenOcdMode::Spawn));
+
+        let external = OpenOcdMode::External {
+            host: "192.168.1.10".to_string(),
+            port: 6666,
+        };
+        let json = serde_json::to_string(&external).unwrap();
+        let back: OpenOcdMode = serde_json::from_str(&json).unwrap();
+        match back {
+            OpenOcdMode::External { host, port } => {
+                assert_eq!(host, "192.168.1.10");
+                assert_eq!(port, 6666);
+            }
+            _ => panic!("expected External variant"),
+        }
+    }
+
+    #[test]
+    fn test_openocd_mode_default_is_spawn() {
+        assert!(matches!(OpenOcdMode::default(), OpenOcdMode::Spawn));
+    }
+
+    #[test]
+    fn test_probe_config_loads_without_openocd_mode() {
+        // Simulate an older saved config that predates `openocd_mode`.
+        let json = serde_json::to_string(&ProbeConfig::default()).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value.as_object_mut().unwrap().remove("openocd_mode");
+        let trimmed = serde_json::to_string(&value).unwrap();
+        let loaded: ProbeConfig = serde_json::from_str(&trimmed).unwrap();
+        assert!(matches!(loaded.openocd_mode, OpenOcdMode::Spawn));
     }
 }

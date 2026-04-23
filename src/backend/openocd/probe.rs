@@ -8,25 +8,40 @@ use crate::config::ProbeConfig;
 use crate::error::{DataVisError, Result};
 use crate::types::{Variable, VariableType};
 
-use super::process::OpenOcdProcess;
+use super::process::OpenOcdConnection;
 use super::tcl_client::TclClient;
 
 pub struct OpenOcdProbe {
-    process: Option<OpenOcdProcess>,
+    conn: Option<OpenOcdConnection>,
     client: Option<TclClient>,
     config: ProbeConfig,
     connected: bool,
     stats: ProbeStats,
+    /// Last time we emitted a raw-bytes DEBUG log, for rate limiting.
+    last_raw_log: Option<std::time::Instant>,
 }
 
 impl OpenOcdProbe {
     pub fn new(config: ProbeConfig) -> Self {
         Self {
-            process: None,
+            conn: None,
             client: None,
             config,
             connected: false,
             stats: ProbeStats::default(),
+            last_raw_log: None,
+        }
+    }
+
+    /// Should we emit a DEBUG-level raw-bytes log this read? Throttled to 1/sec.
+    fn should_log_raw(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        match self.last_raw_log {
+            Some(ts) if now.duration_since(ts) < std::time::Duration::from_secs(1) => false,
+            _ => {
+                self.last_raw_log = Some(now);
+                true
+            }
         }
     }
 
@@ -93,13 +108,13 @@ impl DebugProbe for OpenOcdProbe {
 
         tracing::info!("Starting OpenOCD for target: {}", target);
 
-        // Spawn OpenOCD process
-        let process = OpenOcdProcess::spawn(&self.config)?;
+        // Establish connection (spawn new OpenOCD or attach to existing TCL server)
+        let conn = OpenOcdConnection::connect(&self.config)?;
 
         // Connect TCL client
-        let client = process.connect_client()?;
+        let client = conn.connect_client()?;
 
-        self.process = Some(process);
+        self.conn = Some(conn);
         self.client = Some(client);
         self.connected = true;
         self.stats = ProbeStats::default();
@@ -112,8 +127,8 @@ impl DebugProbe for OpenOcdProbe {
         self.connected = false;
         self.client = None;
 
-        if let Some(process) = self.process.take() {
-            process.shutdown();
+        if let Some(conn) = self.conn.take() {
+            conn.shutdown();
         }
     }
 
@@ -130,6 +145,14 @@ impl DebugProbe for OpenOcdProbe {
         let read_time_us = read_time.as_micros() as u64;
         self.stats.record_success(read_time_us, bytes.len() as u64);
 
+        tracing::trace!(
+            "openocd read {} @ 0x{:08X} ({} B): {:02X?}",
+            variable.name,
+            variable.address,
+            bytes.len(),
+            bytes
+        );
+
         variable
             .var_type
             .parse_to_f64(&bytes)
@@ -140,11 +163,28 @@ impl DebugProbe for OpenOcdProbe {
         let start = std::time::Instant::now();
         let mut results = Vec::with_capacity(variables.len());
         let mut total_bytes = 0u64;
+        let log_raw_this_poll = self.should_log_raw();
 
         for variable in variables {
             match self.read_variable_bytes(variable) {
                 Ok(bytes) => {
                     total_bytes += bytes.len() as u64;
+                    tracing::trace!(
+                        "openocd read {} @ 0x{:08X} ({} B): {:02X?}",
+                        variable.name,
+                        variable.address,
+                        bytes.len(),
+                        bytes
+                    );
+                    if log_raw_this_poll {
+                        tracing::debug!(
+                            "openocd raw bytes: {} @ 0x{:08X} ({} B) = {:02X?}",
+                            variable.name,
+                            variable.address,
+                            bytes.len(),
+                            bytes
+                        );
+                    }
                     match variable.var_type.parse_to_f64(&bytes) {
                         Some(value) => results.push(Ok(value)),
                         None => results.push(Err(DataVisError::Variable(

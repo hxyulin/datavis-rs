@@ -151,7 +151,6 @@ impl DataRouter {
 /// The backend worker that runs the polling loop
 pub struct BackendWorker {
     /// Application configuration
-    #[allow(dead_code)]
     config: AppConfig,
     /// Command receiver from the UI
     command_rx: Receiver<BackendCommand>,
@@ -161,6 +160,12 @@ pub struct BackendWorker {
     running: Arc<AtomicBool>,
     /// Probe backend for SWD operations (supports both real and mock probes)
     probe: Box<dyn DebugProbe>,
+    /// Backend type currently instantiated as the "real" probe
+    ///
+    /// Tracked separately from `config.probe.backend_type` so that we can
+    /// detect when the user has switched backends via the Connection Settings
+    /// dialog and rebuild `probe` on the next Connect.
+    current_backend_type: BackendType,
     /// Whether currently using a mock probe (only with mock-probe feature)
     #[cfg(feature = "mock-probe")]
     is_mock_probe: bool,
@@ -182,6 +187,8 @@ pub struct BackendWorker {
     last_poll_time: Instant,
     /// Last time stats were sent to UI
     last_stats_time: Instant,
+    /// Last time we logged the core's halt state during collection
+    last_halt_check_time: Instant,
     /// Two-stage read planner for pointer dereferencing
     dependent_read_planner: DependentReadPlanner,
     /// Runtime state for pointer variables (transient, not serialized)
@@ -201,10 +208,7 @@ impl BackendWorker {
     ) -> Self {
         let poll_rate_hz = config.collection.poll_rate_hz;
         let backend_type = config.probe.backend_type;
-        let probe: Box<dyn DebugProbe> = match backend_type {
-            BackendType::ProbeRs => Box::new(ProbeBackend::from_app_config(&config)),
-            BackendType::OpenOcd => Box::new(OpenOcdProbe::new(config.probe.clone())),
-        };
+        let probe = Self::build_real_probe(&config);
         tracing::info!("Loaded backend: {backend_type}");
 
         Self {
@@ -213,6 +217,7 @@ impl BackendWorker {
             message_tx,
             running,
             probe,
+            current_backend_type: backend_type,
             #[cfg(feature = "mock-probe")]
             is_mock_probe: false,
             converter_engine: ConverterEngine::new(),
@@ -224,6 +229,7 @@ impl BackendWorker {
             stats: CollectionStats::default(),
             last_poll_time: Instant::now(),
             last_stats_time: Instant::now(),
+            last_halt_check_time: Instant::now(),
             dependent_read_planner: DependentReadPlanner::new(),
             pointer_runtime: HashMap::new(),
             data_router: DataRouter::new(),
@@ -332,10 +338,8 @@ impl BackendWorker {
                     tracing::info!("Switched to mock probe");
                 } else if !use_mock && self.is_mock_probe {
                     let backend_type = self.config.probe.backend_type;
-                    self.probe = match backend_type {
-                        BackendType::ProbeRs => Box::new(ProbeBackend::from_app_config(&self.config)),
-                        BackendType::OpenOcd => Box::new(OpenOcdProbe::new(self.config.probe.clone())),
-                    };
+                    self.probe = Self::build_real_probe(&self.config);
+                    self.current_backend_type = backend_type;
                     self.is_mock_probe = false;
                     tracing::info!("Switched to real probe: {backend_type}");
                 }
@@ -386,13 +390,44 @@ impl BackendWorker {
         }
     }
 
+    /// Build a real (non-mock) probe based on the given config's backend type.
+    fn build_real_probe(config: &AppConfig) -> Box<dyn DebugProbe> {
+        match config.probe.backend_type {
+            BackendType::ProbeRs => Box::new(ProbeBackend::from_app_config(config)),
+            BackendType::OpenOcd => Box::new(OpenOcdProbe::new(config.probe.clone())),
+        }
+    }
+
     /// Handle connect command
     fn handle_connect(
         &mut self,
         selector: Option<String>,
         target: String,
-        _probe_config: crate::config::ProbeConfig,
+        probe_config: crate::config::ProbeConfig,
     ) {
+        // Adopt the latest probe config so speed, connect-under-reset, OpenOCD
+        // paths, etc. are honoured on this connect and on future operations.
+        let backend_type = probe_config.backend_type;
+        self.config.probe = probe_config;
+
+        // Rebuild the real probe on every Connect so that config edits (OpenOCD
+        // path/interface/target, speed, etc.) reach the backend — probes capture
+        // config by value at construction, so updating `self.config` alone isn't
+        // enough. Skip the rebuild when we're on the mock probe; UseMockProbe
+        // owns that transition.
+        let on_mock = {
+            #[cfg(feature = "mock-probe")]
+            { self.is_mock_probe }
+            #[cfg(not(feature = "mock-probe"))]
+            { false }
+        };
+        if !on_mock {
+            self.probe.disconnect();
+            self.probe = Self::build_real_probe(&self.config);
+            self.current_backend_type = backend_type;
+        }
+        tracing::info!("Handling connect: backend={}", backend_type);
+
         self.update_connection_status(ConnectionStatus::Connecting);
 
         // Connect using the trait method (works for both real and mock probes)
@@ -423,15 +458,36 @@ impl BackendWorker {
     /// Start data collection
     fn start_collection(&mut self) {
         if self.connection_status == ConnectionStatus::Connected {
-            // Resume the core if it was halted (e.g., from halt_on_connect)
-            match self.probe.resume() {
-                Ok(()) => tracing::info!("Core resumed for data collection"),
-                Err(e) => tracing::warn!("Failed to resume core (may already be running): {}", e),
+            // Resume the core if it was halted (e.g., from halt_on_connect).
+            // A resume failure is not fatal on its own — the core may already
+            // be running — but if the core is *still halted* afterwards, ARM AP
+            // reads will return frozen bytes and the plot will show a flat
+            // line. Surface that case to the UI instead of logging silently.
+            let resume_result = self.probe.resume();
+            if let Err(e) = &resume_result {
+                tracing::warn!("Failed to resume core (may already be running): {}", e);
+            } else {
+                tracing::info!("Core resumed for data collection");
+            }
+
+            match self.probe.is_halted() {
+                Ok(true) => {
+                    let msg = "Core is halted at start of collection — samples will be constant until the core resumes (check halt_on_connect and any breakpoints)".to_string();
+                    tracing::error!("{msg}");
+                    let _ = self
+                        .message_tx
+                        .send(BackendMessage::ConnectionError(msg));
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!("Could not query core halt state: {}", e);
+                }
             }
 
             self.collecting = true;
             self.start_time = Instant::now();
             self.stats = CollectionStats::default();
+            self.last_halt_check_time = Instant::now();
             tracing::info!("Started data collection");
         }
     }
@@ -552,6 +608,16 @@ impl BackendWorker {
 
         if enabled_vars.is_empty() {
             return;
+        }
+
+        // Periodic halt-state sanity check — helps diagnose flat-line plots
+        // caused by an unexpectedly halted core (see start_collection).
+        if self.last_halt_check_time.elapsed() >= Duration::from_secs(1) {
+            match self.probe.is_halted() {
+                Ok(halted) => tracing::debug!("core halted during collection: {}", halted),
+                Err(e) => tracing::debug!("core halt query failed during collection: {}", e),
+            }
+            self.last_halt_check_time = Instant::now();
         }
 
         // Two-stage read planning for pointer support

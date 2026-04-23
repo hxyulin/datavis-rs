@@ -63,7 +63,7 @@ use workspace::tab_viewer::WorkspaceTabViewer;
 use workspace::{PaneId, PaneKind, Workspace};
 
 use crate::backend::{parse_elf, ElfInfo, ElfSymbol};
-use crate::config::{settings::RuntimeSettings, AppConfig, AppState};
+use crate::config::{settings::RuntimeSettings, AppConfig, AppState, OpenOcdMode};
 use crate::pipeline::bridge::{PipelineBridge, PipelineCommand, SinkMessage};
 use crate::types::{CollectionStats, ConnectionStatus, DataPoint, VariableData, VariableType};
 use egui::Color32;
@@ -1950,6 +1950,18 @@ impl DataVisApp {
                             None
                         } else {
                             Some(state.openocd_target)
+                        };
+                        self.config.probe.openocd_mode = if state.openocd_mode_external {
+                            OpenOcdMode::External {
+                                host: if state.openocd_external_host.trim().is_empty() {
+                                    "127.0.0.1".to_string()
+                                } else {
+                                    state.openocd_external_host.trim().to_string()
+                                },
+                                port: state.openocd_external_port,
+                            }
+                        } else {
+                            OpenOcdMode::Spawn
                         };
                     }
                 }

@@ -16,7 +16,10 @@ impl TclClient {
     pub fn connect(addr: SocketAddr) -> Result<Self> {
         let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
             .map_err(|e| DataVisError::Config(format!("Failed to connect to OpenOCD TCL server at {}: {}", addr, e)))?;
-        stream.set_read_timeout(Some(Duration::from_secs(2)))
+        // Generous read timeout so a transiently-busy TCL server (e.g. during
+        // a burst of memory reads) doesn't abort the whole command. OpenOCD
+        // will propagate real target failures as an error in the response.
+        stream.set_read_timeout(Some(Duration::from_secs(10)))
             .map_err(|e| DataVisError::Config(format!("Failed to set read timeout: {}", e)))?;
         stream.set_nodelay(true)
             .map_err(|e| DataVisError::Config(format!("Failed to set TCP_NODELAY: {}", e)))?;
@@ -35,8 +38,15 @@ impl TclClient {
         let mut response = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
-            let n = self.stream.read(&mut buf)
-                .map_err(|e| DataVisError::Config(format!("Failed to read TCL response: {}", e)))?;
+            let n = self.stream.read(&mut buf).map_err(|e| {
+                let kind = e.kind();
+                let msg = if matches!(kind, std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) {
+                    format!("OpenOCD TCL read timed out (server busy): {}", e)
+                } else {
+                    format!("Failed to read TCL response: {}", e)
+                };
+                DataVisError::Config(msg)
+            })?;
             if n == 0 {
                 return Err(DataVisError::Config("OpenOCD TCL connection closed".to_string()));
             }

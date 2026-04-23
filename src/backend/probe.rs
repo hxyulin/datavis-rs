@@ -93,6 +93,8 @@ pub struct ProbeBackend {
     read_buffer: Vec<u8>,
     /// Statistics
     stats: ProbeStats,
+    /// Last time we emitted a raw-bytes DEBUG log, for rate limiting
+    last_raw_log: Option<Instant>,
 }
 
 impl ProbeBackend {
@@ -103,6 +105,7 @@ impl ProbeBackend {
             config,
             read_buffer: vec![0u8; 256], // Pre-allocate buffer
             stats: ProbeStats::default(),
+            last_raw_log: None,
         }
     }
 
@@ -410,6 +413,14 @@ impl ProbeBackend {
                 self.stats.total_read_time_us += self.stats.last_read_time_us;
                 self.stats.total_bytes_read += size as u64;
 
+                tracing::trace!(
+                    "probe-rs read {} @ 0x{:08X} ({} B): {:02X?}",
+                    variable.name,
+                    variable.address,
+                    size,
+                    &self.read_buffer[..size]
+                );
+
                 // Parse the raw bytes to f64
                 variable
                     .var_type
@@ -498,6 +509,16 @@ impl ProbeBackend {
             .collect();
         let mut total_bytes = 0usize;
 
+        // Throttle raw-bytes DEBUG logging to once per second so we see the
+        // data actually coming off the wire without flooding at high poll rates.
+        let log_raw_this_poll = match self.last_raw_log {
+            Some(ts) => ts.elapsed() >= std::time::Duration::from_secs(1),
+            None => true,
+        };
+        if log_raw_this_poll {
+            self.last_raw_log = Some(Instant::now());
+        }
+
         // Read each region and extract variable values
         for region in &regions {
             // Ensure buffer is large enough
@@ -511,6 +532,24 @@ impl ProbeBackend {
             {
                 Ok(()) => {
                     total_bytes += region.size;
+
+                    // Log the raw region bytes — useful for diagnosing "flat
+                    // line" / stale-value symptoms. Enabled at TRACE for every
+                    // read, and at DEBUG once per second via the throttle above.
+                    tracing::trace!(
+                        "probe-rs read region 0x{:08X} ({} bytes): {:02X?}",
+                        region.address,
+                        region.size,
+                        &self.read_buffer[..region.size]
+                    );
+                    if log_raw_this_poll {
+                        tracing::debug!(
+                            "probe-rs raw bytes @ 0x{:08X} ({} B): {:02X?}",
+                            region.address,
+                            region.size,
+                            &self.read_buffer[..region.size]
+                        );
+                    }
 
                     // Extract values for each variable in this region
                     for &var_idx in &region.variable_indices {
