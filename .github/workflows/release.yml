@@ -66,10 +66,10 @@ jobs:
 
       - name: Create portable archive with OpenOCD
         run: |
-          mkdir -p datavis-rs-linux-x86_64/openocd/bin
+          mkdir -p datavis-rs-linux-x86_64/openocd/bin datavis-rs-linux-x86_64/openocd/openocd
           cp target/x86_64-unknown-linux-gnu/release/datavis-rs datavis-rs-linux-x86_64/
           cp openocd-bundle/bin/openocd datavis-rs-linux-x86_64/openocd/bin/
-          cp -r openocd-bundle/openocd/scripts datavis-rs-linux-x86_64/openocd/scripts
+          cp -r openocd-bundle/openocd/scripts datavis-rs-linux-x86_64/openocd/openocd/scripts
           cp -r openocd-bundle/libexec datavis-rs-linux-x86_64/openocd/libexec
           chmod +x datavis-rs-linux-x86_64/datavis-rs datavis-rs-linux-x86_64/openocd/bin/openocd
           tar czf datavis-rs-linux-x86_64.tar.gz datavis-rs-linux-x86_64
@@ -114,10 +114,10 @@ jobs:
             echo "ERROR: Could not find .app bundle"
             exit 1
           fi
-          # Inject OpenOCD into the .app bundle
-          mkdir -p "$APP_PATH/Contents/Resources/openocd/bin"
+          # Inject OpenOCD into the .app bundle (preserve xPack layout: <root>/openocd/{bin,openocd/scripts,libexec})
+          mkdir -p "$APP_PATH/Contents/Resources/openocd/bin" "$APP_PATH/Contents/Resources/openocd/openocd"
           cp openocd-bundle/bin/openocd "$APP_PATH/Contents/Resources/openocd/bin/"
-          cp -r openocd-bundle/openocd/scripts "$APP_PATH/Contents/Resources/openocd/scripts"
+          cp -r openocd-bundle/openocd/scripts "$APP_PATH/Contents/Resources/openocd/openocd/scripts"
           cp -r openocd-bundle/libexec "$APP_PATH/Contents/Resources/openocd/libexec"
           chmod +x "$APP_PATH/Contents/Resources/openocd/bin/openocd"
           # Re-create DMG with bundled OpenOCD
@@ -131,10 +131,10 @@ jobs:
 
       - name: Create portable archive with OpenOCD
         run: |
-          mkdir -p datavis-rs-macos-aarch64/openocd/bin
+          mkdir -p datavis-rs-macos-aarch64/openocd/bin datavis-rs-macos-aarch64/openocd/openocd
           cp target/aarch64-apple-darwin/release/datavis-rs datavis-rs-macos-aarch64/
           cp openocd-bundle/bin/openocd datavis-rs-macos-aarch64/openocd/bin/
-          cp -r openocd-bundle/openocd/scripts datavis-rs-macos-aarch64/openocd/scripts
+          cp -r openocd-bundle/openocd/scripts datavis-rs-macos-aarch64/openocd/openocd/scripts
           cp -r openocd-bundle/libexec datavis-rs-macos-aarch64/openocd/libexec
           chmod +x datavis-rs-macos-aarch64/datavis-rs datavis-rs-macos-aarch64/openocd/bin/openocd
           tar czf datavis-rs-macos-aarch64.tar.gz datavis-rs-macos-aarch64
@@ -179,10 +179,10 @@ jobs:
             echo "ERROR: Could not find .app bundle"
             exit 1
           fi
-          # Inject OpenOCD into the .app bundle
-          mkdir -p "$APP_PATH/Contents/Resources/openocd/bin"
+          # Inject OpenOCD into the .app bundle (preserve xPack layout: <root>/openocd/{bin,openocd/scripts,libexec})
+          mkdir -p "$APP_PATH/Contents/Resources/openocd/bin" "$APP_PATH/Contents/Resources/openocd/openocd"
           cp openocd-bundle/bin/openocd "$APP_PATH/Contents/Resources/openocd/bin/"
-          cp -r openocd-bundle/openocd/scripts "$APP_PATH/Contents/Resources/openocd/scripts"
+          cp -r openocd-bundle/openocd/scripts "$APP_PATH/Contents/Resources/openocd/openocd/scripts"
           cp -r openocd-bundle/libexec "$APP_PATH/Contents/Resources/openocd/libexec"
           chmod +x "$APP_PATH/Contents/Resources/openocd/bin/openocd"
           # Re-create DMG with bundled OpenOCD
@@ -196,10 +196,10 @@ jobs:
 
       - name: Create portable archive with OpenOCD
         run: |
-          mkdir -p datavis-rs-macos-x86_64/openocd/bin
+          mkdir -p datavis-rs-macos-x86_64/openocd/bin datavis-rs-macos-x86_64/openocd/openocd
           cp target/x86_64-apple-darwin/release/datavis-rs datavis-rs-macos-x86_64/
           cp openocd-bundle/bin/openocd datavis-rs-macos-x86_64/openocd/bin/
-          cp -r openocd-bundle/openocd/scripts datavis-rs-macos-x86_64/openocd/scripts
+          cp -r openocd-bundle/openocd/scripts datavis-rs-macos-x86_64/openocd/openocd/scripts
           cp -r openocd-bundle/libexec datavis-rs-macos-x86_64/openocd/libexec
           chmod +x datavis-rs-macos-x86_64/datavis-rs datavis-rs-macos-x86_64/openocd/bin/openocd
           tar czf datavis-rs-macos-x86_64.tar.gz datavis-rs-macos-x86_64
@@ -296,9 +296,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path "datavis-rs-windows-x86_64/openocd/bin" -Force
+          New-Item -ItemType Directory -Path "datavis-rs-windows-x86_64/openocd/openocd" -Force
           Copy-Item "target/x86_64-pc-windows-msvc/release/datavis-rs.exe" "datavis-rs-windows-x86_64/"
           Copy-Item "openocd-bundle/bin/*" "datavis-rs-windows-x86_64/openocd/bin/"
-          Copy-Item -Recurse "openocd-bundle/openocd/scripts" "datavis-rs-windows-x86_64/openocd/scripts"
+          Copy-Item -Recurse "openocd-bundle/openocd/scripts" "datavis-rs-windows-x86_64/openocd/openocd/scripts"
           Compress-Archive -Path "datavis-rs-windows-x86_64" -DestinationPath "datavis-rs-windows-x86_64.zip"
 
       - name: Upload portable archive
