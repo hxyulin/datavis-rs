@@ -79,6 +79,7 @@ pub mod pipeline;
 pub mod scripting;
 pub mod session;
 pub mod types;
+pub mod watch;
 
 // Re-export commonly used types
 pub use app::DataVisApp;

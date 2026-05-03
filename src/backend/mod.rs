@@ -60,6 +60,7 @@ pub mod probe;
 pub mod probe_trait;
 pub mod read_manager;
 pub mod type_table;
+pub mod watch_scheduler;
 pub mod worker;
 
 use crate::config::ProbeConfig;
@@ -163,6 +164,11 @@ pub enum BackendCommand {
         /// Variable IDs this pane wants to receive
         var_ids: HashSet<u32>,
     },
+    /// Set the active set of Live Watch leaves the worker should poll.
+    /// Replaces the previous set in full each call.
+    SetWatchLeaves(Vec<crate::watch::WatchLeafRead>),
+    /// Set the Live Watch scheduler poll rate (Hz). 0 disables polling.
+    SetWatchPollRate(u32),
 }
 
 /// Represents a detected probe (real or mock)
@@ -279,6 +285,9 @@ pub enum BackendMessage {
     ProbeList(Vec<DetectedProbe>),
     /// Pointer state updates for UI display
     PointerStates(std::collections::HashMap<u32, PointerState>),
+    /// Live Watch values published by the watch scheduler.
+    /// Each entry is `(watch_id, path, value)`.
+    WatchValuesUpdate(Vec<(crate::watch::WatchId, String, crate::watch::WatchValue)>),
     /// Backend is shutting down
     Shutdown,
 }
@@ -377,6 +386,16 @@ impl FrontendReceiver {
     /// Request shutdown
     pub fn shutdown(&self) {
         let _ = self.command_sender.send(BackendCommand::Shutdown);
+    }
+
+    /// Replace the watch-scheduler's leaf set.
+    pub fn set_watch_leaves(&self, leaves: Vec<crate::watch::WatchLeafRead>) {
+        let _ = self.command_sender.send(BackendCommand::SetWatchLeaves(leaves));
+    }
+
+    /// Set the watch-scheduler poll rate (Hz). 0 = disabled.
+    pub fn set_watch_poll_rate(&self, hz: u32) {
+        let _ = self.command_sender.send(BackendCommand::SetWatchPollRate(hz));
     }
 }
 

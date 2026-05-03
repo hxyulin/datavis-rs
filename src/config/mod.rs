@@ -551,7 +551,7 @@ pub struct PersistedDataRecord {
 /// Application configuration stored in project files
 ///
 /// This contains all the settings needed for a debugging session.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     /// Probe connection configuration
     #[serde(default)]
@@ -568,6 +568,34 @@ pub struct AppConfig {
     /// Data collection configuration
     #[serde(default)]
     pub collection: CollectionConfig,
+
+    /// Live Watch entries (separate from `variables`).
+    /// Stores only the symbol expression and which sub-paths the user has expanded;
+    /// children are re-derived from DWARF on render.
+    #[serde(default)]
+    pub live_watches: Vec<crate::watch::WatchRoot>,
+
+    /// Poll rate for the Live Watch scheduler in Hz. Independent of the main
+    /// data-collection rate. Default 5 Hz.
+    #[serde(default = "default_live_watch_rate")]
+    pub live_watch_poll_rate_hz: u32,
+}
+
+fn default_live_watch_rate() -> u32 {
+    5
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            probe: ProbeConfig::default(),
+            variables: HashMap::new(),
+            ui: UiConfig::default(),
+            collection: CollectionConfig::default(),
+            live_watches: Vec::new(),
+            live_watch_poll_rate_hz: default_live_watch_rate(),
+        }
+    }
 }
 
 impl AppConfig {

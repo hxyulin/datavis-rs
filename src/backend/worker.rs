@@ -32,6 +32,7 @@
 use crate::backend::converter_engine::ConverterEngine;
 use crate::backend::probe_trait::DebugProbe;
 use crate::backend::read_manager::{resolve_dependent_addresses, DependentReadPlanner};
+use crate::backend::watch_scheduler::WatchScheduler;
 use crate::backend::{BackendCommand, BackendMessage, OpenOcdProbe, ProbeBackend};
 use crate::config::{AppConfig, BackendType};
 use crate::types::{CollectionStats, ConnectionStatus, PointerRuntime, Variable};
@@ -196,6 +197,8 @@ pub struct BackendWorker {
     /// Data router for per-pane filtering (Phase 2 - not yet used)
     #[allow(dead_code)]
     data_router: DataRouter,
+    /// Live Watch scheduler (independent of `collecting`)
+    watch_scheduler: WatchScheduler,
 }
 
 impl BackendWorker {
@@ -207,6 +210,7 @@ impl BackendWorker {
         running: Arc<AtomicBool>,
     ) -> Self {
         let poll_rate_hz = config.collection.poll_rate_hz;
+        let watch_poll_rate = config.live_watch_poll_rate_hz;
         let backend_type = config.probe.backend_type;
         let probe = Self::build_real_probe(&config);
         tracing::info!("Loaded backend: {backend_type}");
@@ -233,6 +237,7 @@ impl BackendWorker {
             dependent_read_planner: DependentReadPlanner::new(),
             pointer_runtime: HashMap::new(),
             data_router: DataRouter::new(),
+            watch_scheduler: WatchScheduler::new(watch_poll_rate),
         }
     }
 
@@ -252,6 +257,20 @@ impl BackendWorker {
                 if self.last_stats_time.elapsed() >= Duration::from_millis(500) {
                     self.send_stats();
                     self.last_stats_time = Instant::now();
+                }
+            }
+
+            // Live Watch scheduler — gated on Start, like the variable poll.
+            // Reads only the leaves the frontend has subscribed to.
+            if self.collecting
+                && self.connection_status == ConnectionStatus::Connected
+                && self.watch_scheduler.should_tick()
+            {
+                let updates = self.watch_scheduler.tick(&mut *self.probe);
+                if !updates.is_empty() {
+                    let _ = self
+                        .message_tx
+                        .send(BackendMessage::WatchValuesUpdate(updates));
                 }
             }
 
@@ -365,6 +384,12 @@ impl BackendWorker {
                 // Update data router with pane subscriptions
                 self.data_router.subscribe_pane(pane_id, var_ids);
             }
+            BackendCommand::SetWatchLeaves(leaves) => {
+                self.watch_scheduler.set_leaves(leaves);
+            }
+            BackendCommand::SetWatchPollRate(hz) => {
+                self.watch_scheduler.set_poll_rate(hz);
+            }
         }
     }
 
@@ -452,6 +477,9 @@ impl BackendWorker {
         self.collecting = false;
         self.probe.disconnect();
         self.update_connection_status(ConnectionStatus::Disconnected);
+        // Drop watch scheduler state so the next connect doesn't try to
+        // resolve pointer addresses cached against a different target.
+        self.watch_scheduler.clear();
         tracing::info!("Disconnected from probe");
     }
 

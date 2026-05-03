@@ -6,8 +6,8 @@
 
 use crate::frontend::pane_trait::Pane;
 use crate::frontend::panes::{
-    FftViewState, RecorderPaneState, TimeSeriesState, VariableBrowserState, VariableListState,
-    WatcherState,
+    FftViewState, LiveWatchState, RecorderPaneState, TimeSeriesState, VariableBrowserState,
+    VariableListState, WatcherState,
 };
 use crate::frontend::workspace::PaneKind;
 
@@ -59,6 +59,12 @@ pub fn build_registry() -> Vec<PaneKindInfo> {
             display_name: "FFT View",
             is_singleton: false,
             factory: || Box::new(FftViewState::default()),
+        },
+        PaneKindInfo {
+            kind: PaneKind::LiveWatch,
+            display_name: "Live Watch",
+            is_singleton: false,
+            factory: || Box::new(LiveWatchState::default()),
         },
     ]
 }

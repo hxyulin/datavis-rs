@@ -203,6 +203,13 @@ pub enum AppAction {
     // Toolbar
     /// Toggle collection pause state
     TogglePause,
+
+    // Live Watch
+    /// Add a new live watch root by symbol name. Validation (ELF loaded,
+    /// symbol present) happens in the action handler.
+    AddWatchRoot(String),
+    /// Remove a live watch root by id.
+    RemoveWatchRoot(crate::watch::WatchId),
 }
 
 /// Dialog identifiers

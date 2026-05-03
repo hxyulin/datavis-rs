@@ -11,6 +11,7 @@ use crate::backend::DetectedProbe;
 use crate::pipeline::bridge::VariableNodeSnapshot;
 use crate::session::types::{SessionRecording, SessionState};
 use crate::types::{CollectionStats, ConnectionStatus, PointerState, VariableData};
+use crate::watch::{WatchId, WatchValue};
 
 /// All shared data published by the backend and consumed by panes.
 ///
@@ -70,6 +71,10 @@ pub struct Topics {
     /// Pointer states for UI display (populated by backend worker)
     pub pointer_states: HashMap<u32, PointerState>,
 
+    /// Live Watch values, keyed by (watch root id, leaf path).
+    /// Published by the watch scheduler on each tick; consumed by the LiveWatch pane.
+    pub watch_values: HashMap<(WatchId, String), WatchValue>,
+
     /// Track when global data was last updated
     pub global_data_freshness: Option<Instant>,
 
@@ -99,6 +104,7 @@ impl Default for Topics {
             project_file_path: None,
             elf_generation: 0,
             pointer_states: HashMap::new(),
+            watch_values: HashMap::new(),
             pane_data_freshness: HashMap::new(),
             global_data_freshness: None,
             last_stats_update: None,

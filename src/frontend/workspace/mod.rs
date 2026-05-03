@@ -37,6 +37,8 @@ pub enum PaneKind {
     TimeSeries,
     Watcher,
     FftView,
+    /// Keil-style live watch with on-demand expansion.
+    LiveWatch,
 }
 
 /// Metadata entry for a pane
@@ -192,6 +194,7 @@ impl Workspace {
                 "TimeSeries" => PaneKind::TimeSeries,
                 "Watcher" => PaneKind::Watcher,
                 "FftView" => PaneKind::FftView,
+                "LiveWatch" => PaneKind::LiveWatch,
                 // Legacy: skip PipelineEditor from old configs
                 "PipelineEditor" => {
                     tracing::info!("Skipping legacy PipelineEditor pane from saved layout");

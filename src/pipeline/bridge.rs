@@ -70,6 +70,9 @@ pub enum SinkMessage {
     /// Pointer state updates for UI display.
     PointerStates(std::collections::HashMap<u32, PointerState>),
 
+    /// Live Watch values published by the watch scheduler.
+    WatchValuesUpdate(Vec<(crate::watch::WatchId, String, crate::watch::WatchValue)>),
+
     /// Pipeline is shutting down.
     Shutdown,
 }
@@ -132,6 +135,10 @@ pub enum PipelineCommand {
     RefreshProbes,
     /// Request a variable tree snapshot to be sent back.
     RequestVariableTree,
+    /// Replace the live-watch scheduler's leaf set.
+    SetWatchLeaves(Vec<crate::watch::WatchLeafRead>),
+    /// Set the live-watch scheduler poll rate (Hz). 0 disables polling.
+    SetWatchPollRate(u32),
     /// Shut down the pipeline thread.
     Shutdown,
 }
@@ -266,6 +273,9 @@ impl PipelineBridge {
             BackendMessage::VariableList(vars) => Some(SinkMessage::VariableList(vars)),
             BackendMessage::ProbeList(probes) => Some(SinkMessage::ProbeList(probes)),
             BackendMessage::PointerStates(states) => Some(SinkMessage::PointerStates(states)),
+            BackendMessage::WatchValuesUpdate(values) => {
+                Some(SinkMessage::WatchValuesUpdate(values))
+            }
             BackendMessage::Shutdown => None,
         }
     }
@@ -301,7 +311,14 @@ impl PipelineBridge {
             #[cfg(feature = "mock-probe")]
             PipelineCommand::UseMockProbe(use_mock) => BackendCommand::UseMockProbe(use_mock),
             PipelineCommand::RefreshProbes => BackendCommand::RefreshProbes,
-            _ => BackendCommand::Shutdown, // Fallback for unhandled commands
+            PipelineCommand::SetWatchLeaves(leaves) => BackendCommand::SetWatchLeaves(leaves),
+            PipelineCommand::SetWatchPollRate(hz) => BackendCommand::SetWatchPollRate(hz),
+            // Commands without a backend equivalent are dropped silently rather
+            // than terminating the worker; older code's catch-all sent Shutdown,
+            // which is the wrong behaviour and easy to hit by accident.
+            PipelineCommand::NodeConfig { .. }
+            | PipelineCommand::RequestVariableTree
+            | PipelineCommand::RequestStats => BackendCommand::RequestStats,
         }
     }
 
@@ -405,5 +422,23 @@ impl PipelineBridge {
             return;
         }
         let _ = self.cmd_tx.send(PipelineCommand::UseMockProbe(use_mock));
+    }
+
+    /// Replace the live-watch scheduler's leaf set.
+    pub fn set_watch_leaves(&self, leaves: Vec<crate::watch::WatchLeafRead>) {
+        if let Some(ref receiver) = self.frontend_receiver {
+            receiver.set_watch_leaves(leaves);
+            return;
+        }
+        let _ = self.cmd_tx.send(PipelineCommand::SetWatchLeaves(leaves));
+    }
+
+    /// Set the live-watch scheduler poll rate (Hz). 0 disables polling.
+    pub fn set_watch_poll_rate(&self, hz: u32) {
+        if let Some(ref receiver) = self.frontend_receiver {
+            receiver.set_watch_poll_rate(hz);
+            return;
+        }
+        let _ = self.cmd_tx.send(PipelineCommand::SetWatchPollRate(hz));
     }
 }

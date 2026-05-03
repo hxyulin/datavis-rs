@@ -482,6 +482,17 @@ fn render_type_tree(
             }
         }
 
+        // Live Watch quick-add — only on root rows; v1 watch expressions are
+        // top-level symbol names, so nested rows can't be added directly.
+        if indent_level == 0
+            && ui
+                .small_button("Watch")
+                .on_hover_text("Add to Live Watch")
+                .clicked()
+        {
+            struct_add_actions.push(AppAction::AddWatchRoot(name.to_string()));
+        }
+
         // "Add all" button for expandable (struct/array) types with children
         if can_expand
             && !is_pointer

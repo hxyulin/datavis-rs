@@ -158,6 +158,14 @@ pub struct DataVisApp {
 
     // === UI Session State (for automatic persistence) ===
     ui_session: crate::config::UiSessionState,
+
+    // === Live Watch publishing state ===
+    /// Hash of the last leaf set we sent to the worker; used to skip
+    /// unchanged updates instead of flooding the command channel.
+    last_watch_leaves_hash: u64,
+    /// Last poll rate we sent the scheduler, so we re-send only when it
+    /// changes.
+    last_watch_rate_sent: Option<u32>,
 }
 
 /// State for variable autocomplete/selector (kept for compatibility)
@@ -347,6 +355,7 @@ impl DataVisApp {
         };
 
         crate::types::Variable::sync_next_id(&config.variables);
+        crate::watch::WatchId::sync_after_load(&config.live_watches);
 
         let mut variable_data = HashMap::new();
         for var in config.variables.values() {
@@ -416,6 +425,8 @@ impl DataVisApp {
             target_chip_input,
             dialogs: dialog_manager::DialogManager::new(),
             ui_session,
+            last_watch_leaves_hash: 0,
+            last_watch_rate_sent: None,
         }
     }
 
@@ -573,6 +584,11 @@ impl DataVisApp {
                 }
                 SinkMessage::PointerStates(states) => {
                     self.topics.pointer_states = states;
+                }
+                SinkMessage::WatchValuesUpdate(values) => {
+                    for (root_id, path, value) in values {
+                        self.topics.watch_values.insert((root_id, path), value);
+                    }
                 }
             }
         }
@@ -812,6 +828,34 @@ impl DataVisApp {
                     }
                 }
             }
+            AppAction::AddWatchRoot(name) => {
+                if self.elf_info.is_none() {
+                    self.last_error = Some("Cannot add live watch: load an ELF first".to_string());
+                } else if self
+                    .elf_info
+                    .as_ref()
+                    .and_then(|i| i.find_symbol(&name))
+                    .is_none()
+                {
+                    self.last_error = Some(format!("Symbol '{}' not found in ELF", name));
+                } else {
+                    let already_present = self
+                        .config
+                        .live_watches
+                        .iter()
+                        .any(|r| r.expression == name);
+                    if !already_present {
+                        let mut root = crate::watch::WatchRoot::new(&name);
+                        // Auto-expand the root by default so the user can see
+                        // its members immediately on add.
+                        root.toggle_expanded("");
+                        self.config.live_watches.push(root);
+                    }
+                }
+            }
+            AppAction::RemoveWatchRoot(id) => {
+                self.config.live_watches.retain(|r| r.id != id);
+            }
             AppAction::RenameVariable { id, new_name } => {
                 let cmds = actions::variable_actions::rename_variable(
                     &mut self.config.variables,
@@ -1029,6 +1073,7 @@ impl DataVisApp {
                 self.persistence_config = project.persistence;
 
                 crate::types::Variable::sync_next_id(&self.config.variables);
+                crate::watch::WatchId::sync_after_load(&self.config.live_watches);
 
                 // Update project metadata in Topics
                 self.topics.project_name = project.name.clone();
@@ -2251,6 +2296,11 @@ impl eframe::App for DataVisApp {
             }
         }
 
+        // Publish the current Live Watch leaf set + poll rate to the worker.
+        // Done after pane rendering so expansion-state changes from this frame
+        // are picked up immediately.
+        self.publish_watch_state();
+
         // Render pane dialogs (require &Context)
         self.render_pane_dialogs(ctx);
 
@@ -2323,6 +2373,56 @@ impl eframe::App for DataVisApp {
 }
 
 impl DataVisApp {
+    /// Compute the current Live Watch leaf set from `config.live_watches` and
+    /// publish to the worker if it (or the poll rate) has changed.
+    fn publish_watch_state(&mut self) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Re-send poll rate when it changes.
+        let target_rate = self.config.live_watch_poll_rate_hz;
+        if self.last_watch_rate_sent != Some(target_rate) {
+            self.frontend.set_watch_poll_rate(target_rate);
+            self.last_watch_rate_sent = Some(target_rate);
+        }
+
+        // Walk every root and gather leaves.
+        let mut leaves: Vec<crate::watch::WatchLeafRead> = Vec::new();
+        for root in &self.config.live_watches {
+            let resolution = crate::watch::resolve_root(self.elf_info.as_ref(), root);
+            let mut walk = crate::watch::WalkOutput::default();
+            crate::watch::walk_root(root, &resolution, &mut walk);
+            leaves.append(&mut walk.leaves);
+        }
+
+        // Hash the leaf set for cheap change detection.
+        let mut h = DefaultHasher::new();
+        for l in &leaves {
+            l.root_id.0.hash(&mut h);
+            l.path.hash(&mut h);
+            match &l.address {
+                crate::watch::WatchAddress::Static(a) => {
+                    0u8.hash(&mut h);
+                    a.hash(&mut h);
+                }
+                crate::watch::WatchAddress::PointerDeref { parent_path, offset } => {
+                    1u8.hash(&mut h);
+                    parent_path.hash(&mut h);
+                    offset.hash(&mut h);
+                }
+            }
+            // VariableType has a `Raw(usize)` variant so we can't cast to u8;
+            // the Display impl gives a stable string.
+            l.var_type.to_string().hash(&mut h);
+            l.is_pointer.hash(&mut h);
+        }
+        let new_hash = h.finish();
+        if new_hash != self.last_watch_leaves_hash {
+            self.frontend.set_watch_leaves(leaves);
+            self.last_watch_leaves_hash = new_hash;
+        }
+    }
+
     /// Capture current window state from egui context
     fn capture_window_state(&mut self, ctx: &egui::Context) {
         ctx.input(|i| {
