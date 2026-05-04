@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::backend::{ElfInfo, ElfSymbol};
 use crate::backend::type_table::TypeHandle;
+use crate::backend::{ElfInfo, ElfSymbol};
 use crate::types::VariableType;
 
 /// Cap on how many array elements we render/read per array node.
@@ -183,7 +183,10 @@ pub fn resolve_root(elf: Option<&ElfInfo>, root: &WatchRoot) -> WatchResolution 
 /// `leaves` is the set of reads the scheduler needs to perform this tick.
 pub fn walk_root(root: &WatchRoot, resolution: &WatchResolution, out: &mut WalkOutput) {
     match resolution {
-        WatchResolution::Resolved { symbol, type_handle } => {
+        WatchResolution::Resolved {
+            symbol,
+            type_handle,
+        } => {
             walk_node(
                 root,
                 &symbol.display_name,
@@ -250,7 +253,9 @@ fn walk_node(
         .map(|h| h.type_name())
         .unwrap_or_else(|| "?".to_string());
 
-    let is_pointer = underlying.as_ref().is_some_and(|h| h.is_pointer_or_reference());
+    let is_pointer = underlying
+        .as_ref()
+        .is_some_and(|h| h.is_pointer_or_reference());
     let is_array = underlying.as_ref().is_some_and(|h| h.is_array());
     let has_members = underlying
         .as_ref()
@@ -262,7 +267,9 @@ fn walk_node(
         && underlying
             .as_ref()
             .and_then(|h| h.pointee_underlying())
-            .is_some_and(|p| p.is_struct_or_union() || p.is_array() || !p.members().unwrap_or(&[]).is_empty());
+            .is_some_and(|p| {
+                p.is_struct_or_union() || p.is_array() || !p.members().unwrap_or(&[]).is_empty()
+            });
 
     // Determine row kind, and whether this node should produce a leaf read.
     let var_type = type_handle
@@ -280,7 +287,10 @@ fn walk_node(
         };
         emit_leaf = true;
     } else if is_array {
-        let count = underlying.as_ref().and_then(|h| h.array_count()).unwrap_or(0);
+        let count = underlying
+            .as_ref()
+            .and_then(|h| h.array_count())
+            .unwrap_or(0);
         let display_count = count.min(MAX_WATCH_ARRAY_ELEMENTS);
         kind = WatchRowKind::Array {
             count: display_count,
@@ -395,7 +405,10 @@ fn recurse_into(
     }
 
     if parent_handle.is_array() {
-        let count = parent_handle.array_count().unwrap_or(0).min(MAX_WATCH_ARRAY_ELEMENTS);
+        let count = parent_handle
+            .array_count()
+            .unwrap_or(0)
+            .min(MAX_WATCH_ARRAY_ELEMENTS);
         let elem_size = parent_handle.element_size().unwrap_or(0);
         if count == 0 || elem_size == 0 {
             return;

@@ -208,8 +208,8 @@ mod fault_tests {
 
     #[test]
     fn test_no_faults_by_default() {
-        let mut probe = MockProbeBackend::new()
-            .with_default_pattern(MockDataPattern::Constant(42.0));
+        let mut probe =
+            MockProbeBackend::new().with_default_pattern(MockDataPattern::Constant(42.0));
         probe.connect(None, "TestTarget").unwrap();
 
         let var = test_variable(1);

@@ -463,9 +463,7 @@ impl MockProbeBackend {
         if fault_config.global.read_failure_rate > 0.0
             && rand_simple() < fault_config.global.read_failure_rate
         {
-            return Err(DataVisError::Config(
-                "Simulated read failure".to_string(),
-            ));
+            return Err(DataVisError::Config("Simulated read failure".to_string()));
         }
 
         // Check disconnect rate
@@ -473,9 +471,7 @@ impl MockProbeBackend {
             && rand_simple() < fault_config.global.disconnect_rate
         {
             self.connected = false;
-            return Err(DataVisError::Config(
-                "Simulated disconnect".to_string(),
-            ));
+            return Err(DataVisError::Config("Simulated disconnect".to_string()));
         }
 
         // Check rate limiting
@@ -487,9 +483,7 @@ impl MockProbeBackend {
             }
             self.reads_this_second += 1;
             if self.reads_this_second > fault_config.global.max_reads_per_second {
-                return Err(DataVisError::Timeout(
-                    "Rate limit exceeded".to_string(),
-                ));
+                return Err(DataVisError::Timeout("Rate limit exceeded".to_string()));
             }
         }
 
@@ -564,11 +558,7 @@ impl MockProbeBackend {
     }
 
     /// Convert a FaultErrorKind to a DataVisError
-    fn fault_error_to_datavis(
-        &self,
-        kind: &FaultErrorKind,
-        variable: &Variable,
-    ) -> DataVisError {
+    fn fault_error_to_datavis(&self, kind: &FaultErrorKind, variable: &Variable) -> DataVisError {
         match kind {
             FaultErrorKind::Timeout => {
                 DataVisError::Timeout("Simulated periodic timeout".to_string())

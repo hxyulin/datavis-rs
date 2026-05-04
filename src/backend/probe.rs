@@ -376,10 +376,10 @@ impl ProbeBackend {
         session: &mut Session,
     ) -> Result<Box<dyn probe_rs::architecture::arm::memory::ArmMemoryInterface + '_>> {
         let ap = FullyQualifiedApAddress::v1_with_default_dp(0);
-        let arm_iface = session
-            .get_arm_interface()
-            .map_err(probe_rs::Error::from)?;
-        Ok(arm_iface.memory_interface(&ap).map_err(probe_rs::Error::from)?)
+        let arm_iface = session.get_arm_interface().map_err(probe_rs::Error::from)?;
+        Ok(arm_iface
+            .memory_interface(&ap)
+            .map_err(probe_rs::Error::from)?)
     }
 
     /// Read a variable's value from memory

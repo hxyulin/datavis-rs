@@ -501,11 +501,16 @@ impl Variable {
     }
 
     /// Get address with runtime pointer resolution.
-    pub fn address_with_runtime(&self, runtime: &std::collections::HashMap<u32, PointerRuntime>) -> VariableAddress {
+    pub fn address_with_runtime(
+        &self,
+        runtime: &std::collections::HashMap<u32, PointerRuntime>,
+    ) -> VariableAddress {
         match &self.pointer_metadata {
             Some(meta) if meta.pointer_parent_id.is_some() => {
                 let resolved = meta.pointer_parent_id.and_then(|pid| {
-                    runtime.get(&pid).and_then(|rt| rt.resolve_address(meta.offset_from_pointer))
+                    runtime
+                        .get(&pid)
+                        .and_then(|rt| rt.resolve_address(meta.offset_from_pointer))
                 });
                 VariableAddress::Dynamic(resolved)
             }

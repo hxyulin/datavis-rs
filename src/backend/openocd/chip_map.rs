@@ -4,30 +4,70 @@ pub fn chip_to_target(chip_name: &str) -> Option<&'static str> {
     let upper = chip_name.to_uppercase();
 
     // STM32 families
-    if upper.starts_with("STM32F0") { return Some("stm32f0x"); }
-    if upper.starts_with("STM32F1") { return Some("stm32f1x"); }
-    if upper.starts_with("STM32F2") { return Some("stm32f2x"); }
-    if upper.starts_with("STM32F3") { return Some("stm32f3x"); }
-    if upper.starts_with("STM32F4") { return Some("stm32f4x"); }
-    if upper.starts_with("STM32F7") { return Some("stm32f7x"); }
-    if upper.starts_with("STM32G0") { return Some("stm32g0x"); }
-    if upper.starts_with("STM32G4") { return Some("stm32g4x"); }
-    if upper.starts_with("STM32H7") { return Some("stm32h7x"); }
-    if upper.starts_with("STM32L0") { return Some("stm32l0x"); }
-    if upper.starts_with("STM32L1") { return Some("stm32l1"); }
-    if upper.starts_with("STM32L4") { return Some("stm32l4x"); }
-    if upper.starts_with("STM32L5") { return Some("stm32l5x"); }
-    if upper.starts_with("STM32U5") { return Some("stm32u5x"); }
-    if upper.starts_with("STM32WB") { return Some("stm32wbx"); }
-    if upper.starts_with("STM32WL") { return Some("stm32wlx"); }
+    if upper.starts_with("STM32F0") {
+        return Some("stm32f0x");
+    }
+    if upper.starts_with("STM32F1") {
+        return Some("stm32f1x");
+    }
+    if upper.starts_with("STM32F2") {
+        return Some("stm32f2x");
+    }
+    if upper.starts_with("STM32F3") {
+        return Some("stm32f3x");
+    }
+    if upper.starts_with("STM32F4") {
+        return Some("stm32f4x");
+    }
+    if upper.starts_with("STM32F7") {
+        return Some("stm32f7x");
+    }
+    if upper.starts_with("STM32G0") {
+        return Some("stm32g0x");
+    }
+    if upper.starts_with("STM32G4") {
+        return Some("stm32g4x");
+    }
+    if upper.starts_with("STM32H7") {
+        return Some("stm32h7x");
+    }
+    if upper.starts_with("STM32L0") {
+        return Some("stm32l0x");
+    }
+    if upper.starts_with("STM32L1") {
+        return Some("stm32l1");
+    }
+    if upper.starts_with("STM32L4") {
+        return Some("stm32l4x");
+    }
+    if upper.starts_with("STM32L5") {
+        return Some("stm32l5x");
+    }
+    if upper.starts_with("STM32U5") {
+        return Some("stm32u5x");
+    }
+    if upper.starts_with("STM32WB") {
+        return Some("stm32wbx");
+    }
+    if upper.starts_with("STM32WL") {
+        return Some("stm32wlx");
+    }
 
     // Nordic
-    if upper.starts_with("NRF52") { return Some("nrf52"); }
-    if upper.starts_with("NRF53") { return Some("nrf5340"); }
+    if upper.starts_with("NRF52") {
+        return Some("nrf52");
+    }
+    if upper.starts_with("NRF53") {
+        return Some("nrf5340");
+    }
 
     // Raspberry Pi
-    if upper.starts_with("RP2040") { return Some("rp2040"); }
-    if upper.starts_with("RP2350") { return Some("rp2350"); }
+    if upper.starts_with("RP2040") {
+        return Some("rp2040");
+    }
+    if upper.starts_with("RP2350") {
+        return Some("rp2350");
+    }
 
     None
 }

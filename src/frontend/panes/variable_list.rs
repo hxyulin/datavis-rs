@@ -733,7 +733,8 @@ pub fn render_dialogs(
     if state.converter_editor_open {
         let var_id = state.converter_editor_state.var_id;
         if let Some(var_id) = var_id {
-            let var_name = shared.state
+            let var_name = shared
+                .state
                 .config
                 .find_variable(var_id)
                 .map(|v| v.name.clone())
@@ -767,7 +768,8 @@ pub fn render_dialogs(
     if state.value_editor_open {
         let var_id = state.value_editor_state.var_id;
         if let Some(var_id) = var_id {
-            let (var_name, var_type, is_writable) = match shared.state.config.find_variable(var_id) {
+            let (var_name, var_type, is_writable) = match shared.state.config.find_variable(var_id)
+            {
                 Some(var) => (var.name.clone(), var.var_type, var.is_writable()),
                 None => {
                     state.value_editor_open = false;
@@ -775,7 +777,8 @@ pub fn render_dialogs(
                 }
             };
 
-            let current_value = shared.state
+            let current_value = shared
+                .state
                 .topics
                 .variable_data
                 .get(&var_id)
@@ -812,7 +815,8 @@ pub fn render_dialogs(
             let (address, var_type, enabled, show_in_graph, current_value) =
                 match shared.state.config.find_variable(var_id) {
                     Some(var) => {
-                        let value = shared.state
+                        let value = shared
+                            .state
                             .topics
                             .variable_data
                             .get(&var_id)

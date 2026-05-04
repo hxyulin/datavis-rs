@@ -143,8 +143,7 @@ impl ReadManager {
             // 1. Must be within the gap threshold of the current end
             // 2. Merged region must not exceed max_read_size (if set)
             let within_gap = addr <= current_end + self.gap_threshold as u64;
-            let within_size =
-                self.max_read_size == 0 || merged_size <= self.max_read_size;
+            let within_size = self.max_read_size == 0 || merged_size <= self.max_read_size;
 
             if within_gap && within_size {
                 // Extend current region

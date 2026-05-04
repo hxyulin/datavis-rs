@@ -11,7 +11,6 @@ use datavis_rs::{
     frontend::DataVisApp,
     i18n::set_language,
     menu::{build_menu_bar, MenuBarState},
-    pipeline::PipelineBridge,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -29,9 +28,7 @@ fn main() -> eframe::Result<()> {
         if let Err(e) = std::fs::create_dir_all(&log_dir) {
             eprintln!("Failed to create log directory: {e}");
             _guard = None;
-            registry
-                .with(tracing_subscriber::fmt::layer())
-                .init();
+            registry.with(tracing_subscriber::fmt::layer()).init();
         } else {
             let file_appender = tracing_appender::rolling::daily(&log_dir, "datavis-rs.log");
             let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
@@ -48,9 +45,7 @@ fn main() -> eframe::Result<()> {
         }
     } else {
         _guard = None;
-        registry
-            .with(tracing_subscriber::fmt::layer())
-            .init();
+        registry.with(tracing_subscriber::fmt::layer()).init();
     };
 
     tracing::info!("Starting DataVis-RS v{}", env!("CARGO_PKG_VERSION"));
@@ -131,9 +126,6 @@ fn main() -> eframe::Result<()> {
         backend.run();
     });
 
-    // Wrap the frontend receiver in a PipelineBridge for compatibility
-    let bridge = PipelineBridge::from_frontend_receiver(frontend_receiver);
-
     // Prepare menu bar state for building native menu
     let project_name = if let Some(ref path) = project_path {
         path.file_stem()
@@ -199,7 +191,10 @@ fn main() -> eframe::Result<()> {
                     if let RawWindowHandle::Win32(win32_handle) = handle.as_raw() {
                         unsafe {
                             if let Err(e) = menu.init_for_hwnd(win32_handle.hwnd.get() as isize) {
-                                tracing::warn!("Failed to initialize native menu for Windows: {}", e);
+                                tracing::warn!(
+                                    "Failed to initialize native menu for Windows: {}",
+                                    e
+                                );
                             } else {
                                 tracing::info!("Native menu bar initialized for Windows");
                             }
@@ -229,7 +224,7 @@ fn main() -> eframe::Result<()> {
 
             Ok(Box::new(DataVisApp::new(
                 cc,
-                bridge,
+                frontend_receiver,
                 config,
                 app_state,
                 project_path,

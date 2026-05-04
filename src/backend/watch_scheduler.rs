@@ -46,8 +46,7 @@ impl WatchScheduler {
             .into_iter()
             .map(|l| ((l.root_id, l.path.clone()), l))
             .collect();
-        self.pointer_cache
-            .retain(|key, _| new.contains_key(key));
+        self.pointer_cache.retain(|key, _| new.contains_key(key));
         self.leaves = new;
     }
 
@@ -78,10 +77,7 @@ impl WatchScheduler {
 
     /// Perform one read pass. Caller must ensure the probe is connected.
     /// Returns the (root_id, path, WatchValue) tuples to publish to the UI.
-    pub fn tick(
-        &mut self,
-        probe: &mut dyn DebugProbe,
-    ) -> Vec<(WatchId, String, WatchValue)> {
+    pub fn tick(&mut self, probe: &mut dyn DebugProbe) -> Vec<(WatchId, String, WatchValue)> {
         self.last_tick = Some(Instant::now());
 
         // Snapshot the leaf list — we'll iterate without holding a borrow on
@@ -173,7 +169,10 @@ impl WatchScheduler {
     fn resolve_address(&self, leaf: &WatchLeafRead) -> Option<u64> {
         match &leaf.address {
             WatchAddress::Static(addr) => Some(*addr),
-            WatchAddress::PointerDeref { parent_path, offset } => self
+            WatchAddress::PointerDeref {
+                parent_path,
+                offset,
+            } => self
                 .pointer_cache
                 .get(&(leaf.root_id, parent_path.clone()))
                 .and_then(|rt| rt.resolve_address(*offset)),

@@ -62,15 +62,9 @@ pub enum LatencyProfile {
     /// Fixed latency in microseconds
     Constant(u64),
     /// Normally distributed latency
-    Normal {
-        mean_us: u64,
-        stddev_us: u64,
-    },
+    Normal { mean_us: u64, stddev_us: u64 },
     /// Uniformly distributed latency
-    Uniform {
-        min_us: u64,
-        max_us: u64,
-    },
+    Uniform { min_us: u64, max_us: u64 },
     /// Mostly stable with occasional spikes
     WithSpikes {
         base_us: u64,

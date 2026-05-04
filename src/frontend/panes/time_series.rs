@@ -278,7 +278,11 @@ fn render_toolbar_simple(
         // Start/Stop is now auto-driven by pane presence; no button needed here.
 
         // UI-only Pause/Resume toggle (freezes the visible scroll window without stopping reads)
-        let pause_label = if state.paused { "▶ Resume" } else { "⏸ Pause" };
+        let pause_label = if state.paused {
+            "▶ Resume"
+        } else {
+            "⏸ Pause"
+        };
         if ui.button(pause_label).clicked() {
             state.paused = !state.paused;
             if !state.paused {
@@ -377,7 +381,11 @@ fn render_toolbar_advanced(
     // Start/Stop is now auto-driven by pane presence; no button needed here.
     ui.horizontal(|ui| {
         // UI-only Pause/Resume toggle
-        let pause_label = if state.paused { "▶ Resume" } else { "⏸ Pause" };
+        let pause_label = if state.paused {
+            "▶ Resume"
+        } else {
+            "⏸ Pause"
+        };
         if ui.button(pause_label).clicked() {
             state.paused = !state.paused;
             if !state.paused {

@@ -14,14 +14,20 @@ pub struct TclClient {
 impl TclClient {
     /// Connect to OpenOCD TCL server
     pub fn connect(addr: SocketAddr) -> Result<Self> {
-        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
-            .map_err(|e| DataVisError::Config(format!("Failed to connect to OpenOCD TCL server at {}: {}", addr, e)))?;
+        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).map_err(|e| {
+            DataVisError::Config(format!(
+                "Failed to connect to OpenOCD TCL server at {}: {}",
+                addr, e
+            ))
+        })?;
         // Generous read timeout so a transiently-busy TCL server (e.g. during
         // a burst of memory reads) doesn't abort the whole command. OpenOCD
         // will propagate real target failures as an error in the response.
-        stream.set_read_timeout(Some(Duration::from_secs(10)))
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
             .map_err(|e| DataVisError::Config(format!("Failed to set read timeout: {}", e)))?;
-        stream.set_nodelay(true)
+        stream
+            .set_nodelay(true)
             .map_err(|e| DataVisError::Config(format!("Failed to set TCP_NODELAY: {}", e)))?;
         Ok(Self { stream })
     }
@@ -31,7 +37,8 @@ impl TclClient {
         // Send command terminated with 0x1a
         let mut data = cmd.as_bytes().to_vec();
         data.push(TCL_COMMAND_TERMINATOR);
-        self.stream.write_all(&data)
+        self.stream
+            .write_all(&data)
             .map_err(|e| DataVisError::Config(format!("Failed to send TCL command: {}", e)))?;
 
         // Read response until 0x1a
@@ -40,7 +47,10 @@ impl TclClient {
         loop {
             let n = self.stream.read(&mut buf).map_err(|e| {
                 let kind = e.kind();
-                let msg = if matches!(kind, std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) {
+                let msg = if matches!(
+                    kind,
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) {
                     format!("OpenOCD TCL read timed out (server busy): {}", e)
                 } else {
                     format!("Failed to read TCL response: {}", e)
@@ -48,14 +58,19 @@ impl TclClient {
                 DataVisError::Config(msg)
             })?;
             if n == 0 {
-                return Err(DataVisError::Config("OpenOCD TCL connection closed".to_string()));
+                return Err(DataVisError::Config(
+                    "OpenOCD TCL connection closed".to_string(),
+                ));
             }
             for &byte in &buf[..n] {
                 if byte == TCL_COMMAND_TERMINATOR {
                     let text = String::from_utf8_lossy(&response).to_string();
                     // Check for error in response
                     if text.starts_with("Error:") || text.contains("\nError:") {
-                        return Err(DataVisError::Config(format!("OpenOCD error: {}", text.trim())));
+                        return Err(DataVisError::Config(format!(
+                            "OpenOCD error: {}",
+                            text.trim()
+                        )));
                     }
                     return Ok(text);
                 }
@@ -106,15 +121,24 @@ fn parse_mdw_response(response: &str) -> Result<Vec<u32>> {
     let mut values = Vec::new();
     for line in response.lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         // Format: "0xADDR: VAL1 VAL2 ..."
         if let Some(colon_pos) = line.find(':') {
             let values_part = line[colon_pos + 1..].trim();
             for token in values_part.split_whitespace() {
                 let token = token.trim();
-                if token.is_empty() { continue; }
-                let val = u32::from_str_radix(token.trim_start_matches("0x").trim_start_matches("0X"), 16)
-                    .map_err(|e| DataVisError::Config(format!("Failed to parse mdw value '{}': {}", token, e)))?;
+                if token.is_empty() {
+                    continue;
+                }
+                let val = u32::from_str_radix(
+                    token.trim_start_matches("0x").trim_start_matches("0X"),
+                    16,
+                )
+                .map_err(|e| {
+                    DataVisError::Config(format!("Failed to parse mdw value '{}': {}", token, e))
+                })?;
                 values.push(val);
             }
         }
@@ -127,14 +151,23 @@ fn parse_mdh_response(response: &str) -> Result<Vec<u16>> {
     let mut values = Vec::new();
     for line in response.lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if let Some(colon_pos) = line.find(':') {
             let values_part = line[colon_pos + 1..].trim();
             for token in values_part.split_whitespace() {
                 let token = token.trim();
-                if token.is_empty() { continue; }
-                let val = u16::from_str_radix(token.trim_start_matches("0x").trim_start_matches("0X"), 16)
-                    .map_err(|e| DataVisError::Config(format!("Failed to parse mdh value '{}': {}", token, e)))?;
+                if token.is_empty() {
+                    continue;
+                }
+                let val = u16::from_str_radix(
+                    token.trim_start_matches("0x").trim_start_matches("0X"),
+                    16,
+                )
+                .map_err(|e| {
+                    DataVisError::Config(format!("Failed to parse mdh value '{}': {}", token, e))
+                })?;
                 values.push(val);
             }
         }
@@ -147,14 +180,24 @@ fn parse_mdb_response(response: &str) -> Result<Vec<u8>> {
     let mut values = Vec::new();
     for line in response.lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if let Some(colon_pos) = line.find(':') {
             let values_part = line[colon_pos + 1..].trim();
             for token in values_part.split_whitespace() {
                 let token = token.trim();
-                if token.is_empty() { continue; }
-                let val = u8::from_str_radix(token.trim_start_matches("0x").trim_start_matches("0X"), 16)
-                    .map_err(|e| DataVisError::Config(format!("Failed to parse mdb value '{}': {}", token, e)))?;
+                if token.is_empty() {
+                    continue;
+                }
+                let val =
+                    u8::from_str_radix(token.trim_start_matches("0x").trim_start_matches("0X"), 16)
+                        .map_err(|e| {
+                            DataVisError::Config(format!(
+                                "Failed to parse mdb value '{}': {}",
+                                token, e
+                            ))
+                        })?;
                 values.push(val);
             }
         }

@@ -24,7 +24,9 @@ impl OpenOcdProcess {
         //      "cmsis-dap.cfg" and "cmsis-dap" all resolve the same way).
         //   2. Auto-detect from the first probe probe-rs can see.
         //   3. Fall back to "stlink" (most common default) with a warning.
-        let interface = config.openocd_interface.clone()
+        let interface = config
+            .openocd_interface
+            .clone()
             .map(|s| normalize_script_name(&s, "interface"))
             .or_else(detect_interface_from_probes)
             .unwrap_or_else(|| {
@@ -62,20 +64,27 @@ impl OpenOcdProcess {
             cmd.arg("-s").arg(scripts_dir);
         }
 
-        cmd.arg("-f").arg(format!("interface/{}.cfg", interface))
-            .arg("-c").arg(format!("transport select {}", transport))
-            .arg("-c").arg(format!("adapter speed {}", config.speed_khz))
-            .arg("-f").arg(format!("target/{}.cfg", target))
-            .arg("-c").arg(format!("tcl_port {}", tcl_port))
-            .arg("-c").arg("gdb_port disabled")
-            .arg("-c").arg("telnet_port disabled");
+        cmd.arg("-f")
+            .arg(format!("interface/{}.cfg", interface))
+            .arg("-c")
+            .arg(format!("transport select {}", transport))
+            .arg("-c")
+            .arg(format!("adapter speed {}", config.speed_khz))
+            .arg("-f")
+            .arg(format!("target/{}.cfg", target))
+            .arg("-c")
+            .arg(format!("tcl_port {}", tcl_port))
+            .arg("-c")
+            .arg("gdb_port disabled")
+            .arg("-c")
+            .arg("telnet_port disabled");
 
-        cmd.stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         tracing::info!("Spawning OpenOCD: {:?}", cmd);
 
-        let child = cmd.spawn()
+        let child = cmd
+            .spawn()
             .map_err(|e| DataVisError::Config(format!("Failed to spawn OpenOCD: {}", e)))?;
 
         let mut process = Self { child, tcl_port };
@@ -108,15 +117,21 @@ impl OpenOcdProcess {
         let start = Instant::now();
         let poll_interval = Duration::from_millis(100);
 
-        tracing::info!("Waiting for OpenOCD TCL port {} to become ready...", self.tcl_port);
+        tracing::info!(
+            "Waiting for OpenOCD TCL port {} to become ready...",
+            self.tcl_port
+        );
 
         while start.elapsed() < timeout {
             // Check if process has exited
-            if let Some(status) = self.child.try_wait()
-                .map_err(|e| DataVisError::Config(format!("Failed to check OpenOCD process: {}", e)))?
-            {
+            if let Some(status) = self.child.try_wait().map_err(|e| {
+                DataVisError::Config(format!("Failed to check OpenOCD process: {}", e))
+            })? {
                 // Read stderr for error message
-                let stderr = self.child.stderr.as_mut()
+                let stderr = self
+                    .child
+                    .stderr
+                    .as_mut()
                     .and_then(|s| {
                         let mut buf = String::new();
                         std::io::Read::read_to_string(s, &mut buf).ok()?;
@@ -149,7 +164,8 @@ impl OpenOcdProcess {
         // Timeout - kill the process
         let _ = self.child.kill();
         Err(DataVisError::Config(format!(
-            "Timed out waiting for OpenOCD TCL port {} to become ready", self.tcl_port
+            "Timed out waiting for OpenOCD TCL port {} to become ready",
+            self.tcl_port
         )))
     }
 
@@ -191,7 +207,10 @@ fn find_openocd_binary(config: &ProbeConfig) -> Result<String> {
         if std::path::Path::new(path).exists() {
             return Ok(path.clone());
         }
-        return Err(DataVisError::Config(format!("OpenOCD binary not found at configured path: {}", path)));
+        return Err(DataVisError::Config(format!(
+            "OpenOCD binary not found at configured path: {}",
+            path
+        )));
     }
 
     // 2. Bundled path
@@ -205,7 +224,7 @@ fn find_openocd_binary(config: &ProbeConfig) -> Result<String> {
     }
 
     Err(DataVisError::Config(
-        "OpenOCD not found. Install OpenOCD or specify the path in Settings.".to_string()
+        "OpenOCD not found. Install OpenOCD or specify the path in Settings.".to_string(),
     ))
 }
 
@@ -316,7 +335,8 @@ fn normalize_script_name(input: &str, prefix: &str) -> String {
 fn find_free_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
         .map_err(|e| DataVisError::Config(format!("Failed to find free port: {}", e)))?;
-    let port = listener.local_addr()
+    let port = listener
+        .local_addr()
         .map_err(|e| DataVisError::Config(format!("Failed to get local addr: {}", e)))?
         .port();
     Ok(port)
@@ -341,10 +361,12 @@ impl OpenOcdConnection {
                 // Probe once with a short timeout so we fail fast with a
                 // descriptive error if nothing is listening, instead of
                 // hanging on the first TCL command.
-                TcpStream::connect_timeout(&addr, Duration::from_secs(2))
-                    .map_err(|e| DataVisError::Config(format!(
-                        "Failed to connect to existing OpenOCD at {}: {}", addr, e
-                    )))?;
+                TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|e| {
+                    DataVisError::Config(format!(
+                        "Failed to connect to existing OpenOCD at {}: {}",
+                        addr, e
+                    ))
+                })?;
                 tracing::info!("Connected to external OpenOCD TCL server at {}", addr);
                 Ok(Self::External { addr })
             }
@@ -381,9 +403,13 @@ impl OpenOcdConnection {
 fn resolve_addr(host: &str, port: u16) -> Result<SocketAddr> {
     (host, port)
         .to_socket_addrs()
-        .map_err(|e| DataVisError::Config(format!("Invalid OpenOCD host '{}:{}': {}", host, port, e)))?
+        .map_err(|e| {
+            DataVisError::Config(format!("Invalid OpenOCD host '{}:{}': {}", host, port, e))
+        })?
         .next()
-        .ok_or_else(|| DataVisError::Config(format!("Host '{}' did not resolve to any address", host)))
+        .ok_or_else(|| {
+            DataVisError::Config(format!("Host '{}' did not resolve to any address", host))
+        })
 }
 
 #[cfg(test)]
@@ -393,7 +419,10 @@ mod tests {
     #[test]
     fn normalize_strips_prefix_and_extension() {
         assert_eq!(normalize_script_name("cmsis-dap", "interface"), "cmsis-dap");
-        assert_eq!(normalize_script_name("cmsis-dap.cfg", "interface"), "cmsis-dap");
+        assert_eq!(
+            normalize_script_name("cmsis-dap.cfg", "interface"),
+            "cmsis-dap"
+        );
         assert_eq!(
             normalize_script_name("interface/cmsis-dap.cfg", "interface"),
             "cmsis-dap"

@@ -47,9 +47,10 @@ impl OpenOcdProbe {
 
     /// Read raw bytes for a variable's type size from the appropriate memory command
     fn read_variable_bytes(&mut self, variable: &Variable) -> Result<Vec<u8>> {
-        let client = self.client.as_mut().ok_or_else(|| {
-            DataVisError::Config("Not connected to OpenOCD".to_string())
-        })?;
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| DataVisError::Config("Not connected to OpenOCD".to_string()))?;
 
         let addr = variable.address;
         let size = variable.var_type.size_bytes();
@@ -58,21 +59,27 @@ impl OpenOcdProbe {
             1 => {
                 let values = client.read_memory_8(addr, 1)?;
                 if values.is_empty() {
-                    return Err(DataVisError::Variable("No data returned from mdb".to_string()));
+                    return Err(DataVisError::Variable(
+                        "No data returned from mdb".to_string(),
+                    ));
                 }
                 Ok(vec![values[0]])
             }
             2 => {
                 let values = client.read_memory_16(addr, 1)?;
                 if values.is_empty() {
-                    return Err(DataVisError::Variable("No data returned from mdh".to_string()));
+                    return Err(DataVisError::Variable(
+                        "No data returned from mdh".to_string(),
+                    ));
                 }
                 Ok(values[0].to_le_bytes().to_vec())
             }
             4 => {
                 let values = client.read_memory_32(addr, 1)?;
                 if values.is_empty() {
-                    return Err(DataVisError::Variable("No data returned from mdw".to_string()));
+                    return Err(DataVisError::Variable(
+                        "No data returned from mdw".to_string(),
+                    ));
                 }
                 Ok(values[0].to_le_bytes().to_vec())
             }
@@ -80,7 +87,9 @@ impl OpenOcdProbe {
                 // Read two 32-bit words for 64-bit types
                 let values = client.read_memory_32(addr, 2)?;
                 if values.len() < 2 {
-                    return Err(DataVisError::Variable("Insufficient data for 64-bit read".to_string()));
+                    return Err(DataVisError::Variable(
+                        "Insufficient data for 64-bit read".to_string(),
+                    ));
                 }
                 // Little-endian: low word first
                 let mut bytes = Vec::with_capacity(8);
@@ -187,9 +196,10 @@ impl DebugProbe for OpenOcdProbe {
                     }
                     match variable.var_type.parse_to_f64(&bytes) {
                         Some(value) => results.push(Ok(value)),
-                        None => results.push(Err(DataVisError::Variable(
-                            format!("Failed to parse value for '{}'", variable.name),
-                        ))),
+                        None => results.push(Err(DataVisError::Variable(format!(
+                            "Failed to parse value for '{}'",
+                            variable.name
+                        )))),
                     }
                 }
                 Err(e) => {
@@ -209,9 +219,10 @@ impl DebugProbe for OpenOcdProbe {
     }
 
     fn write_variable(&mut self, variable: &Variable, value: f64) -> Result<()> {
-        let client = self.client.as_mut().ok_or_else(|| {
-            DataVisError::Config("Not connected to OpenOCD".to_string())
-        })?;
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| DataVisError::Config("Not connected to OpenOCD".to_string()))?;
 
         let addr = variable.address;
 
@@ -219,7 +230,13 @@ impl DebugProbe for OpenOcdProbe {
             VariableType::U8 | VariableType::I8 | VariableType::Bool => {
                 let byte_val = match variable.var_type {
                     VariableType::I8 => value as i8 as u8,
-                    VariableType::Bool => if value != 0.0 { 1 } else { 0 },
+                    VariableType::Bool => {
+                        if value != 0.0 {
+                            1
+                        } else {
+                            0
+                        }
+                    }
                     _ => value as u8,
                 };
                 client.write_memory_8(addr, byte_val)
@@ -251,23 +268,25 @@ impl DebugProbe for OpenOcdProbe {
                 client.write_memory_32(addr, low)?;
                 client.write_memory_32(addr + 4, high)
             }
-            VariableType::Raw(_) => {
-                Err(DataVisError::Variable("Cannot write raw type variables".to_string()))
-            }
+            VariableType::Raw(_) => Err(DataVisError::Variable(
+                "Cannot write raw type variables".to_string(),
+            )),
         }
     }
 
     fn read_memory(&mut self, address: u64, size: usize) -> Result<Vec<u8>> {
-        let client = self.client.as_mut().ok_or_else(|| {
-            DataVisError::Config("Not connected to OpenOCD".to_string())
-        })?;
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| DataVisError::Config("Not connected to OpenOCD".to_string()))?;
         client.read_memory_8(address, size)
     }
 
     fn write_memory(&mut self, address: u64, data: &[u8]) -> Result<()> {
-        let client = self.client.as_mut().ok_or_else(|| {
-            DataVisError::Config("Not connected to OpenOCD".to_string())
-        })?;
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| DataVisError::Config("Not connected to OpenOCD".to_string()))?;
 
         // Write aligned 32-bit chunks where possible, then remaining bytes
         let mut offset = 0usize;
@@ -282,25 +301,28 @@ impl DebugProbe for OpenOcdProbe {
     }
 
     fn halt(&mut self) -> Result<()> {
-        let client = self.client.as_mut().ok_or_else(|| {
-            DataVisError::Config("Not connected to OpenOCD".to_string())
-        })?;
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| DataVisError::Config("Not connected to OpenOCD".to_string()))?;
         client.execute("halt")?;
         Ok(())
     }
 
     fn resume(&mut self) -> Result<()> {
-        let client = self.client.as_mut().ok_or_else(|| {
-            DataVisError::Config("Not connected to OpenOCD".to_string())
-        })?;
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| DataVisError::Config("Not connected to OpenOCD".to_string()))?;
         client.execute("resume")?;
         Ok(())
     }
 
     fn reset(&mut self, halt: bool) -> Result<()> {
-        let client = self.client.as_mut().ok_or_else(|| {
-            DataVisError::Config("Not connected to OpenOCD".to_string())
-        })?;
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| DataVisError::Config("Not connected to OpenOCD".to_string()))?;
         if halt {
             client.execute("reset halt")?;
         } else {
@@ -310,9 +332,10 @@ impl DebugProbe for OpenOcdProbe {
     }
 
     fn is_halted(&mut self) -> Result<bool> {
-        let client = self.client.as_mut().ok_or_else(|| {
-            DataVisError::Config("Not connected to OpenOCD".to_string())
-        })?;
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| DataVisError::Config("Not connected to OpenOCD".to_string()))?;
         let response = client.execute("$_TARGETNAME curstate")?;
         Ok(response.trim() == "halted")
     }
