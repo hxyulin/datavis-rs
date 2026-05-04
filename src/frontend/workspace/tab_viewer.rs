@@ -7,13 +7,13 @@ use std::path::PathBuf;
 
 use egui::{Ui, WidgetText};
 
+use crate::backend::FrontendReceiver;
 use crate::backend::{ElfInfo, ElfSymbol};
 use crate::config::settings::RuntimeSettings;
 use crate::config::{AppConfig, AppState, DataPersistenceConfig};
 use crate::frontend::pane_trait::Pane;
 use crate::frontend::state::{AppAction, SharedContext, SharedMut, SharedState};
 use crate::frontend::topics::Topics;
-use crate::pipeline::bridge::PipelineBridge;
 
 use super::{PaneEntry, PaneId, PaneKind};
 
@@ -22,7 +22,7 @@ use super::{PaneEntry, PaneId, PaneKind};
 /// Holds mutable borrows to all shared state fields so that
 /// SharedState can be constructed per-frame inside ui().
 pub struct WorkspaceTabViewer<'a> {
-    pub frontend: &'a PipelineBridge,
+    pub frontend: &'a FrontendReceiver,
     pub config: &'a mut AppConfig,
     pub settings: &'a mut RuntimeSettings,
     pub app_state: &'a mut AppState,

@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::pipeline::bridge::PipelineCommand;
+use crate::backend::BackendCommand;
 use crate::types::{Variable, VariableData};
 
 /// Set a variable's poll rate and propagate constraints through the tree.
@@ -12,7 +12,7 @@ pub fn set_variable_poll_rate(
     variables: &mut HashMap<u32, Variable>,
     id: u32,
     rate_hz: u32,
-) -> Vec<PipelineCommand> {
+) -> Vec<BackendCommand> {
     if let Some(var) = variables.get_mut(&id) {
         var.poll_rate_hz = rate_hz;
     }
@@ -23,7 +23,7 @@ pub fn set_variable_poll_rate(
     // Return update commands for all variables
     variables
         .values()
-        .map(|v| PipelineCommand::UpdateVariable(v.clone()))
+        .map(|v| BackendCommand::UpdateVariable(v.clone()))
         .collect()
 }
 
@@ -33,7 +33,7 @@ pub fn toggle_tree_enabled(
     variables: &mut HashMap<u32, Variable>,
     root_id: u32,
     enabled: bool,
-) -> Vec<PipelineCommand> {
+) -> Vec<BackendCommand> {
     let mut commands = Vec::new();
     toggle_tree_enabled_inner(variables, root_id, enabled, &mut commands);
     commands
@@ -43,11 +43,11 @@ fn toggle_tree_enabled_inner(
     variables: &mut HashMap<u32, Variable>,
     id: u32,
     enabled: bool,
-    commands: &mut Vec<PipelineCommand>,
+    commands: &mut Vec<BackendCommand>,
 ) {
     if let Some(var) = variables.get_mut(&id) {
         var.enabled = enabled;
-        commands.push(PipelineCommand::UpdateVariable(var.clone()));
+        commands.push(BackendCommand::UpdateVariable(var.clone()));
     }
     let child_ids: Vec<u32> = variables
         .values()
@@ -67,7 +67,7 @@ pub fn rename_variable(
     variable_data: &mut HashMap<u32, VariableData>,
     id: u32,
     new_name: String,
-) -> Vec<PipelineCommand> {
+) -> Vec<BackendCommand> {
     let mut commands = Vec::new();
     let old_name = match variables.get(&id) {
         Some(v) => v.name.clone(),
@@ -77,7 +77,7 @@ pub fn rename_variable(
     // Rename the target variable
     if let Some(var) = variables.get_mut(&id) {
         var.name = new_name.clone();
-        commands.push(PipelineCommand::UpdateVariable(var.clone()));
+        commands.push(BackendCommand::UpdateVariable(var.clone()));
     }
     if let Some(data) = variable_data.get_mut(&id) {
         data.variable.name = new_name.clone();

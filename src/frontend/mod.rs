@@ -1,29 +1,47 @@
-//! Frontend module for egui UI
+//! Frontend module — egui/eframe UI layer
 //!
-//! This module provides the main UI components using eframe/egui.
-//! It receives data from the backend through crossbeam channels and
-//! renders it in real-time.
+//! Implements the two-layer architecture's top half: an `eframe` application with an
+//! `egui_dock` workspace. Pane presence drives subsystem on/off; there is no middle
+//! routing or pipeline layer.
 //!
-//! # Architecture
+//! # Pane kinds (four total)
 //!
-//! The frontend uses an egui_dock workspace where every UI element is a pane:
-//! variable browser, variable list, settings, time series, watcher, FFT view.
-//! Panes can be rearranged via drag-and-drop docking.
+//! - **TimeSeries** ([`panes::TimeSeriesState`]) — multi-instance time-series plot with
+//!   per-variable Rhai converter scripts and a UI-only Pause toggle.
+//! - **LiveWatch** ([`panes::LiveWatchState`]) — Keil-style on-demand DWARF variable tree.
+//!   Right-clicking a static-address primitive leaf offers "Plot this" to promote it to a
+//!   Plot variable.
+//! - **VariableList** ([`panes::VariableListState`]) — list of active plot variables with
+//!   add/edit/remove controls.
+//! - **Recorder** ([`panes::RecorderPaneState`]) — session buffer capture and CSV export.
+//!
+//! # Subsystem activation
+//!
+//! Opening the first `TimeSeries` pane sends [`backend::BackendCommand::StartCollection`];
+//! closing the last one sends `StopCollection`. The same edge logic applies to `LiveWatch`
+//! and the watch poll rate. This is handled by [`SubsystemPresence`] evaluated every frame.
+//!
+//! # Communication
+//!
+//! [`DataVisApp`] holds a [`backend::FrontendReceiver`] which wraps the
+//! `crossbeam-channel` pair. Commands are sent via `frontend.send_command(BackendCommand::…)`;
+//! messages are drained each frame in `process_backend_messages`.
 //!
 //! # Main Types
 //!
-//! - [`DataVisApp`] - Main application state implementing [`eframe::App`]
-//! - [`Workspace`] - Dock state and pane management
-//! - [`PlotView`] - Plot configuration and rendering
+//! - [`DataVisApp`] — Main application state implementing [`eframe::App`].
+//! - [`Workspace`] — Dock state and pane management.
+//! - [`PlotView`] — Plot configuration and rendering helpers.
+//! - [`SubsystemPresence`] — Edge-detection for subsystem on/off transitions.
 //!
 //! # Submodules
 //!
-//! - `workspace` - Dock workspace, tab viewer, default layout
-//! - `panes` - Individual pane render functions
-//! - `panels` - Reusable panel components (connection, stats, etc.)
-//! - `plot` - Plot rendering with egui_plot
-//! - [`script_editor`] - Rhai script editor with syntax highlighting
-//! - `widgets` - Custom UI widgets (status indicators, sparklines, etc.)
+//! - `workspace` — Dock workspace, tab viewer, default layout.
+//! - `panes` — Individual pane render functions.
+//! - `panels` — Reusable panel components (connection, stats, etc.).
+//! - `plot` — Plot rendering with egui_plot.
+//! - [`script_editor`] — Rhai script editor with syntax highlighting.
+//! - `widgets` — Custom UI widgets (status indicators, sparklines, etc.).
 
 pub mod actions;
 pub mod dialog_manager;
@@ -62,22 +80,53 @@ use dialogs::{
 use workspace::tab_viewer::WorkspaceTabViewer;
 use workspace::{PaneId, PaneKind, Workspace};
 
-use crate::backend::{parse_elf, ElfInfo, ElfSymbol};
+use crate::backend::{
+    parse_elf, BackendCommand, BackendMessage, ElfInfo, ElfSymbol, FrontendReceiver,
+};
 use crate::config::{settings::RuntimeSettings, AppConfig, AppState, OpenOcdMode};
-use crate::pipeline::bridge::{PipelineBridge, PipelineCommand, SinkMessage};
 use crate::types::{CollectionStats, ConnectionStatus, DataPoint, VariableData, VariableType};
 use egui::Color32;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Actions that can be performed on variables from the UI
-#[allow(dead_code)]
-#[derive(Debug)]
-enum VariableAction {
-    SetEnabled(bool),
-    Edit,
-    Remove,
+/// Tracks whether each subsystem (plot, watch) has at least one pane
+/// present in the workspace, and reports edge transitions.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SubsystemPresence {
+    pub plot: bool,
+    pub watch: bool,
+}
+
+/// Edge events emitted by `SubsystemPresence::update`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PresenceEdges {
+    /// Some(true) = transitioned off→on. Some(false) = on→off. None = no change.
+    pub plot_changed: Option<bool>,
+    pub watch_changed: Option<bool>,
+}
+
+impl SubsystemPresence {
+    /// Update the latched state and return any edge transitions since the
+    /// last call. Idempotent when called twice with the same args.
+    pub fn update(&mut self, plot_now: bool, watch_now: bool) -> PresenceEdges {
+        let plot_changed = if plot_now != self.plot {
+            Some(plot_now)
+        } else {
+            None
+        };
+        let watch_changed = if watch_now != self.watch {
+            Some(watch_now)
+        } else {
+            None
+        };
+        self.plot = plot_now;
+        self.watch = watch_now;
+        PresenceEdges {
+            plot_changed,
+            watch_changed,
+        }
+    }
 }
 
 /// Type of change detected for a variable when reloading ELF
@@ -107,16 +156,14 @@ pub struct VariableChange {
 }
 
 /// Main application state for the data visualizer
-#[allow(dead_code)]
 pub struct DataVisApp {
     // === Communication ===
-    frontend: PipelineBridge,
+    frontend: FrontendReceiver,
 
     // === Shared State ===
     config: AppConfig,
     app_state: AppState,
     settings: RuntimeSettings,
-    start_time: Instant,
     /// Base time accumulated from previous start/stop cycles
     accumulated_time: Duration,
     /// Instant when the current collection session started (None if stopped)
@@ -135,13 +182,8 @@ pub struct DataVisApp {
     // === Workspace (replaces page navigation) ===
     workspace: Workspace,
 
-    // === Node-Pane Linkage ===
-    /// Maps NodeId → PaneId for auto-created panes
-    node_to_pane: std::collections::HashMap<crate::pipeline::id::NodeId, workspace::PaneId>,
-    /// Maps PaneId → NodeId for auto-created panes
-    pane_to_node: std::collections::HashMap<workspace::PaneId, crate::pipeline::id::NodeId>,
-
     // === Native menu bar (None on platforms without native menu support) ===
+    // Held to keep the OS native menu alive; drop = menu disappears.
     #[allow(dead_code)]
     native_menu: Option<muda::Menu>,
 
@@ -166,82 +208,10 @@ pub struct DataVisApp {
     /// Last poll rate we sent the scheduler, so we re-send only when it
     /// changes.
     last_watch_rate_sent: Option<u32>,
-}
 
-/// State for variable autocomplete/selector (kept for compatibility)
-#[allow(dead_code)]
-#[derive(Default)]
-pub struct VariableSelectorState {
-    pub query: String,
-    pub filtered_symbols: Vec<ElfSymbol>,
-    pub selected_index: Option<usize>,
-    pub dropdown_open: bool,
-    pub cursor_position: usize,
-    pub expanded_paths: std::collections::HashSet<String>,
-}
-
-impl VariableSelectorState {
-    pub fn update_filter(&mut self, elf_info: Option<&ElfInfo>) {
-        self.filtered_symbols.clear();
-        if let Some(info) = elf_info {
-            let results = info.search_variables(&self.query);
-            self.filtered_symbols = results.into_iter().cloned().collect();
-        }
-        if self.filtered_symbols.is_empty() {
-            self.selected_index = None;
-        } else if let Some(idx) = self.selected_index {
-            if idx >= self.filtered_symbols.len() {
-                self.selected_index = Some(self.filtered_symbols.len() - 1);
-            }
-        }
-    }
-
-    pub fn select_previous(&mut self) {
-        if self.filtered_symbols.is_empty() {
-            return;
-        }
-        self.selected_index = Some(match self.selected_index {
-            Some(0) => self.filtered_symbols.len() - 1,
-            Some(idx) => idx - 1,
-            None => 0,
-        });
-    }
-
-    pub fn select_next(&mut self) {
-        if self.filtered_symbols.is_empty() {
-            return;
-        }
-        self.selected_index = Some(match self.selected_index {
-            Some(idx) if idx + 1 >= self.filtered_symbols.len() => 0,
-            Some(idx) => idx + 1,
-            None => 0,
-        });
-    }
-
-    pub fn selected_symbol(&self) -> Option<&ElfSymbol> {
-        self.selected_index
-            .and_then(|idx| self.filtered_symbols.get(idx))
-    }
-
-    pub fn clear(&mut self) {
-        self.query.clear();
-        self.filtered_symbols.clear();
-        self.selected_index = None;
-        self.dropdown_open = false;
-        self.expanded_paths.clear();
-    }
-
-    pub fn toggle_expanded(&mut self, path: &str) {
-        if self.expanded_paths.contains(path) {
-            self.expanded_paths.retain(|p| !p.starts_with(path));
-        } else {
-            self.expanded_paths.insert(path.to_string());
-        }
-    }
-
-    pub fn is_expanded(&self, path: &str) -> bool {
-        self.expanded_paths.contains(path)
-    }
+    // === Pane-presence edge tracking ===
+    /// Tracks whether each subsystem has panes open; drives auto start/stop.
+    subsystem_presence: SubsystemPresence,
 }
 
 /// State for the variable editor dialog
@@ -284,12 +254,11 @@ impl VariableEditorState {
     }
 }
 
-#[allow(dead_code)]
 impl DataVisApp {
     /// Create a new application instance
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        frontend: PipelineBridge,
+        frontend: FrontendReceiver,
         mut config: AppConfig,
         app_state: AppState,
         project_path: Option<PathBuf>,
@@ -373,7 +342,7 @@ impl DataVisApp {
             config.probe.target_chip.clone()
         };
 
-        frontend.send_command(PipelineCommand::RefreshProbes);
+        frontend.send_command(BackendCommand::RefreshProbes);
 
         // Build workspace - restore from session if available, otherwise use default layout
         let mut workspace = Workspace::new();
@@ -406,7 +375,6 @@ impl DataVisApp {
             config,
             app_state,
             settings: RuntimeSettings::default(),
-            start_time: Instant::now(),
             accumulated_time: Duration::ZERO,
             collection_start: None,
             last_error: None,
@@ -416,8 +384,6 @@ impl DataVisApp {
             elf_info,
             elf_symbols,
             workspace,
-            node_to_pane: std::collections::HashMap::new(),
-            pane_to_node: std::collections::HashMap::new(),
             native_menu,
             show_toolbar,
             show_status_bar,
@@ -427,6 +393,7 @@ impl DataVisApp {
             ui_session,
             last_watch_leaves_hash: 0,
             last_watch_rate_sent: None,
+            subsystem_presence: SubsystemPresence::default(),
         }
     }
 
@@ -436,21 +403,20 @@ impl DataVisApp {
 
         for msg in messages {
             match msg {
-                SinkMessage::ConnectionStatus(status) => {
+                BackendMessage::ConnectionStatus(status) => {
                     self.topics.connection_status = status;
                     if status == ConnectionStatus::Connected {
                         self.last_error = None;
                     }
                 }
-                SinkMessage::ConnectionError(err) => {
+                BackendMessage::ConnectionError(err) => {
                     self.last_error = Some(err);
                     self.topics.connection_status = ConnectionStatus::Error;
                 }
-                SinkMessage::DataBatch(batch) => {
+                BackendMessage::DataBatch(batch) => {
                     // Skip adding data when paused - this effectively freezes the graph
                     if !self.settings.paused {
-                        for (var_id, timestamp, raw_value, converted_value) in batch {
-                            let variable_id = var_id.0;
+                        for (variable_id, timestamp, raw_value, converted_value) in batch {
                             if let Some(data) = self.topics.variable_data.get_mut(&variable_id) {
                                 data.push(DataPoint::with_conversion(
                                     timestamp,
@@ -459,77 +425,34 @@ impl DataVisApp {
                                 ));
                             }
                         }
-                        // Record timestamp for global data freshness
-                        self.topics.global_data_freshness = Some(std::time::Instant::now());
                     }
                 }
-                SinkMessage::GraphDataBatch { pane_id, data } => {
-                    // Skip adding data when paused
+                BackendMessage::DataPoint {
+                    variable_id,
+                    timestamp,
+                    raw_value,
+                    converted_value,
+                } => {
                     if !self.settings.paused {
-                        match pane_id {
-                            Some(id) => {
-                                // Route to specific pane's data store
-                                let pane_data = self.topics.graph_pane_data.entry(id).or_default();
-                                for (var_id, timestamp, raw_value, converted_value) in data {
-                                    let variable_id = var_id.0;
-                                    let var_data =
-                                        pane_data.entry(variable_id).or_insert_with(|| {
-                                            // Create a new VariableData for this variable in this pane
-                                            if let Some(original) =
-                                                self.topics.variable_data.get(&variable_id)
-                                            {
-                                                VariableData::new(original.variable.clone())
-                                            } else {
-                                                // Fallback: create a basic variable
-                                                let var = crate::types::Variable::new(
-                                                    format!("var_{}", variable_id),
-                                                    0,
-                                                    crate::types::VariableType::F32,
-                                                );
-                                                VariableData::new(var)
-                                            }
-                                        });
-                                    var_data.push(DataPoint::with_conversion(
-                                        timestamp,
-                                        raw_value,
-                                        converted_value,
-                                    ));
-                                }
-                                // Record timestamp for pane-specific data freshness
-                                self.topics
-                                    .pane_data_freshness
-                                    .insert(id, std::time::Instant::now());
-                            }
-                            None => {
-                                // Broadcast to all panes - add to global variable_data
-                                for (var_id, timestamp, raw_value, converted_value) in data {
-                                    let variable_id = var_id.0;
-                                    if let Some(data) =
-                                        self.topics.variable_data.get_mut(&variable_id)
-                                    {
-                                        data.push(DataPoint::with_conversion(
-                                            timestamp,
-                                            raw_value,
-                                            converted_value,
-                                        ));
-                                    }
-                                }
-                                // Record timestamp for global data freshness
-                                self.topics.global_data_freshness = Some(std::time::Instant::now());
-                            }
+                        if let Some(data) = self.topics.variable_data.get_mut(&variable_id) {
+                            data.push(DataPoint::with_conversion(
+                                timestamp,
+                                raw_value,
+                                converted_value,
+                            ));
                         }
                     }
                 }
-                SinkMessage::ReadError { variable_id, error } => {
+                BackendMessage::ReadError { variable_id, error } => {
                     if let Some(data) = self.topics.variable_data.get_mut(&variable_id) {
                         data.record_error(error);
                     }
                 }
-                SinkMessage::Stats(stats) => {
+                BackendMessage::Stats(stats) => {
                     self.topics.stats = stats;
                     self.topics.last_stats_update = Some(Instant::now());
                 }
-                SinkMessage::VariableList(vars) => {
+                BackendMessage::VariableList(vars) => {
                     for var in vars {
                         self.topics
                             .variable_data
@@ -537,7 +460,7 @@ impl DataVisApp {
                             .or_insert_with(|| VariableData::new(var));
                     }
                 }
-                SinkMessage::ProbeList(probes) => {
+                BackendMessage::ProbeList(probes) => {
                     tracing::info!("Received {} probes", probes.len());
                     // Reset selected index if it's now out of bounds
                     if let Some(idx) = self.selected_probe_index {
@@ -551,41 +474,20 @@ impl DataVisApp {
                     }
                     self.topics.available_probes = probes;
                 }
-                SinkMessage::Shutdown => {
+                BackendMessage::Shutdown => {
                     tracing::info!("Backend shutdown received");
                 }
-                SinkMessage::WriteSuccess { variable_id } => {
+                BackendMessage::WriteSuccess { variable_id } => {
                     tracing::info!("Successfully wrote to variable {}", variable_id);
                 }
-                SinkMessage::WriteError { variable_id, error } => {
+                BackendMessage::WriteError { variable_id, error } => {
                     tracing::error!("Failed to write to variable {}: {}", variable_id, error);
                     self.last_error = Some(format!("Write failed: {}", error));
                 }
-                SinkMessage::NodeError { node_id, message } => {
-                    tracing::error!("Node {:?} error: {}", node_id, message);
-                }
-                SinkMessage::RecorderStatus { state, frame_count } => {
-                    self.topics.recorder_state = state;
-                    self.topics.recorder_frame_count = frame_count;
-                }
-                SinkMessage::ExporterStatus {
-                    active,
-                    rows_written,
-                } => {
-                    self.topics.exporter_active = active;
-                    self.topics.exporter_rows_written = rows_written;
-                }
-                SinkMessage::VariableTreeSnapshot(snapshots) => {
-                    self.topics.variable_tree = snapshots;
-                }
-                SinkMessage::RecordingComplete(recording) => {
-                    tracing::info!("Recording complete: {} frames", recording.frames.len());
-                    self.topics.completed_recordings.push(recording);
-                }
-                SinkMessage::PointerStates(states) => {
+                BackendMessage::PointerStates(states) => {
                     self.topics.pointer_states = states;
                 }
-                SinkMessage::WatchValuesUpdate(values) => {
+                BackendMessage::WatchValuesUpdate(values) => {
                     for (root_id, path, value) in values {
                         self.topics.watch_values.insert((root_id, path), value);
                     }
@@ -611,14 +513,14 @@ impl DataVisApp {
                 probe_selector,
                 target,
             } => {
-                self.frontend.send_command(PipelineCommand::Connect {
+                self.frontend.send_command(BackendCommand::Connect {
                     selector: probe_selector,
                     target,
                     probe_config: self.config.probe.clone(),
                 });
             }
             AppAction::Disconnect => {
-                self.frontend.send_command(PipelineCommand::Disconnect);
+                self.frontend.send_command(BackendCommand::Disconnect);
             }
             AppAction::StartCollection => {
                 // Clear data on start to avoid timestamp discontinuity
@@ -631,7 +533,7 @@ impl DataVisApp {
                 self.settings.collecting = true;
                 self.settings.paused = false; // Ensure not paused when starting
                 self.collection_start = Some(Instant::now());
-                self.frontend.send_command(PipelineCommand::Start);
+                self.frontend.send_command(BackendCommand::StartCollection);
             }
             AppAction::StopCollection => {
                 self.settings.collecting = false;
@@ -639,15 +541,15 @@ impl DataVisApp {
                 if let Some(start) = self.collection_start.take() {
                     self.accumulated_time += start.elapsed();
                 }
-                self.frontend.send_command(PipelineCommand::Stop);
+                self.frontend.send_command(BackendCommand::StopCollection);
             }
             AppAction::RefreshProbes => {
                 tracing::debug!("Refreshing probe list...");
-                self.frontend.send_command(PipelineCommand::RefreshProbes);
+                self.frontend.send_command(BackendCommand::RefreshProbes);
             }
             AppAction::SetPollRate(rate) => {
                 self.frontend
-                    .send_command(PipelineCommand::SetPollRate(rate));
+                    .send_command(BackendCommand::SetPollRate(rate));
             }
             #[cfg(feature = "mock-probe")]
             AppAction::UseMockProbe(use_mock) => {
@@ -688,7 +590,7 @@ impl DataVisApp {
             }
             AppAction::UpdateVariable(var) => {
                 self.frontend
-                    .send_command(PipelineCommand::UpdateVariable(var));
+                    .send_command(BackendCommand::UpdateVariable(var));
             }
             AppAction::SetVariablePollRate { id, rate_hz } => {
                 let cmds = actions::variable_actions::set_variable_poll_rate(
@@ -767,30 +669,8 @@ impl DataVisApp {
                 let title = format!("{} {}", display, count + 1);
                 let id = self.workspace.register_pane(kind, title);
                 self.workspace.dock_state.push_to_first_leaf(id);
-
-                // Pipeline removed in Phase 3 - pane routing now handled by DataRouter
-                // For TimeSeries panes, data routing is automatic via DataRouter
-                if kind == PaneKind::TimeSeries {
-                    // TODO: Send SubscribePane command to backend with pane variables
-                    // For now, panes receive global data
-                }
-            }
-            AppAction::NodeConfig {
-                node_id,
-                key,
-                value,
-            } => {
-                self.frontend.send_command(PipelineCommand::NodeConfig {
-                    node_id,
-                    key,
-                    value,
-                });
-            }
-            AppAction::RequestTopology => {
-                // Pipeline topology removed - no action needed
             }
             AppAction::ClosePane(id) => {
-                // Pipeline node linkage removed - just close the pane
                 self.workspace.remove_pane(id);
             }
             AppAction::NewProject => {
@@ -855,6 +735,32 @@ impl DataVisApp {
             }
             AppAction::RemoveWatchRoot(id) => {
                 self.config.live_watches.retain(|r| r.id != id);
+            }
+            AppAction::PromoteWatchLeafToPlot { watch_id, path } => {
+                let Some(root) = self.config.live_watches.iter().find(|r| r.id == watch_id) else {
+                    tracing::warn!(
+                        "PromoteWatchLeafToPlot: watch root {:?} not found",
+                        watch_id
+                    );
+                    return;
+                };
+                let root_expr = root.expression.clone();
+                let resolution = crate::watch::resolve_root(self.elf_info.as_ref(), root);
+                let mut walk_out = crate::watch::WalkOutput::default();
+                crate::watch::walk_root(root, &resolution, &mut walk_out);
+                let Some(leaf) = walk_out.leaves.iter().find(|l| l.path == path) else {
+                    tracing::warn!(
+                        "PromoteWatchLeafToPlot: leaf path '{}' not found in walk output",
+                        path
+                    );
+                    return;
+                };
+                let display_name = format!("{}{}", root_expr, path);
+                if let Some(var) = build_variable_from_leaf(&display_name, leaf) {
+                    self.add_variable(var);
+                } else {
+                    tracing::warn!("Cannot plot pointer-deref leaf {}", display_name);
+                }
             }
             AppAction::RenameVariable { id, new_name } => {
                 let cmds = actions::variable_actions::rename_variable(
@@ -948,8 +854,7 @@ impl DataVisApp {
                 ChildAddressMode::Absolute(addr) => *addr,
                 ChildAddressMode::RelativeToPointer { .. } => 0, // resolved at runtime
             };
-            let mut child =
-                crate::types::Variable::new(&spec.name, address, spec.var_type);
+            let mut child = crate::types::Variable::new(&spec.name, address, spec.var_type);
             child.parent_id = Some(parent_id);
             child.enabled = false;
             child.show_in_graph = false;
@@ -971,7 +876,12 @@ impl DataVisApp {
             let child_color = child.color;
             self.add_variable_confirmed(child);
             if !spec.children.is_empty() {
-                self.add_children_recursive(child_id, child_color, &spec.children, pointer_parent_id);
+                self.add_children_recursive(
+                    child_id,
+                    child_color,
+                    &spec.children,
+                    pointer_parent_id,
+                );
             }
         }
     }
@@ -994,15 +904,7 @@ impl DataVisApp {
         self.config.remove_variable(id);
         self.topics.variable_data.remove(&id);
         self.frontend
-            .send_command(PipelineCommand::RemoveVariable(id));
-    }
-
-
-    fn clear_all_data(&mut self) {
-        for data in self.topics.variable_data.values_mut() {
-            data.clear();
-        }
-        self.topics.stats = CollectionStats::default();
+            .send_command(BackendCommand::RemoveVariable(id));
     }
 
     fn render_elf_symbols_with_context(&mut self, ctx: &egui::Context) {
@@ -1281,7 +1183,7 @@ impl DataVisApp {
             self.config.remove_variable(id);
             self.topics.variable_data.remove(&id);
             self.frontend
-                .send_command(PipelineCommand::RemoveVariable(id));
+                .send_command(BackendCommand::RemoveVariable(id));
         }
     }
 
@@ -1312,13 +1214,14 @@ impl DataVisApp {
         });
 
         if toggle_collection {
-            if self.settings.collecting {
-                self.settings.collecting = false;
-                self.frontend.send_command(PipelineCommand::Stop);
-            } else {
-                self.settings.collecting = true;
-                self.frontend.send_command(PipelineCommand::Start);
-            }
+            // Start/Stop is now driven by pane presence (SubsystemPresence).
+            // The Space key used to toggle collection; it now does nothing here.
+            // TODO(stage4): rebind Space to toggle the focused TimeSeries pane's
+            // UI-only `paused` flag once we have a way to identify the focused pane.
+            tracing::warn!(
+                "Space key pressed but Start/Stop collection is now automatic (pane-presence driven). \
+                 Rebinding to per-pane pause is not yet implemented."
+            );
         }
 
         if save_project {
@@ -1476,7 +1379,8 @@ impl DataVisApp {
         }
     }
 
-    /// Render the menu bar (Phase 2: restructured)
+    /// Render the menu bar (only used on Linux where native menus aren't supported)
+    #[cfg(target_os = "linux")]
     fn render_menu_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -1701,6 +1605,7 @@ impl DataVisApp {
     }
 
     /// Render the quick-connect area in the menu bar
+    #[cfg(target_os = "linux")]
     fn render_quick_connect(&mut self, ui: &mut egui::Ui) {
         let status = self.topics.connection_status;
 
@@ -2103,27 +2008,19 @@ impl DataVisApp {
                         ui.label("1. Click the 'Connect' button in the menu bar");
                         ui.label("2. Select your debug probe and target chip");
                         ui.label("3. Load an ELF file (Tools > Load ELF...)");
-                        ui.label("4. Browse and add variables from the Variable Browser");
-                        ui.label("5. Press Space to start/stop data collection");
+                        ui.label("4. Open Variables / Time Series panes from the View menu and add variables");
+                        ui.label("5. Collection runs automatically while a Time Series pane is open");
                         ui.add_space(12.0);
 
                         ui.heading("Keyboard Shortcuts");
                         ui.add_space(4.0);
                         egui::Grid::new("shortcuts_grid").show(ui, |ui| {
-                            ui.label("Space");
-                            ui.label("Start/Stop collection");
-                            ui.end_row();
-
                             ui.label("Ctrl+S");
                             ui.label("Save project");
                             ui.end_row();
 
                             ui.label("Ctrl+L");
                             ui.label("Clear data");
-                            ui.end_row();
-
-                            ui.label("P");
-                            ui.label("Pause/Resume (while collecting)");
                             ui.end_row();
                         });
                         ui.add_space(12.0);
@@ -2197,6 +2094,30 @@ impl eframe::App for DataVisApp {
 
         // Process native menu events (if using native menus)
         self.process_native_menu_events();
+
+        // Pane-presence edge detection: auto start/stop collection and watch rate
+        {
+            let plot_present = self.workspace.has_any_pane(PaneKind::TimeSeries);
+            let watch_present = self.workspace.has_any_pane(PaneKind::LiveWatch);
+            let edges = self.subsystem_presence.update(plot_present, watch_present);
+
+            if let Some(now_on) = edges.plot_changed {
+                if now_on {
+                    self.frontend.start_collection();
+                } else {
+                    self.frontend.stop_collection();
+                }
+            }
+
+            if let Some(now_on) = edges.watch_changed {
+                let hz = if now_on {
+                    self.config.live_watch_poll_rate_hz
+                } else {
+                    0
+                };
+                self.frontend.set_watch_poll_rate(hz);
+            }
+        }
 
         if (self.settings.collecting && !self.settings.paused)
             || self.topics.connection_status == ConnectionStatus::Connected
@@ -2405,7 +2326,10 @@ impl DataVisApp {
                     0u8.hash(&mut h);
                     a.hash(&mut h);
                 }
-                crate::watch::WatchAddress::PointerDeref { parent_path, offset } => {
+                crate::watch::WatchAddress::PointerDeref {
+                    parent_path,
+                    offset,
+                } => {
                     1u8.hash(&mut h);
                     parent_path.hash(&mut h);
                     offset.hash(&mut h);
@@ -2458,5 +2382,113 @@ impl DataVisApp {
         if let Err(e) = self.ui_session.save() {
             tracing::warn!("Failed to save UI session state: {}", e);
         }
+    }
+}
+
+/// Construct a Variable from a Live Watch leaf, snapshotting its current
+/// resolved address. Returns None for leaves whose address is computed at
+/// read time (pointer dereferences) — those have no static address to
+/// snapshot.
+pub fn build_variable_from_leaf(
+    name: &str,
+    leaf: &crate::watch::WatchLeafRead,
+) -> Option<crate::types::Variable> {
+    let addr = match leaf.address {
+        crate::watch::WatchAddress::Static(a) => a,
+        crate::watch::WatchAddress::PointerDeref { .. } => return None,
+    };
+    Some(crate::types::Variable::new(name, addr, leaf.var_type))
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+
+    #[test]
+    fn presence_initial_is_off() {
+        let p = SubsystemPresence::default();
+        assert_eq!(p.plot, false);
+        assert_eq!(p.watch, false);
+    }
+
+    #[test]
+    fn presence_transition_off_to_on() {
+        let mut p = SubsystemPresence::default();
+        let evt = p.update(true, false);
+        assert_eq!(evt.plot_changed, Some(true));
+        assert_eq!(evt.watch_changed, None);
+    }
+
+    #[test]
+    fn presence_transition_on_to_off() {
+        let mut p = SubsystemPresence {
+            plot: true,
+            watch: false,
+        };
+        let evt = p.update(false, false);
+        assert_eq!(evt.plot_changed, Some(false));
+        assert_eq!(evt.watch_changed, None);
+    }
+
+    #[test]
+    fn presence_no_change_returns_none() {
+        let mut p = SubsystemPresence {
+            plot: true,
+            watch: true,
+        };
+        let evt = p.update(true, true);
+        assert_eq!(evt.plot_changed, None);
+        assert_eq!(evt.watch_changed, None);
+    }
+
+    #[test]
+    fn presence_independent_axes() {
+        let mut p = SubsystemPresence::default();
+        let evt = p.update(false, true);
+        assert_eq!(evt.plot_changed, None);
+        assert_eq!(evt.watch_changed, Some(true));
+    }
+}
+
+#[cfg(test)]
+mod promote_tests {
+    use super::*;
+    use crate::types::VariableType;
+    use crate::watch::{WatchAddress, WatchId, WatchLeafRead};
+
+    /// Helper: build a static-address leaf.
+    fn static_leaf(addr: u64) -> WatchLeafRead {
+        WatchLeafRead {
+            root_id: WatchId(1),
+            path: ".x".into(),
+            address: WatchAddress::Static(addr),
+            var_type: VariableType::U32,
+            is_pointer: false,
+        }
+    }
+
+    #[test]
+    fn promote_static_leaf_creates_variable() {
+        let leaf = static_leaf(0x2000_0100);
+        let var =
+            build_variable_from_leaf("g_foo.x", &leaf).expect("static address should promote");
+        assert_eq!(var.address, 0x2000_0100);
+        assert_eq!(var.var_type, VariableType::U32);
+        assert_eq!(var.name, "g_foo.x");
+    }
+
+    #[test]
+    fn promote_pointer_deref_leaf_returns_none() {
+        let leaf = WatchLeafRead {
+            root_id: WatchId(1),
+            path: ".buf[0]".into(),
+            address: WatchAddress::PointerDeref {
+                parent_path: "".into(),
+                offset: 0,
+            },
+            var_type: VariableType::U32,
+            is_pointer: false,
+        };
+        assert!(build_variable_from_leaf("p_foo.buf[0]", &leaf).is_none());
     }
 }

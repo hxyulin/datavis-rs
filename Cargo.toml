@@ -68,9 +68,6 @@ anyhow = "1.0"
 # Time utilities
 chrono = { version = "0.4", features = ["serde"] }
 
-# FFT for frequency analysis
-rustfft = "6.2"
-
 # Directory paths
 dirs-next = "2.0"
 

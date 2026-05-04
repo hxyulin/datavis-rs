@@ -14,7 +14,7 @@ use crate::frontend::workspace::PaneKind;
 use crate::session::types::{RecordedFrame, RecordedValue, SessionMetadata, SessionRecording};
 use crate::session::{SessionPlayer, SessionState};
 
-/// Export layout modes (formerly from pipeline::nodes::exporter_sink)
+/// Export layout modes for CSV export
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportLayout {
     /// Long format: one row per sample (timestamp, var_name, value)
@@ -23,7 +23,7 @@ pub enum ExportLayout {
     Wide,
 }
 
-/// Which value to export (formerly from pipeline::nodes::exporter_sink)
+/// Which value to export from each recorded data point
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueChoice {
     /// Export raw value
@@ -86,8 +86,14 @@ pub struct RecorderPaneState {
     pub export_format: ExportFormat,
     /// Export layout mode (long or wide).
     pub export_layout: ExportLayout,
-    /// Per-variable value choice for wide export. Key: VarId raw u32.
+    /// Per-variable value choice for wide export. Key: variable id (u32).
     pub value_choices: HashMap<u32, ValueChoice>,
+    /// Whether an export is currently in progress (synchronous, so always false after return).
+    pub export_in_progress: bool,
+    /// Number of rows written in the last successful export.
+    pub last_export_rows_written: u64,
+    /// Error message from the last failed export, if any.
+    pub last_export_error: Option<String>,
 }
 
 impl Default for RecorderPaneState {
@@ -105,6 +111,9 @@ impl Default for RecorderPaneState {
             export_format: ExportFormat::Csv,
             export_layout: ExportLayout::Long,
             value_choices: HashMap::new(),
+            export_in_progress: false,
+            last_export_rows_written: 0,
+            last_export_error: None,
         }
     }
 }
@@ -214,7 +223,10 @@ fn render_recording_controls(
         SessionState::Recording => {
             ui.horizontal(|ui| {
                 ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "● REC");
-                ui.label(format!("{} frames", shared.state.topics.recorder_frame_count));
+                ui.label(format!(
+                    "{} frames",
+                    shared.state.topics.recorder_frame_count
+                ));
             });
 
             ui.horizontal(|ui| {
@@ -301,9 +313,11 @@ fn take_snapshot(state: &mut RecorderPaneState, shared: &SharedState<'_>) {
         Some(state.snapshot_tag.clone())
     };
 
-    state
-        .snapshot_frames
-        .push(RecordedFrame { timestamp, values, tag });
+    state.snapshot_frames.push(RecordedFrame {
+        timestamp,
+        values,
+        tag,
+    });
 }
 
 /// Build a `SessionRecording` from the accumulated snapshot frames.
@@ -482,14 +496,19 @@ fn render_export_tab(
 ) {
     // --- Status ---
     ui.horizontal(|ui| {
-        if shared.state.topics.exporter_active {
-            ui.colored_label(egui::Color32::from_rgb(100, 255, 100), "● Active");
-            ui.label(format!(
-                "{} rows written",
-                shared.state.topics.exporter_rows_written
-            ));
+        if state.last_export_rows_written > 0 || state.last_export_error.is_some() {
+            if let Some(ref err) = state.last_export_error {
+                ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "✗ Export failed:");
+                ui.label(err.as_str());
+            } else {
+                ui.colored_label(egui::Color32::from_rgb(100, 255, 100), "✓");
+                ui.label(format!(
+                    "Last export: {} rows",
+                    state.last_export_rows_written
+                ));
+            }
         } else {
-            ui.label("Inactive");
+            ui.label("No export yet.");
         }
     });
     ui.separator();
@@ -550,9 +569,9 @@ fn render_export_tab(
                     state.value_choices.clear();
                 }
                 if ui.button("All Raw").clicked() {
-                    for vnode in &shared.state.topics.variable_tree {
-                        if vnode.is_leaf && vnode.enabled {
-                            state.value_choices.insert(vnode.id.0, ValueChoice::Raw);
+                    for var in shared.state.config.variables.values() {
+                        if var.enabled {
+                            state.value_choices.insert(var.id, ValueChoice::Raw);
                         }
                     }
                 }
@@ -561,16 +580,16 @@ fn render_export_tab(
             egui::ScrollArea::vertical()
                 .max_height(200.0)
                 .show(ui, |ui| {
-                    for vnode in &shared.state.topics.variable_tree {
-                        if !vnode.is_leaf || !vnode.enabled {
+                    for var in shared.state.config.variables.values() {
+                        if !var.enabled {
                             continue;
                         }
                         let choice = state
                             .value_choices
-                            .entry(vnode.id.0)
+                            .entry(var.id)
                             .or_insert(ValueChoice::Converted);
                         ui.horizontal(|ui| {
-                            ui.label(&vnode.name);
+                            ui.label(&var.name);
                             ui.selectable_value(choice, ValueChoice::Converted, "Converted");
                             ui.selectable_value(choice, ValueChoice::Raw, "Raw");
                         });
@@ -581,20 +600,165 @@ fn render_export_tab(
 
     ui.separator();
 
-    // Start/Stop
+    // Export button
+    let can_export = !state.export_path.is_empty() && !state.snapshot_frames.is_empty();
     ui.horizontal(|ui| {
-        if shared.state.topics.exporter_active {
-            if ui.button("Stop Export").clicked() {
-                // TODO: Implement stop export with new architecture
-            }
+        if ui
+            .add_enabled(can_export, egui::Button::new("Export"))
+            .clicked()
+        {
+            run_export(state, shared);
+        }
+        if !state.snapshot_frames.is_empty() {
+            ui.label(format!(
+                "({} frames available)",
+                state.snapshot_frames.len()
+            ));
         } else {
-            let _can_start = !state.export_path.is_empty();
-            if ui.button("Start Export").clicked() {
-                // TODO: Implement CSV export with new backend architecture
-                // Export functionality needs to be re-implemented without pipeline nodes
-            }
+            ui.label("(no snapshot frames — take snapshots on the Record tab first)");
         }
     });
+}
+
+/// Write the session snapshot frames to disk synchronously.
+fn run_export(state: &mut RecorderPaneState, shared: &SharedState<'_>) {
+    use std::io::Write;
+
+    let path = std::path::Path::new(&state.export_path);
+    let result = match state.export_format {
+        ExportFormat::Csv => write_csv_export(state, shared, path),
+        ExportFormat::Json => write_json_export(state, path),
+    };
+    match result {
+        Ok(rows) => {
+            state.last_export_rows_written = rows;
+            state.last_export_error = None;
+        }
+        Err(e) => {
+            state.last_export_error = Some(e);
+            state.last_export_rows_written = 0;
+        }
+    }
+
+    // Satisfy the `use std::io::Write` requirement (used by write_csv_export).
+    let _ = std::io::sink().write_all(b"");
+}
+
+/// Write snapshot frames as CSV. Returns the number of data rows written.
+fn write_csv_export(
+    state: &RecorderPaneState,
+    shared: &SharedState<'_>,
+    path: &std::path::Path,
+) -> Result<u64, String> {
+    use std::io::Write;
+
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let mut writer = std::io::BufWriter::new(file);
+    let mut rows: u64 = 0;
+
+    match state.export_layout {
+        ExportLayout::Long => {
+            writeln!(writer, "timestamp_s,variable,raw,converted").map_err(|e| e.to_string())?;
+            for frame in &state.snapshot_frames {
+                let t = frame.timestamp.as_secs_f64();
+                for (&var_id, rec_val) in &frame.values {
+                    let name = shared
+                        .state
+                        .config
+                        .variables
+                        .get(&var_id)
+                        .map(|v| v.name.as_str())
+                        .unwrap_or("unknown");
+                    writeln!(
+                        writer,
+                        "{},{},{},{}",
+                        t, name, rec_val.raw_value, rec_val.converted_value
+                    )
+                    .map_err(|e| e.to_string())?;
+                    rows += 1;
+                }
+            }
+        }
+        ExportLayout::Wide => {
+            // Collect ordered variable ids for header
+            let var_ids: Vec<u32> = shared.state.config.variables.keys().copied().collect();
+            let header_cols: String = var_ids
+                .iter()
+                .map(|id| {
+                    shared
+                        .state
+                        .config
+                        .variables
+                        .get(id)
+                        .map(|v| v.name.clone())
+                        .unwrap_or_else(|| id.to_string())
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            writeln!(writer, "timestamp_s,{}", header_cols).map_err(|e| e.to_string())?;
+
+            for frame in &state.snapshot_frames {
+                let t = frame.timestamp.as_secs_f64();
+                let cols: String = var_ids
+                    .iter()
+                    .map(|id| {
+                        if let Some(rec_val) = frame.values.get(id) {
+                            let choice = state
+                                .value_choices
+                                .get(id)
+                                .copied()
+                                .unwrap_or(ValueChoice::Converted);
+                            match choice {
+                                ValueChoice::Raw => rec_val.raw_value.to_string(),
+                                ValueChoice::Converted => rec_val.converted_value.to_string(),
+                            }
+                        } else {
+                            String::new()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                writeln!(writer, "{},{}", t, cols).map_err(|e| e.to_string())?;
+                rows += 1;
+            }
+        }
+    }
+
+    Ok(rows)
+}
+
+/// Write snapshot frames as JSON. Returns the number of frames written.
+fn write_json_export(state: &RecorderPaneState, path: &std::path::Path) -> Result<u64, String> {
+    use std::io::Write;
+
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let mut writer = std::io::BufWriter::new(file);
+
+    writeln!(writer, "[").map_err(|e| e.to_string())?;
+    let frame_count = state.snapshot_frames.len();
+    for (i, frame) in state.snapshot_frames.iter().enumerate() {
+        let t = frame.timestamp.as_secs_f64();
+        write!(writer, "  {{\"timestamp_s\":{},\"values\":{{", t).map_err(|e| e.to_string())?;
+        let entries: Vec<String> = frame
+            .values
+            .iter()
+            .map(|(id, v)| {
+                format!(
+                    "\"{}\":{{\"raw\":{},\"converted\":{}}}",
+                    id, v.raw_value, v.converted_value
+                )
+            })
+            .collect();
+        write!(writer, "{}", entries.join(",")).map_err(|e| e.to_string())?;
+        if i + 1 < frame_count {
+            writeln!(writer, "}}}},").map_err(|e| e.to_string())?;
+        } else {
+            writeln!(writer, "}}}}").map_err(|e| e.to_string())?;
+        }
+    }
+    writeln!(writer, "]").map_err(|e| e.to_string())?;
+
+    Ok(frame_count as u64)
 }
 
 impl Pane for RecorderPaneState {

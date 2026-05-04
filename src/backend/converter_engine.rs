@@ -172,7 +172,6 @@ impl ConverterEngine {
     }
 
     /// Get the number of active converters
-    #[allow(dead_code)]
     pub fn converter_count(&self) -> usize {
         self.converters.len()
     }

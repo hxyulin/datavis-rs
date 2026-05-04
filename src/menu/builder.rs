@@ -176,15 +176,6 @@ fn build_view_menu(state: &MenuBarState) -> Submenu {
     // Singleton panes
     view_menu
         .append(&MenuItem::with_id(
-            MenuId::ViewVariableBrowser.to_muda_id(),
-            t!("menu_view_variable_browser"),
-            true,
-            None::<Accelerator>,
-        ))
-        .unwrap();
-
-    view_menu
-        .append(&MenuItem::with_id(
             MenuId::ViewVariableList.to_muda_id(),
             t!("menu_view_variable_list"),
             true,
@@ -208,24 +199,6 @@ fn build_view_menu(state: &MenuBarState) -> Submenu {
         .append(&MenuItem::with_id(
             MenuId::ViewNewTimeSeries.to_muda_id(),
             t!("menu_view_new_time_series"),
-            true,
-            None::<Accelerator>,
-        ))
-        .unwrap();
-
-    view_menu
-        .append(&MenuItem::with_id(
-            MenuId::ViewNewWatcher.to_muda_id(),
-            t!("menu_view_new_watcher"),
-            true,
-            None::<Accelerator>,
-        ))
-        .unwrap();
-
-    view_menu
-        .append(&MenuItem::with_id(
-            MenuId::ViewNewFft.to_muda_id(),
-            t!("menu_view_new_fft"),
             true,
             None::<Accelerator>,
         ))

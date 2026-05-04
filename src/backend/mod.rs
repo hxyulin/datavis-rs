@@ -1,47 +1,55 @@
-//! Backend module for SWD polling with probe-rs
+//! Backend module for SWD/JTAG polling
 //!
-//! This module handles all SWD communication in a separate thread to keep
-//! the UI responsive. It uses crossbeam channels for thread-safe communication
-//! with the frontend.
+//! This module runs entirely in a single worker thread (`BackendWorker`), keeping the
+//! UI responsive. The frontend talks to it via a pair of `crossbeam-channel` channels
+//! bundled in [`FrontendReceiver`].
 //!
-//! # Architecture
+//! The worker handles both subsystems:
+//! - **Plot** — periodic variable polling at a configurable Hz, results sent as
+//!   [`BackendMessage::DataBatch`] / [`BackendMessage::DataPoint`].
+//! - **Live Watch** — on-demand DWARF leaf polling via the watch scheduler that runs
+//!   in the same thread; results sent as [`BackendMessage::WatchValuesUpdate`].
 //!
-//! The backend runs in a separate thread from the UI, communicating via channels:
+//! # Key types
 //!
-//! - [`BackendCommand`] - Messages sent from UI to backend (connect, read, write, etc.)
-//! - [`BackendMessage`] - Messages sent from backend to UI (data, status, errors)
-//! - [`FrontendReceiver`] - UI-side handle for sending commands and receiving messages
-//! - [`SwdBackend`] - Main backend entry point that spawns the worker thread
+//! - [`BackendCommand`] — Messages sent from the frontend to the backend.
+//! - [`BackendMessage`] — Messages sent from the backend to the frontend.
+//! - [`FrontendReceiver`] — UI-side handle: wraps the sender/receiver pair.
+//! - [`SwdBackend`] — Entry point; call [`SwdBackend::new`] to get a `(backend, frontend)` pair.
 //!
 //! # Components
 //!
-//! - [`ProbeBackend`] - Low-level probe-rs interface for real hardware
-//! - [`MockProbeBackend`] - Mock probe for testing without hardware (feature-gated)
-//! - [`BackendWorker`] - Main worker loop that processes commands and polls variables
-//! - [`ElfParser`] / [`DwarfParser`] - Parse ELF/DWARF debug info for symbol discovery
-//! - [`TypeTable`] - Manages type information from debug symbols
+//! - [`ProbeBackend`] — Low-level probe-rs interface for real hardware.
+//! - [`MockProbeBackend`] — Mock probe for testing without hardware (feature-gated).
+//! - [`BackendWorker`] — Main worker loop that processes commands, polls variables,
+//!   and drives the watch scheduler.
+//! - [`ElfParser`] / [`DwarfParser`] — Parse ELF/DWARF debug info for symbol discovery.
+//! - [`TypeTable`] — Manages type information from debug symbols.
 //!
 //! # Example
 //!
 //! ```ignore
-//! use datavis_rs::backend::SwdBackend;
+//! use datavis_rs::backend::{BackendMessage, SwdBackend};
 //! use datavis_rs::config::AppConfig;
 //!
 //! let config = AppConfig::default();
 //! let (backend, frontend) = SwdBackend::new(config);
 //!
-//! // Spawn backend thread
+//! // Spawn the backend worker thread
 //! std::thread::spawn(move || backend.run());
 //!
-//! // Send commands from UI
+//! // Send commands from the UI thread
 //! frontend.connect(None, "STM32F407VGTx".to_string(), config.probe);
 //! frontend.start_collection();
 //!
-//! // Receive messages
+//! // Drain messages each frame
 //! for msg in frontend.drain() {
 //!     match msg {
 //!         BackendMessage::DataPoint { variable_id, timestamp, raw_value, converted_value } => {
 //!             // Handle new data
+//!         }
+//!         BackendMessage::WatchValuesUpdate(values) => {
+//!             // Handle live-watch updates
 //!         }
 //!         _ => {}
 //!     }
@@ -64,7 +72,6 @@ pub mod watch_scheduler;
 pub mod worker;
 
 use crate::config::ProbeConfig;
-use std::collections::{HashMap, HashSet};
 
 pub use dwarf_parser::{
     DwarfDiagnostics, DwarfParseResult, DwarfParser, ParsedSymbol, VariableStatus,
@@ -92,17 +99,6 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// Data update with global and per-pane routing
-///
-/// This will replace DataBatch in Phase 2 when we switch to the new data flow.
-#[derive(Debug, Clone)]
-pub struct DataUpdate {
-    /// Global data stream (all variables, all panes can see this)
-    pub global: Vec<(u32, Duration, f64, f64)>, // (var_id, timestamp, raw, converted)
-    /// Per-pane filtered data streams
-    pub per_pane: HashMap<u64, Vec<(u32, Duration, f64, f64)>>, // pane_id -> data
-}
 
 /// Message sent from the UI to the backend
 #[derive(Debug, Clone)]
@@ -148,22 +144,6 @@ pub enum BackendCommand {
     UseMockProbe(bool),
     /// Request probe list refresh (async)
     RefreshProbes,
-    /// Update converter script for a variable (Phase 2)
-    UpdateConverter {
-        /// Variable ID
-        var_id: u32,
-        /// Variable name (for error messages)
-        var_name: String,
-        /// New converter script (None to remove converter)
-        script: Option<String>,
-    },
-    /// Subscribe a pane to specific variables (Phase 2)
-    SubscribePane {
-        /// Pane ID
-        pane_id: u64,
-        /// Variable IDs this pane wants to receive
-        var_ids: HashSet<u32>,
-    },
     /// Set the active set of Live Watch leaves the worker should poll.
     /// Replaces the previous set in full each call.
     SetWatchLeaves(Vec<crate::watch::WatchLeafRead>),
@@ -269,8 +249,6 @@ pub enum BackendMessage {
     },
     /// Batch of data points (more efficient for high-frequency updates)
     DataBatch(Vec<(u32, Duration, f64, f64)>),
-    /// Data update with per-pane routing (Phase 2 - replaces DataBatch)
-    DataUpdate(DataUpdate),
     /// Variable read error
     ReadError { variable_id: u32, error: String },
     /// Variable write succeeded
@@ -390,12 +368,16 @@ impl FrontendReceiver {
 
     /// Replace the watch-scheduler's leaf set.
     pub fn set_watch_leaves(&self, leaves: Vec<crate::watch::WatchLeafRead>) {
-        let _ = self.command_sender.send(BackendCommand::SetWatchLeaves(leaves));
+        let _ = self
+            .command_sender
+            .send(BackendCommand::SetWatchLeaves(leaves));
     }
 
     /// Set the watch-scheduler poll rate (Hz). 0 = disabled.
     pub fn set_watch_poll_rate(&self, hz: u32) {
-        let _ = self.command_sender.send(BackendCommand::SetWatchPollRate(hz));
+        let _ = self
+            .command_sender
+            .send(BackendCommand::SetWatchPollRate(hz));
     }
 }
 

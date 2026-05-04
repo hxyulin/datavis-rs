@@ -1742,56 +1742,6 @@ impl<'a> DwarfParser<'a, Reader<'a>> {
         }
     }
 
-    /// Get variable location as an optional address (legacy method, kept for compatibility)
-    #[allow(dead_code)]
-    fn get_variable_location(
-        &self,
-        unit: &Unit<Reader<'a>>,
-        entry: &DebuggingInformationEntry<Reader<'a>>,
-    ) -> Option<u64> {
-        let attr = entry.attr_value(gimli::DW_AT_location).ok()??;
-
-        match attr {
-            // Expression-based location (most common for global variables)
-            AttributeValue::Exprloc(expr) => self.evaluate_simple_location_expr(unit, &expr),
-
-            // Direct address value (some older DWARF or simple cases)
-            AttributeValue::Addr(addr) => Some(addr),
-
-            // Indexed address (DWARF 5)
-            AttributeValue::DebugAddrIndex(index) => self.dwarf.address(unit, index).ok(),
-
-            // Location list reference - need to evaluate the first entry
-            // that covers address 0 (for static variables)
-            AttributeValue::LocationListsRef(offset) => self.evaluate_location_list(unit, offset),
-
-            // Offset into location lists (DWARF 5)
-            AttributeValue::DebugLocListsIndex(index) => {
-                if let Ok(offset) = self.dwarf.locations_offset(unit, index) {
-                    self.evaluate_location_list(unit, offset)
-                } else {
-                    None
-                }
-            }
-
-            // Block containing location expression (older DWARF)
-            AttributeValue::Block(block) => {
-                let expr = gimli::Expression(block);
-                self.evaluate_simple_location_expr(unit, &expr)
-            }
-
-            // Data forms that might contain addresses directly
-            AttributeValue::Udata(addr) => Some(addr),
-            AttributeValue::Data1(addr) => Some(addr as u64),
-            AttributeValue::Data2(addr) => Some(addr as u64),
-            AttributeValue::Data4(addr) => Some(addr as u64),
-            AttributeValue::Data8(addr) => Some(addr),
-            AttributeValue::Sdata(addr) => Some(addr as u64),
-
-            _ => None,
-        }
-    }
-
     /// Evaluate a location list to find the address for a global/static variable.
     /// For global variables, we look for an entry that covers "any" address or
     /// the first valid location expression.

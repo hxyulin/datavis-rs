@@ -209,19 +209,9 @@ fn render_connection_group(
 fn render_collection_group(ui: &mut Ui, ctx: &ToolbarContext<'_>, actions: &mut Vec<AppAction>) {
     let connected = ctx.topics.connection_status == ConnectionStatus::Connected;
 
+    // Start/Stop collection is now driven automatically by pane presence.
+    // The toolbar only exposes the backend-level Pause/Resume toggle.
     if ctx.settings.collecting {
-        // Stop button
-        let btn = egui::Button::new(RichText::new("Stop").color(Color32::WHITE))
-            .fill(Color32::from_rgb(180, 50, 50));
-        if ui
-            .add_enabled(connected, btn)
-            .on_hover_text("Stop collection (Space)")
-            .clicked()
-        {
-            actions.push(AppAction::StopCollection);
-        }
-
-        // Pause button
         let pause_text = if ctx.settings.paused {
             "Resume"
         } else {
@@ -233,17 +223,6 @@ fn render_collection_group(ui: &mut Ui, ctx: &ToolbarContext<'_>, actions: &mut 
             .clicked()
         {
             actions.push(AppAction::TogglePause);
-        }
-    } else {
-        // Start button
-        let btn = egui::Button::new(RichText::new("Start").color(Color32::WHITE))
-            .fill(Color32::from_rgb(50, 120, 50));
-        if ui
-            .add_enabled(connected, btn)
-            .on_hover_text("Start collection (Space)")
-            .clicked()
-        {
-            actions.push(AppAction::StartCollection);
         }
     }
 }

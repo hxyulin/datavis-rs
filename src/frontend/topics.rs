@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::backend::DetectedProbe;
-use crate::pipeline::bridge::VariableNodeSnapshot;
 use crate::session::types::{SessionRecording, SessionState};
 use crate::types::{CollectionStats, ConnectionStatus, PointerState, VariableData};
 use crate::watch::{WatchId, WatchValue};
@@ -23,11 +22,7 @@ pub struct Topics {
     /// This is the primary data sink for all visualizer panes.
     pub variable_data: HashMap<u32, VariableData>,
 
-    /// Per-graph-pane data storage. Keyed by pane ID, then variable ID.
-    /// Used when GraphSink nodes route data to specific panes.
-    pub graph_pane_data: HashMap<u64, HashMap<u32, VariableData>>,
-
-    /// Collection statistics (updated ~2Hz from pipeline)
+    /// Collection statistics (updated ~2Hz from backend)
     pub stats: CollectionStats,
 
     /// Current probe connection status
@@ -39,20 +34,12 @@ pub struct Topics {
     /// Recorder frame count
     pub recorder_frame_count: usize,
 
-    /// Whether exporter is active
-    pub exporter_active: bool,
-    /// Rows written by exporter
-    pub exporter_rows_written: u64,
-
     // --- Snapshots (on-demand / event-driven) ---
     /// Available debug probes (from RefreshProbes)
     pub available_probes: Vec<DetectedProbe>,
 
     /// Completed session recordings
     pub completed_recordings: Vec<SessionRecording>,
-
-    /// Variable tree snapshot (hierarchical structure from pipeline)
-    pub variable_tree: Vec<VariableNodeSnapshot>,
 
     // --- Project metadata (shared between Settings pane and app save/load) ---
     /// Project name
@@ -64,19 +51,12 @@ pub struct Topics {
     /// Panes compare against their last-seen value to react.
     pub elf_generation: u64,
 
-    // --- Staleness tracking (for warning when sinks disconnect) ---
-    /// Track when each pane last received data (keyed by pane ID)
-    pub pane_data_freshness: HashMap<u64, Instant>,
-
     /// Pointer states for UI display (populated by backend worker)
     pub pointer_states: HashMap<u32, PointerState>,
 
     /// Live Watch values, keyed by (watch root id, leaf path).
     /// Published by the watch scheduler on each tick; consumed by the LiveWatch pane.
     pub watch_values: HashMap<(WatchId, String), WatchValue>,
-
-    /// Track when global data was last updated
-    pub global_data_freshness: Option<Instant>,
 
     /// Track when the last stats update was received from the backend.
     /// Used to detect poll-thread stalls (e.g., probe read hanging).
@@ -90,23 +70,17 @@ impl Default for Topics {
     fn default() -> Self {
         Self {
             variable_data: HashMap::new(),
-            graph_pane_data: HashMap::new(),
             stats: CollectionStats::default(),
             connection_status: ConnectionStatus::Disconnected,
             recorder_state: SessionState::Idle,
             recorder_frame_count: 0,
-            exporter_active: false,
-            exporter_rows_written: 0,
             available_probes: Vec::new(),
             completed_recordings: Vec::new(),
-            variable_tree: Vec::new(),
             project_name: String::new(),
             project_file_path: None,
             elf_generation: 0,
             pointer_states: HashMap::new(),
             watch_values: HashMap::new(),
-            pane_data_freshness: HashMap::new(),
-            global_data_freshness: None,
             last_stats_update: None,
             staleness_threshold: Duration::from_secs(3),
         }
@@ -123,7 +97,6 @@ mod tests {
         let topics = Topics::default();
 
         assert!(topics.variable_data.is_empty());
-        assert!(topics.graph_pane_data.is_empty());
         assert_eq!(topics.connection_status, ConnectionStatus::Disconnected);
         assert!(topics.available_probes.is_empty());
         assert!(topics.completed_recordings.is_empty());
@@ -143,45 +116,6 @@ mod tests {
 
         // We can't easily create a VariableData without a Variable,
         // so we just test the HashMap structure
-    }
-
-    #[test]
-    fn test_graph_pane_data_insertion() {
-        let mut topics = Topics::default();
-
-        let pane_id = 100u64;
-
-        // Test nested HashMap structure
-        let pane_data = topics.graph_pane_data.entry(pane_id).or_default();
-        assert_eq!(pane_data.len(), 0);
-
-        assert!(topics.graph_pane_data.contains_key(&pane_id));
-    }
-
-    #[test]
-    fn test_pane_data_freshness_tracking() {
-        let mut topics = Topics::default();
-
-        let pane_id = 100u64;
-        let now = Instant::now();
-
-        topics.pane_data_freshness.insert(pane_id, now);
-
-        assert!(topics.pane_data_freshness.contains_key(&pane_id));
-        assert_eq!(topics.pane_data_freshness[&pane_id], now);
-    }
-
-    #[test]
-    fn test_global_data_freshness() {
-        let mut topics = Topics::default();
-
-        assert!(topics.global_data_freshness.is_none());
-
-        let now = Instant::now();
-        topics.global_data_freshness = Some(now);
-
-        assert!(topics.global_data_freshness.is_some());
-        assert_eq!(topics.global_data_freshness.unwrap(), now);
     }
 
     #[test]
@@ -233,20 +167,6 @@ mod tests {
 
         assert_eq!(topics.recorder_state, SessionState::Recording);
         assert_eq!(topics.recorder_frame_count, 100);
-    }
-
-    #[test]
-    fn test_exporter_tracking() {
-        let mut topics = Topics::default();
-
-        assert!(!topics.exporter_active);
-        assert_eq!(topics.exporter_rows_written, 0);
-
-        topics.exporter_active = true;
-        topics.exporter_rows_written = 1000;
-
-        assert!(topics.exporter_active);
-        assert_eq!(topics.exporter_rows_written, 1000);
     }
 
     #[test]

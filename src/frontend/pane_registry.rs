@@ -6,8 +6,7 @@
 
 use crate::frontend::pane_trait::Pane;
 use crate::frontend::panes::{
-    FftViewState, LiveWatchState, RecorderPaneState, TimeSeriesState, VariableBrowserState,
-    VariableListState, WatcherState,
+    LiveWatchState, RecorderPaneState, TimeSeriesState, VariableListState,
 };
 use crate::frontend::workspace::PaneKind;
 
@@ -22,13 +21,6 @@ pub struct PaneKindInfo {
 /// Build the pane registry with all known pane kinds.
 pub fn build_registry() -> Vec<PaneKindInfo> {
     vec![
-        // Singletons
-        PaneKindInfo {
-            kind: PaneKind::VariableBrowser,
-            display_name: "Variable Browser",
-            is_singleton: true,
-            factory: || Box::new(VariableBrowserState::default()),
-        },
         PaneKindInfo {
             kind: PaneKind::VariableList,
             display_name: "Variables",
@@ -41,24 +33,11 @@ pub fn build_registry() -> Vec<PaneKindInfo> {
             is_singleton: true,
             factory: || Box::new(RecorderPaneState::default()),
         },
-        // Multi-instance visualizers
         PaneKindInfo {
             kind: PaneKind::TimeSeries,
             display_name: "Time Series",
             is_singleton: false,
             factory: || Box::new(TimeSeriesState::default()),
-        },
-        PaneKindInfo {
-            kind: PaneKind::Watcher,
-            display_name: "Watcher",
-            is_singleton: false,
-            factory: || Box::new(WatcherState::default()),
-        },
-        PaneKindInfo {
-            kind: PaneKind::FftView,
-            display_name: "FFT View",
-            is_singleton: false,
-            factory: || Box::new(FftViewState::default()),
         },
         PaneKindInfo {
             kind: PaneKind::LiveWatch,

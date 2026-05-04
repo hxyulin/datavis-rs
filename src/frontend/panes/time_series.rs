@@ -13,8 +13,6 @@ use crate::frontend::pane_trait::Pane;
 use crate::frontend::plot::{PlotCursor, PlotStatistics};
 use crate::frontend::state::{AppAction, SharedState};
 use crate::frontend::workspace::PaneKind;
-use crate::pipeline::id::NodeId;
-use crate::types::ConnectionStatus;
 
 /// A horizontal threshold/reference line
 #[derive(Debug, Clone)]
@@ -64,8 +62,10 @@ pub struct TimeSeriesState {
     pub threshold_lines: Vec<ThresholdLine>,
     /// Decimation cache: var_id -> (source_point_count, decimated_points)
     pub decimation_cache: HashMap<u32, (usize, Vec<[f64; 2]>)>,
-    /// Linked GraphSink node ID (if any). When set, this pane uses per-pane data.
-    pub linked_graph_sink: Option<NodeId>,
+    /// UI-only freeze: when true, the plot stops scrolling but the worker keeps polling.
+    pub paused: bool,
+    /// X-window snapshot taken when paused; restored on every frame while paused.
+    pub paused_view: Option<(f64, f64)>,
 }
 
 impl Default for TimeSeriesState {
@@ -89,60 +89,10 @@ impl Default for TimeSeriesState {
             secondary_autoscale_y: true,
             threshold_lines: Vec::new(),
             decimation_cache: HashMap::new(),
-            linked_graph_sink: None,
+            paused: false,
+            paused_view: None,
         }
     }
-}
-
-/// Render the time series pane (inside &mut Ui, not &Context)
-/// Render a warning banner when data is stale (no updates received)
-fn render_stale_warning(ui: &mut Ui, shared: &SharedState<'_>, pane_id: Option<u64>) {
-    use std::time::Instant;
-
-    // Calculate stale duration
-    let stale_duration = if let Some(pid) = pane_id {
-        shared.state
-            .topics
-            .pane_data_freshness
-            .get(&pid)
-            .map(|t| Instant::now().duration_since(*t))
-            .unwrap_or_default()
-    } else {
-        shared.state
-            .topics
-            .global_data_freshness
-            .map(|t| Instant::now().duration_since(t))
-            .unwrap_or_default()
-    };
-
-    // Warning banner
-    egui::Frame::new()
-        .fill(Color32::from_rgb(255, 200, 100)) // Orange/yellow background
-        .inner_margin(egui::Margin::same(8))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                // Warning icon
-                ui.label(egui::RichText::new("⚠").size(20.0).color(Color32::BLACK));
-
-                // Warning message
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "No data received for {:.1} seconds",
-                            stale_duration.as_secs_f32()
-                        ))
-                        .strong()
-                        .color(Color32::BLACK),
-                    );
-                    ui.label(
-                        egui::RichText::new("The data sink may be disconnected from the pipeline.")
-                            .color(Color32::from_gray(40)),
-                    );
-                });
-            });
-        });
-
-    ui.add_space(4.0);
 }
 
 pub fn render(
@@ -155,12 +105,6 @@ pub fn render(
     // Toolbar at the top
     render_toolbar(state, shared, ui, &mut actions);
     ui.separator();
-
-    // Check for stale data and show warning if needed
-    let pane_id = state.linked_graph_sink.map(|id| id.0 as u64); // Extract and cast u32 to u64
-    if shared.is_pane_data_stale(pane_id) {
-        render_stale_warning(ui, shared, pane_id);
-    }
 
     // Main content: plot fills all remaining space
     render_plot(state, shared, ui);
@@ -185,7 +129,8 @@ pub fn render_dialogs(
     if state.value_editor_open {
         let var_id = state.value_editor_state.var_id;
         if let Some(var_id) = var_id {
-            let (var_name, var_type, is_writable) = match shared.state.config.find_variable(var_id) {
+            let (var_name, var_type, is_writable) = match shared.state.config.find_variable(var_id)
+            {
                 Some(var) => (var.name.clone(), var.var_type, var.is_writable()),
                 None => {
                     state.value_editor_open = false;
@@ -193,7 +138,8 @@ pub fn render_dialogs(
                 }
             };
 
-            let current_value = shared.state
+            let current_value = shared
+                .state
                 .topics
                 .variable_data
                 .get(&var_id)
@@ -256,7 +202,8 @@ pub fn render_dialogs(
 
     // Export config dialog
     if state.export_config_open {
-        let total_samples: usize = shared.state
+        let total_samples: usize = shared
+            .state
             .topics
             .variable_data
             .values()
@@ -328,17 +275,15 @@ fn render_toolbar_simple(
     actions: &mut Vec<AppAction>,
 ) {
     ui.horizontal(|ui| {
-        if shared.state.topics.connection_status == ConnectionStatus::Connected {
-            if shared.state.settings.collecting {
-                if ui.button("Stop").clicked() {
-                    actions.push(AppAction::StopCollection);
-                }
-            } else if ui.button("Start").clicked() {
-                actions.push(AppAction::StartCollection);
+        // Start/Stop is now auto-driven by pane presence; no button needed here.
+
+        // UI-only Pause/Resume toggle (freezes the visible scroll window without stopping reads)
+        let pause_label = if state.paused { "▶ Resume" } else { "⏸ Pause" };
+        if ui.button(pause_label).clicked() {
+            state.paused = !state.paused;
+            if !state.paused {
+                state.paused_view = None;
             }
-        } else {
-            ui.add_enabled(false, egui::Button::new("Start"));
-            ui.label("Connect to probe first");
         }
 
         ui.separator();
@@ -381,7 +326,11 @@ fn render_toolbar_simple(
                 .show_ui(ui, |ui| {
                     for &(secs, label) in SIMPLE_PRESETS {
                         if ui
-                            .selectable_value(&mut shared.state.settings.display_time_window, secs, label)
+                            .selectable_value(
+                                &mut shared.state.settings.display_time_window,
+                                secs,
+                                label,
+                            )
                             .clicked()
                         {
                             shared.state.settings.autoscale_x = true;
@@ -425,18 +374,15 @@ fn render_toolbar_advanced(
     actions: &mut Vec<AppAction>,
 ) {
     // Row 1: Collection controls and stats
+    // Start/Stop is now auto-driven by pane presence; no button needed here.
     ui.horizontal(|ui| {
-        if shared.state.topics.connection_status == ConnectionStatus::Connected {
-            if shared.state.settings.collecting {
-                if ui.button("Stop").clicked() {
-                    actions.push(AppAction::StopCollection);
-                }
-            } else if ui.button("Start").clicked() {
-                actions.push(AppAction::StartCollection);
+        // UI-only Pause/Resume toggle
+        let pause_label = if state.paused { "▶ Resume" } else { "⏸ Pause" };
+        if ui.button(pause_label).clicked() {
+            state.paused = !state.paused;
+            if !state.paused {
+                state.paused_view = None;
             }
-        } else {
-            ui.add_enabled(false, egui::Button::new("Start"));
-            ui.label("Connect to a probe first");
         }
 
         ui.separator();
@@ -476,7 +422,10 @@ fn render_toolbar_advanced(
         if is_throttled {
             ui.colored_label(
                 Color32::from_rgb(255, 200, 100),
-                format!("(target: {} Hz)", shared.state.config.collection.poll_rate_hz),
+                format!(
+                    "(target: {} Hz)",
+                    shared.state.config.collection.poll_rate_hz
+                ),
             );
         }
         ui.label(format!(
@@ -517,12 +466,18 @@ fn render_toolbar_advanced(
         }
 
         egui::ComboBox::from_id_salt("time_period")
-            .selected_text(format_time_window(shared.state.settings.display_time_window))
+            .selected_text(format_time_window(
+                shared.state.settings.display_time_window,
+            ))
             .width(60.0)
             .show_ui(ui, |ui| {
                 for &(secs, label) in TIME_PRESETS {
                     if ui
-                        .selectable_value(&mut shared.state.settings.display_time_window, secs, label)
+                        .selectable_value(
+                            &mut shared.state.settings.display_time_window,
+                            secs,
+                            label,
+                        )
                         .clicked()
                     {
                         shared.state.settings.autoscale_x = true;
@@ -560,14 +515,20 @@ fn render_toolbar_advanced(
         let max_window = shared.state.settings.max_time_window;
         if ui
             .add(
-                egui::Slider::new(&mut shared.state.settings.display_time_window, 0.5..=max_window)
-                    .suffix("s")
-                    .logarithmic(true),
+                egui::Slider::new(
+                    &mut shared.state.settings.display_time_window,
+                    0.5..=max_window,
+                )
+                .suffix("s")
+                .logarithmic(true),
             )
             .changed()
         {
-            shared.state.settings.display_time_window =
-                shared.state.settings.display_time_window.clamp(0.1, max_window);
+            shared.state.settings.display_time_window = shared
+                .state
+                .settings
+                .display_time_window
+                .clamp(0.1, max_window);
         }
 
         ui.separator();
@@ -795,14 +756,39 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
 
     let current_time = shared.ctx.display_time;
 
-    let (x_min, x_max) = if shared.state.settings.autoscale_x {
-        let window = shared.state.settings.display_time_window;
-        (current_time - window, current_time)
-    } else if let (Some(min), Some(max)) = (shared.state.settings.x_min, shared.state.settings.x_max) {
-        (min, max)
+    let (x_min, x_max) = if state.paused {
+        // UI-only pause: freeze the visible window at the snapshot taken on the first paused frame.
+        if let Some((min, max)) = state.paused_view {
+            (min, max)
+        } else {
+            // First paused frame — snapshot the current window.
+            let window = shared.state.settings.display_time_window;
+            let min = if shared.state.settings.autoscale_x {
+                current_time - window
+            } else {
+                shared.state.settings.x_min.unwrap_or(current_time - window)
+            };
+            let max = if shared.state.settings.autoscale_x {
+                current_time
+            } else {
+                shared.state.settings.x_max.unwrap_or(current_time)
+            };
+            state.paused_view = Some((min, max));
+            (min, max)
+        }
     } else {
-        let window = shared.state.settings.display_time_window;
-        (current_time - window, current_time)
+        state.paused_view = None;
+        if shared.state.settings.autoscale_x {
+            let window = shared.state.settings.display_time_window;
+            (current_time - window, current_time)
+        } else if let (Some(min), Some(max)) =
+            (shared.state.settings.x_min, shared.state.settings.x_max)
+        {
+            (min, max)
+        } else {
+            let window = shared.state.settings.display_time_window;
+            (current_time - window, current_time)
+        }
     };
 
     let mut plot = Plot::new("ts_data_plot")
@@ -824,7 +810,9 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
 
     // For Y: when manual, apply stored bounds. When auto, let egui_plot auto-fit.
     if !shared.state.settings.autoscale_y {
-        if let (Some(y_min), Some(y_max)) = (shared.state.settings.y_min, shared.state.settings.y_max) {
+        if let (Some(y_min), Some(y_max)) =
+            (shared.state.settings.y_min, shared.state.settings.y_max)
+        {
             plot = plot.include_y(y_min).include_y(y_max);
         }
     }
@@ -853,25 +841,12 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
         ));
         plot_ui.set_auto_bounds(egui::Vec2b::new(false, autoscale_y));
 
-        // Determine data source: use per-pane data if available, otherwise global
-        let pane_id = shared.ctx.current_pane_id.map(|id| id.0);
-        let use_pane_data = pane_id
-            .and_then(|id| shared.state.topics.graph_pane_data.get(&id))
-            .is_some();
-
         for var in shared.state.config.variables.values() {
             if !var.enabled || !var.show_in_graph {
                 continue;
             }
 
-            // Get data from per-pane store or global store
-            let data = if use_pane_data {
-                pane_id
-                    .and_then(|id| shared.state.topics.graph_pane_data.get(&id))
-                    .and_then(|pane_data| pane_data.get(&var.id))
-            } else {
-                shared.state.topics.variable_data.get(&var.id)
-            };
+            let data = shared.state.topics.variable_data.get(&var.id);
 
             if let Some(data) = data {
                 let raw_points = data.as_plot_points();
@@ -1059,7 +1034,9 @@ fn render_plot(state: &mut TimeSeriesState, shared: &mut SharedState<'_>, ui: &m
             state
                 .cursor
                 .update_position(Some(PlotPoint::new(plot_pos.x, plot_pos.y)));
-            state.cursor.find_nearest(&shared.state.topics.variable_data);
+            state
+                .cursor
+                .find_nearest(&shared.state.topics.variable_data);
         } else {
             state.cursor.update_position(None);
         }
@@ -1224,7 +1201,6 @@ mod tests {
         assert!(state.threshold_lines.is_empty());
         assert!(state.decimation_cache.is_empty());
         assert!(state.variable_statistics.is_empty());
-        assert_eq!(state.linked_graph_sink, None);
     }
 
     #[test]
@@ -1422,24 +1398,6 @@ mod tests {
         // Close one
         state.trigger_config_open = false;
         assert!(!state.trigger_config_open);
-    }
-
-    #[test]
-    fn test_linked_graph_sink() {
-        let mut state = TimeSeriesState::default();
-
-        // Initially no link
-        assert_eq!(state.linked_graph_sink, None);
-
-        // Link to a node
-        let node_id = NodeId(42);
-        state.linked_graph_sink = Some(node_id);
-
-        assert_eq!(state.linked_graph_sink, Some(node_id));
-
-        // Unlink
-        state.linked_graph_sink = None;
-        assert_eq!(state.linked_graph_sink, None);
     }
 
     #[test]

@@ -34,17 +34,13 @@ pub fn render(
     shared: &mut SharedState<'_>,
     ui: &mut Ui,
 ) -> Vec<AppAction> {
-    let actions: Vec<AppAction> = Vec::new();
-    // All mutations to live_watches happen in this function directly; no
-    // AppActions are emitted from this pane (the Variable Browser button
-    // uses AppAction::AddWatchRoot as its entry point).
+    let mut actions: Vec<AppAction> = Vec::new();
 
     // --- Header: live status indicator -----------------------------------
     ui.horizontal(|ui| {
         ui.heading("Live Watch");
         ui.separator();
-        let connected =
-            shared.state.topics.connection_status == ConnectionStatus::Connected;
+        let connected = shared.state.topics.connection_status == ConnectionStatus::Connected;
         let collecting = shared.state.settings.collecting;
         let (dot_color, label) = if collecting && connected {
             (Color32::from_rgb(120, 200, 120), "live")
@@ -60,8 +56,7 @@ pub fn render(
     // --- Table -----------------------------------------------------------
     // Snapshot roots so we can mutate `expanded_paths`/`expression` while
     // iterating without borrow issues.
-    let roots_snapshot: Vec<watch::WatchRoot> =
-        shared.state.config.live_watches.clone();
+    let roots_snapshot: Vec<watch::WatchRoot> = shared.state.config.live_watches.clone();
 
     let mut to_remove: Option<WatchId> = None;
     let mut toggle_expand: Option<(WatchId, String)> = None;
@@ -69,6 +64,8 @@ pub fn render(
     let mut rename_commit: Option<(WatchId, String)> = None;
     // New root committed via the ghost row this frame.
     let mut add_commit: Option<String> = None;
+    // Promote-to-plot committed this frame: (watch_id, path).
+    let mut promote_to_plot: Option<(WatchId, String)> = None;
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -103,6 +100,7 @@ pub fn render(
                                 &mut to_remove,
                                 &mut toggle_expand,
                                 &mut rename_commit,
+                                &mut promote_to_plot,
                             );
                         }
                     }
@@ -140,8 +138,7 @@ pub fn render(
             .and_then(|i| i.find_symbol(&trimmed))
             .is_none()
         {
-            state.add_error =
-                Some(format!("'{}' not found in current ELF", trimmed));
+            state.add_error = Some(format!("'{}' not found in current ELF", trimmed));
         } else if let Some(r) = shared
             .state
             .config
@@ -192,6 +189,10 @@ pub fn render(
         ui.colored_label(Color32::from_rgb(220, 100, 100), err);
     }
 
+    if let Some((watch_id, path)) = promote_to_plot {
+        actions.push(AppAction::PromoteWatchLeafToPlot { watch_id, path });
+    }
+
     actions
 }
 
@@ -206,9 +207,12 @@ fn render_grid_row(
     to_remove: &mut Option<WatchId>,
     toggle_expand: &mut Option<(WatchId, String)>,
     rename_commit: &mut Option<(WatchId, String)>,
+    promote_to_plot: &mut Option<(WatchId, String)>,
 ) {
     // --- Column 1: indent + arrow + name (renameable on root rows) -----
-    ui.horizontal(|ui| {
+    let plottable = matches!(row.kind, WatchRowKind::Primitive)
+        && matches!(row.address, WatchAddress::Static(_));
+    let col1_resp = ui.horizontal(|ui| {
         ui.add_space((row.depth as f32) * 14.0);
 
         let can_expand = matches!(
@@ -232,13 +236,10 @@ fn render_grid_row(
 
         if is_root_row && state.rename_id == Some(row.root_id) {
             // Inline rename mode.
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut state.rename_buffer)
-                    .desired_width(180.0),
-            );
+            let resp =
+                ui.add(egui::TextEdit::singleline(&mut state.rename_buffer).desired_width(180.0));
             resp.request_focus();
-            let commit = resp.lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let commit = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if commit {
                 *rename_commit = Some((row.root_id, state.rename_buffer.clone()));
                 state.rename_id = None;
@@ -266,6 +267,18 @@ fn render_grid_row(
             }
         }
     });
+    col1_resp.response.context_menu(|ui| {
+        let resp = ui.add_enabled(plottable, egui::Button::new("Plot this"));
+        if resp.clicked() {
+            *promote_to_plot = Some((row.root_id, row.path.clone()));
+            ui.close();
+        }
+        if !plottable {
+            resp.on_hover_text(
+                "Only static-address primitive leaves can be promoted to a plot variable.",
+            );
+        }
+    });
 
     // --- Column 2: type ------------------------------------------------
     ui.label(
@@ -289,37 +302,29 @@ fn render_grid_row(
     ui.horizontal(|ui| {
         render_value_cell(ui, shared, row);
         if is_root_row {
-            ui.with_layout(
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    if ui
-                        .small_button(crate::frontend::icons::CLOSE)
-                        .on_hover_text("Remove watch")
-                        .clicked()
-                    {
-                        *to_remove = Some(row.root_id);
-                    }
-                },
-            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button(crate::frontend::icons::CLOSE)
+                    .on_hover_text("Remove watch")
+                    .clicked()
+                {
+                    *to_remove = Some(row.root_id);
+                }
+            });
         }
     });
 
     ui.end_row();
 }
 
-fn render_add_row(
-    ui: &mut Ui,
-    state: &mut LiveWatchState,
-    add_commit: &mut Option<String>,
-) {
+fn render_add_row(ui: &mut Ui, state: &mut LiveWatchState, add_commit: &mut Option<String>) {
     // Column 1: TextEdit spanning the name column.
     let resp = ui.add(
         egui::TextEdit::singleline(&mut state.add_input)
             .desired_width(200.0)
             .hint_text("(add symbol)"),
     );
-    let commit =
-        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let commit = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
     if commit && !state.add_input.is_empty() {
         *add_commit = Some(state.add_input.clone());
     }
@@ -353,10 +358,7 @@ fn render_value_cell(ui: &mut Ui, shared: &SharedState<'_>, row: &watch::WatchRo
         WatchRowKind::Pointer { .. } => match value {
             Some(v) => match (&v.raw, v.pointer_state) {
                 (Ok(addr), Some(PointerState::Null)) => {
-                    ui.colored_label(
-                        Color32::YELLOW,
-                        format!("NULL (0x{:08X})", *addr as u64),
-                    );
+                    ui.colored_label(Color32::YELLOW, format!("NULL (0x{:08X})", *addr as u64));
                 }
                 (Ok(addr), Some(PointerState::Invalid(_))) => {
                     ui.colored_label(
@@ -365,22 +367,13 @@ fn render_value_cell(ui: &mut Ui, shared: &SharedState<'_>, row: &watch::WatchRo
                     );
                 }
                 (Ok(addr), Some(PointerState::Valid(_))) => {
-                    ui.label(
-                        egui::RichText::new(format!("-> 0x{:08X}", *addr as u64))
-                            .monospace(),
-                    );
+                    ui.label(egui::RichText::new(format!("-> 0x{:08X}", *addr as u64)).monospace());
                 }
                 (Ok(addr), _) => {
-                    ui.label(
-                        egui::RichText::new(format!("0x{:08X}", *addr as u64))
-                            .monospace(),
-                    );
+                    ui.label(egui::RichText::new(format!("0x{:08X}", *addr as u64)).monospace());
                 }
                 (Err(e), _) => {
-                    ui.colored_label(
-                        Color32::from_rgb(220, 100, 100),
-                        format!("ERR: {}", e),
-                    );
+                    ui.colored_label(Color32::from_rgb(220, 100, 100), format!("ERR: {}", e));
                 }
             },
             None => {
@@ -394,10 +387,7 @@ fn render_value_cell(ui: &mut Ui, shared: &SharedState<'_>, row: &watch::WatchRo
                     ui.label(egui::RichText::new(text).monospace());
                 }
                 Err(e) => {
-                    ui.colored_label(
-                        Color32::from_rgb(220, 100, 100),
-                        format!("ERR: {}", e),
-                    );
+                    ui.colored_label(Color32::from_rgb(220, 100, 100), format!("ERR: {}", e));
                 }
             },
             None => {

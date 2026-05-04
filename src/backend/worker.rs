@@ -88,67 +88,6 @@ pub enum SwdResponse {
     Error(String),
 }
 
-/// Routes data to global and per-pane streams
-///
-/// This structure manages pane subscriptions and filters data for each pane.
-/// It will be used in Phase 2 when we replace the pipeline with direct routing.
-#[derive(Debug, Clone, Default)]
-pub struct DataRouter {
-    /// Which panes subscribe to which variables (pane_id → var_ids)
-    pane_subscriptions: HashMap<u64, std::collections::HashSet<u32>>,
-}
-
-impl DataRouter {
-    /// Create a new data router
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Update pane subscriptions (called from UI config changes)
-    pub fn subscribe_pane(&mut self, pane_id: u64, var_ids: std::collections::HashSet<u32>) {
-        self.pane_subscriptions.insert(pane_id, var_ids);
-    }
-
-    /// Remove a pane subscription
-    #[allow(dead_code)]
-    pub fn unsubscribe_pane(&mut self, pane_id: u64) {
-        self.pane_subscriptions.remove(&pane_id);
-    }
-
-    /// Get the current subscriptions for a pane
-    #[allow(dead_code)]
-    pub fn get_pane_subscriptions(&self, pane_id: u64) -> Option<&std::collections::HashSet<u32>> {
-        self.pane_subscriptions.get(&pane_id)
-    }
-
-    /// Route data to global + per-pane streams
-    /// This will be used in Phase 2 when we switch to the new data flow
-    #[allow(dead_code, clippy::type_complexity)]
-    pub fn route(
-        &self,
-        data: Vec<(u32, Duration, f64, f64)>,
-    ) -> (
-        Vec<(u32, Duration, f64, f64)>,
-        HashMap<u64, Vec<(u32, Duration, f64, f64)>>,
-    ) {
-        let global = data.clone(); // All panes see global data
-
-        let mut per_pane = HashMap::new();
-        for (pane_id, var_ids) in &self.pane_subscriptions {
-            let pane_data: Vec<_> = data
-                .iter()
-                .filter(|(var_id, ..)| var_ids.contains(var_id))
-                .cloned()
-                .collect();
-            if !pane_data.is_empty() {
-                per_pane.insert(*pane_id, pane_data);
-            }
-        }
-
-        (global, per_pane)
-    }
-}
-
 /// The backend worker that runs the polling loop
 pub struct BackendWorker {
     /// Application configuration
@@ -194,9 +133,6 @@ pub struct BackendWorker {
     dependent_read_planner: DependentReadPlanner,
     /// Runtime state for pointer variables (transient, not serialized)
     pointer_runtime: HashMap<u32, PointerRuntime>,
-    /// Data router for per-pane filtering (Phase 2 - not yet used)
-    #[allow(dead_code)]
-    data_router: DataRouter,
     /// Live Watch scheduler (independent of `collecting`)
     watch_scheduler: WatchScheduler,
 }
@@ -236,7 +172,6 @@ impl BackendWorker {
             last_halt_check_time: Instant::now(),
             dependent_read_planner: DependentReadPlanner::new(),
             pointer_runtime: HashMap::new(),
-            data_router: DataRouter::new(),
             watch_scheduler: WatchScheduler::new(watch_poll_rate),
         }
     }
@@ -366,24 +301,6 @@ impl BackendWorker {
             BackendCommand::RefreshProbes => {
                 self.refresh_probes();
             }
-            BackendCommand::UpdateConverter {
-                var_id,
-                var_name,
-                script,
-            } => {
-                // Update converter engine
-                self.converter_engine
-                    .update_converter(var_id, &var_name, script.clone());
-
-                // Also update the variable's converter_script field if it exists
-                if let Some(var) = self.variables.get_mut(&var_id) {
-                    var.converter_script = script;
-                }
-            }
-            BackendCommand::SubscribePane { pane_id, var_ids } => {
-                // Update data router with pane subscriptions
-                self.data_router.subscribe_pane(pane_id, var_ids);
-            }
             BackendCommand::SetWatchLeaves(leaves) => {
                 self.watch_scheduler.set_leaves(leaves);
             }
@@ -402,7 +319,7 @@ impl BackendWorker {
     }
 
     /// Check if we are using a mock probe
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[inline]
     fn is_using_mock(&self) -> bool {
         #[cfg(feature = "mock-probe")]
@@ -442,9 +359,13 @@ impl BackendWorker {
         // owns that transition.
         let on_mock = {
             #[cfg(feature = "mock-probe")]
-            { self.is_mock_probe }
+            {
+                self.is_mock_probe
+            }
             #[cfg(not(feature = "mock-probe"))]
-            { false }
+            {
+                false
+            }
         };
         if !on_mock {
             self.probe.disconnect();
@@ -502,9 +423,7 @@ impl BackendWorker {
                 Ok(true) => {
                     let msg = "Core is halted at start of collection — samples will be constant until the core resumes (check halt_on_connect and any breakpoints)".to_string();
                     tracing::error!("{msg}");
-                    let _ = self
-                        .message_tx
-                        .send(BackendMessage::ConnectionError(msg));
+                    let _ = self.message_tx.send(BackendMessage::ConnectionError(msg));
                 }
                 Ok(false) => {}
                 Err(e) => {
@@ -1047,31 +966,6 @@ mod tests {
     }
 
     #[test]
-    fn test_converter_update() {
-        let (mut worker, msg_rx, _) = create_test_worker();
-
-        // Add a variable
-        let var = Variable::new("test", 0x20000000, VariableType::U32);
-        let var_id = var.id;
-        worker.add_variable(var);
-
-        // Update converter script
-        let script = Some("value * 2.0".to_string());
-        worker.handle_command(BackendCommand::UpdateConverter {
-            var_id,
-            var_name: "test".to_string(),
-            script: script.clone(),
-        });
-
-        // Verify variable has the script
-        let stored_var = worker.variables.get(&var_id).unwrap();
-        assert_eq!(stored_var.converter_script, script);
-
-        // Drain any messages
-        while msg_rx.try_recv().is_ok() {}
-    }
-
-    #[test]
     fn test_multiple_commands_sequential_processing() {
         let (mut worker, msg_rx, cmd_tx) = create_test_worker();
 
@@ -1094,32 +988,6 @@ mod tests {
         assert!(worker.variables.contains_key(&var1.id));
         assert!(worker.variables.contains_key(&var2.id));
         assert_eq!(worker.poll_rate_hz, 250);
-
-        // Drain any messages
-        while msg_rx.try_recv().is_ok() {}
-    }
-
-    #[test]
-    fn test_data_router_pane_subscription() {
-        let (mut worker, msg_rx, _) = create_test_worker();
-
-        let var1 = Variable::new("var1", 0x20000000, VariableType::U32);
-        let var2 = Variable::new("var2", 0x20000004, VariableType::F32);
-
-        let pane_id = 1;
-        let mut var_ids = std::collections::HashSet::new();
-        var_ids.insert(var1.id);
-        var_ids.insert(var2.id);
-
-        worker.handle_command(BackendCommand::SubscribePane {
-            pane_id,
-            var_ids: var_ids.clone(),
-        });
-
-        // Verify subscription was recorded (data_router is private, so we just
-        // verify the command doesn't panic)
-        // In a real test with access to data_router internals, we'd verify:
-        // assert_eq!(worker.data_router.pane_subscriptions.get(&pane_id), Some(&var_ids));
 
         // Drain any messages
         while msg_rx.try_recv().is_ok() {}

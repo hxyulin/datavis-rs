@@ -5,15 +5,12 @@
 //! and return `AppAction`s instead of mutating state directly.
 
 use std::path::PathBuf;
-use std::time::Instant;
 
+use crate::backend::FrontendReceiver;
 use crate::backend::{ElfInfo, ElfSymbol};
 use crate::config::settings::RuntimeSettings;
 use crate::config::{AppConfig, AppState, DataPersistenceConfig};
 use crate::frontend::topics::Topics;
-use crate::pipeline::bridge::PipelineBridge;
-use crate::pipeline::id::NodeId;
-use crate::pipeline::packet::ConfigValue;
 use crate::types::{Variable, VariableType};
 
 use super::workspace::{PaneId, PaneKind};
@@ -70,7 +67,7 @@ impl ChildVariableSpec {
 
 /// Immutable context available to all panes.
 pub struct SharedContext<'a> {
-    pub frontend: &'a PipelineBridge,
+    pub frontend: &'a FrontendReceiver,
     pub elf_info: Option<&'a ElfInfo>,
     pub elf_symbols: &'a [ElfSymbol],
     pub elf_file_path: Option<&'a PathBuf>,
@@ -171,19 +168,6 @@ pub enum AppAction {
     /// Clear data for a specific variable
     ClearVariableData(u32),
 
-    // Pipeline node configuration
-    /// Send a config key/value to a specific pipeline node
-    NodeConfig {
-        node_id: NodeId,
-        key: String,
-        value: ConfigValue,
-    },
-    /// Request pipeline topology snapshot
-    RequestTopology,
-
-    // Pipeline graph mutations (removed in Phase 3)
-    // The pipeline editor has been removed in favor of direct converter configuration
-
     // Workspace actions
     /// Open/focus a singleton pane, or create if not exists
     OpenPane(PaneKind),
@@ -210,6 +194,13 @@ pub enum AppAction {
     AddWatchRoot(String),
     /// Remove a live watch root by id.
     RemoveWatchRoot(crate::watch::WatchId),
+    /// Promote a Live Watch primitive leaf to a Plot Variable.
+    /// The handler resolves the leaf's current address+type via the watch tree
+    /// and constructs a fresh Variable from them.
+    PromoteWatchLeafToPlot {
+        watch_id: crate::watch::WatchId,
+        path: String,
+    },
 }
 
 /// Dialog identifiers
@@ -233,45 +224,6 @@ pub enum DialogId {
     VariableChange,
     /// Duplicate variable confirmation
     DuplicateConfirm,
-}
-
-impl<'a> SharedState<'a> {
-    /// Check if pane data is stale (no updates for staleness_threshold duration).
-    ///
-    /// Returns `false` if collection is stopped, otherwise checks if data has not
-    /// been received for longer than the configured staleness threshold.
-    ///
-    /// # Arguments
-    /// * `pane_id` - Optional pane ID. If provided, checks pane-specific data freshness.
-    ///   If None, checks global data freshness.
-    ///
-    /// # Returns
-    /// * `true` if data is stale (no updates within threshold while collecting)
-    /// * `false` if data is fresh, collection stopped, or no data received yet
-    pub fn is_pane_data_stale(&self, pane_id: Option<u64>) -> bool {
-        // Don't warn if collection stopped
-        if !self.state.settings.collecting {
-            return false;
-        }
-
-        let threshold = self.state.topics.staleness_threshold;
-        let now = Instant::now();
-
-        if let Some(pid) = pane_id {
-            // Check pane-specific data first
-            if let Some(last_update) = self.state.topics.pane_data_freshness.get(&pid) {
-                return now.duration_since(*last_update) > threshold;
-            }
-        }
-
-        // Fall back to global data check
-        if let Some(global_update) = self.state.topics.global_data_freshness {
-            return now.duration_since(global_update) > threshold;
-        }
-
-        // No data received yet - not stale, just empty
-        false
-    }
 }
 
 #[cfg(test)]
@@ -311,9 +263,24 @@ mod tests {
             address_mode: ChildAddressMode::Absolute(0),
             var_type: VariableType::U32,
             children: vec![
-                ChildVariableSpec { name: "a".into(), address_mode: ChildAddressMode::Absolute(0), var_type: VariableType::U32, children: vec![] },
-                ChildVariableSpec { name: "b".into(), address_mode: ChildAddressMode::Absolute(4), var_type: VariableType::U32, children: vec![] },
-                ChildVariableSpec { name: "c".into(), address_mode: ChildAddressMode::Absolute(8), var_type: VariableType::F32, children: vec![] },
+                ChildVariableSpec {
+                    name: "a".into(),
+                    address_mode: ChildAddressMode::Absolute(0),
+                    var_type: VariableType::U32,
+                    children: vec![],
+                },
+                ChildVariableSpec {
+                    name: "b".into(),
+                    address_mode: ChildAddressMode::Absolute(4),
+                    var_type: VariableType::U32,
+                    children: vec![],
+                },
+                ChildVariableSpec {
+                    name: "c".into(),
+                    address_mode: ChildAddressMode::Absolute(8),
+                    var_type: VariableType::F32,
+                    children: vec![],
+                },
             ],
         };
         assert_eq!(spec.leaf_count(), 3);
@@ -331,11 +298,26 @@ mod tests {
                     address_mode: ChildAddressMode::Absolute(0),
                     var_type: VariableType::U32,
                     children: vec![
-                        ChildVariableSpec { name: "a".into(), address_mode: ChildAddressMode::Absolute(0), var_type: VariableType::U32, children: vec![] },
-                        ChildVariableSpec { name: "b".into(), address_mode: ChildAddressMode::Absolute(4), var_type: VariableType::U32, children: vec![] },
+                        ChildVariableSpec {
+                            name: "a".into(),
+                            address_mode: ChildAddressMode::Absolute(0),
+                            var_type: VariableType::U32,
+                            children: vec![],
+                        },
+                        ChildVariableSpec {
+                            name: "b".into(),
+                            address_mode: ChildAddressMode::Absolute(4),
+                            var_type: VariableType::U32,
+                            children: vec![],
+                        },
                     ],
                 },
-                ChildVariableSpec { name: "c".into(), address_mode: ChildAddressMode::Absolute(8), var_type: VariableType::F32, children: vec![] },
+                ChildVariableSpec {
+                    name: "c".into(),
+                    address_mode: ChildAddressMode::Absolute(8),
+                    var_type: VariableType::F32,
+                    children: vec![],
+                },
             ],
         };
         assert_eq!(spec.leaf_count(), 3);
@@ -343,8 +325,8 @@ mod tests {
 
     #[test]
     fn test_shared_mut_construction() {
-        use crate::config::{AppConfig, AppState, DataPersistenceConfig};
         use crate::config::settings::RuntimeSettings;
+        use crate::config::{AppConfig, AppState, DataPersistenceConfig};
         use crate::frontend::topics::Topics;
 
         let mut config = AppConfig::default();
@@ -370,8 +352,8 @@ mod tests {
 
     #[test]
     fn test_shared_mut_add_variable() {
-        use crate::config::{AppConfig, AppState, DataPersistenceConfig};
         use crate::config::settings::RuntimeSettings;
+        use crate::config::{AppConfig, AppState, DataPersistenceConfig};
         use crate::frontend::topics::Topics;
 
         let mut config = AppConfig::default();
@@ -398,8 +380,8 @@ mod tests {
 
     #[test]
     fn test_shared_mut_independent_of_context() {
-        use crate::config::{AppConfig, AppState, DataPersistenceConfig};
         use crate::config::settings::RuntimeSettings;
+        use crate::config::{AppConfig, AppState, DataPersistenceConfig};
         use crate::frontend::topics::Topics;
 
         let mut config = AppConfig::default();

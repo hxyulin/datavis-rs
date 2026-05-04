@@ -30,14 +30,10 @@ impl PaneId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PaneKind {
     // Utility (singletons)
-    VariableBrowser,
     VariableList,
     Recorder,
     // Visualizers (multiple instances allowed)
     TimeSeries,
-    Watcher,
-    FftView,
-    /// Keil-style live watch with on-demand expansion.
     LiveWatch,
 }
 
@@ -188,16 +184,16 @@ impl Workspace {
 
             // Parse the pane kind from string
             let kind = match pane_info.kind.as_str() {
-                "VariableBrowser" => PaneKind::VariableBrowser,
                 "VariableList" => PaneKind::VariableList,
                 "Recorder" => PaneKind::Recorder,
                 "TimeSeries" => PaneKind::TimeSeries,
-                "Watcher" => PaneKind::Watcher,
-                "FftView" => PaneKind::FftView,
                 "LiveWatch" => PaneKind::LiveWatch,
-                // Legacy: skip PipelineEditor from old configs
-                "PipelineEditor" => {
-                    tracing::info!("Skipping legacy PipelineEditor pane from saved layout");
+                // Legacy panes that were removed in the architecture redesign — skip silently.
+                "PipelineEditor" | "VariableBrowser" | "Watcher" | "FftView" | "Exporter" => {
+                    tracing::info!(
+                        "Skipping legacy pane kind '{}' from saved layout",
+                        pane_info.kind
+                    );
                     continue;
                 }
                 _ => {
@@ -236,5 +232,39 @@ impl Workspace {
             layout.panes.len()
         );
         true
+    }
+
+    /// Returns true if at least one pane of the given kind is currently registered.
+    pub fn has_any_pane(&self, kind: PaneKind) -> bool {
+        self.pane_entries.values().any(|e| e.kind == kind)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_has_any_pane_empty() {
+        let ws = Workspace::new();
+        assert!(!ws.has_any_pane(PaneKind::TimeSeries));
+        assert!(!ws.has_any_pane(PaneKind::LiveWatch));
+    }
+
+    #[test]
+    fn test_has_any_pane_after_register() {
+        let mut ws = Workspace::new();
+        ws.register_pane(PaneKind::TimeSeries, "Plot");
+        assert!(ws.has_any_pane(PaneKind::TimeSeries));
+        assert!(!ws.has_any_pane(PaneKind::LiveWatch));
+    }
+
+    #[test]
+    fn test_has_any_pane_after_remove() {
+        let mut ws = Workspace::new();
+        let id = ws.register_pane(PaneKind::TimeSeries, "Plot");
+        assert!(ws.has_any_pane(PaneKind::TimeSeries));
+        ws.remove_pane(id);
+        assert!(!ws.has_any_pane(PaneKind::TimeSeries));
     }
 }

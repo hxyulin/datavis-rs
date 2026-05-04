@@ -1,15 +1,42 @@
-//! # DataVis-RS: SWD-based Data Visualizer
+//! # DataVis-RS: Real-time embedded variable visualizer
 //!
 //! A real-time data visualization tool that uses Serial Wire Debug (SWD) to observe
-//! variables on embedded devices. The architecture follows the "SWD-Observer Pattern"
-//! which separates the SWD polling backend from the UI rendering frontend.
+//! variables on embedded devices.
 //!
-//! ## Architecture
+//! ## Two-layer architecture
 //!
-//! - **Backend**: Handles SWD polling via probe-rs in a separate thread
-//! - **Frontend**: Renders the UI using eframe/egui with egui_plot for graphs
-//! - **Scripting**: Rhai-based variable converters for transforming raw values
-//! - **Communication**: Crossbeam channels for thread-safe data transfer
+//! ```text
+//! ┌──────────────────────────────────┐
+//! │  Frontend  (eframe/egui + egui_dock)  │
+//! │  DataVisApp — four pane kinds:         │
+//! │    TimeSeries  LiveWatch               │
+//! │    VariableList  Recorder              │
+//! └───────────────┬──────────────────┘
+//!                 │ BackendCommand / BackendMessage
+//!                 │ (crossbeam-channel)
+//! ┌───────────────▼──────────────────┐
+//! │  BackendWorker  (single thread)        │
+//! │  probe-rs / OpenOCD / mock probe       │
+//! │  + watch scheduler                     │
+//! └──────────────────────────────────┘
+//! ```
+//!
+//! There is no middle "pipeline" or routing layer. The frontend talks directly to the
+//! backend worker via [`backend::BackendCommand`] / [`backend::BackendMessage`] carried
+//! over a pair of `crossbeam-channel` channels bundled in [`backend::FrontendReceiver`].
+//!
+//! ## Two coexisting subsystems
+//!
+//! - **Plot** — Variables polled at a configurable rate, optionally transformed by a Rhai
+//!   converter script, shown in multi-instance [`frontend::panes::TimeSeriesState`] panes.
+//!   Session capture and CSV export live in the [`frontend::panes::RecorderPaneState`] pane.
+//! - **Live Watch** — Keil-style on-demand DWARF variable tree; no transformation, no
+//!   recording. The [`frontend::panes::LiveWatchState`] pane polls leaves through the
+//!   watch scheduler running in the same backend thread.
+//!
+//! Pane presence in the workspace drives subsystem on/off (lazy init):
+//! opening a `TimeSeries` pane auto-starts collection; closing the last one stops it.
+//! Same symmetry applies to `LiveWatch` and the watch poll rate.
 //!
 //! ## Configuration
 //!
@@ -43,6 +70,7 @@
 //!         (AppConfig::default(), None)
 //!     };
 //!
+//!     // Backend and frontend communicate via FrontendReceiver — no bridge layer.
 //!     let (backend, frontend_receiver) = SwdBackend::new(config.clone());
 //!
 //!     std::thread::spawn(move || backend.run());
@@ -58,6 +86,8 @@
 //!                 config,
 //!                 app_state,
 //!                 project_path,
+//!                 None,
+//!                 Default::default(),
 //!             )))
 //!         }),
 //!     )
@@ -67,7 +97,6 @@
 // Initialize i18n at the crate root
 rust_i18n::i18n!("locales", fallback = "en");
 
-pub mod analysis;
 pub mod app;
 pub mod backend;
 pub mod config;
@@ -75,7 +104,6 @@ pub mod error;
 pub mod frontend;
 pub mod i18n;
 pub mod menu;
-pub mod pipeline;
 pub mod scripting;
 pub mod session;
 pub mod types;

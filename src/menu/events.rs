@@ -64,9 +64,6 @@ impl MenuEvent {
             // View menu
             MenuId::ViewToolbar => Some(MenuEvent::ToggleToolbar),
             MenuId::ViewStatusBar => Some(MenuEvent::ToggleStatusBar),
-            MenuId::ViewVariableBrowser => Some(MenuEvent::Action(Box::new(AppAction::OpenPane(
-                PaneKind::VariableBrowser,
-            )))),
             MenuId::ViewVariableList => Some(MenuEvent::Action(Box::new(AppAction::OpenPane(
                 PaneKind::VariableList,
             )))),
@@ -76,12 +73,6 @@ impl MenuEvent {
             MenuId::ViewNewTimeSeries => Some(MenuEvent::Action(Box::new(
                 AppAction::NewVisualizer(PaneKind::TimeSeries),
             ))),
-            MenuId::ViewNewWatcher => Some(MenuEvent::Action(Box::new(AppAction::NewVisualizer(
-                PaneKind::Watcher,
-            )))),
-            MenuId::ViewNewFft => Some(MenuEvent::Action(Box::new(AppAction::NewVisualizer(
-                PaneKind::FftView,
-            )))),
             MenuId::ViewResetLayout => Some(MenuEvent::Action(Box::new(AppAction::ResetLayout))),
 
             // Tools menu
