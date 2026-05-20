@@ -103,7 +103,7 @@ jobs:
           mv "xpack-openocd-${OPENOCD_VERSION}" openocd-bundle
 
       - name: Package
-        run: cargo packager --release --formats dmg --target aarch64-apple-darwin
+        run: cargo packager --release --formats app --target aarch64-apple-darwin
 
       - name: Bundle OpenOCD into DMG
         run: |
@@ -120,7 +120,7 @@ jobs:
           cp -r openocd-bundle/openocd/scripts "$APP_PATH/Contents/Resources/openocd/openocd/scripts"
           cp -r openocd-bundle/libexec "$APP_PATH/Contents/Resources/openocd/libexec"
           chmod +x "$APP_PATH/Contents/Resources/openocd/bin/openocd"
-          # Re-create DMG with bundled OpenOCD
+          # Create DMG with bundled OpenOCD
           hdiutil create -volname "Data Visualizer" -srcfolder "$APP_PATH" -ov -format UDZO "Data Visualizer_aarch64.dmg"
 
       - name: Upload DMG
@@ -168,7 +168,7 @@ jobs:
           mv "xpack-openocd-${OPENOCD_VERSION}" openocd-bundle
 
       - name: Package
-        run: cargo packager --release --formats dmg --target x86_64-apple-darwin
+        run: cargo packager --release --formats app --target x86_64-apple-darwin
 
       - name: Bundle OpenOCD into DMG
         run: |
@@ -185,7 +185,7 @@ jobs:
           cp -r openocd-bundle/openocd/scripts "$APP_PATH/Contents/Resources/openocd/openocd/scripts"
           cp -r openocd-bundle/libexec "$APP_PATH/Contents/Resources/openocd/libexec"
           chmod +x "$APP_PATH/Contents/Resources/openocd/bin/openocd"
-          # Re-create DMG with bundled OpenOCD
+          # Create DMG with bundled OpenOCD
           hdiutil create -volname "Data Visualizer" -srcfolder "$APP_PATH" -ov -format UDZO "Data Visualizer_x86_64.dmg"
 
       - name: Upload DMG
